@@ -119,3 +119,7 @@ as it works (see `AGENT_LOOP.md` step 9).
   the app-mention and message handlers, using the pure `_should_forward_message` filter to forward
   only human thread replies that don't mention the bot — avoiding the double-append when Slack
   delivers an in-thread mention as both an `app_mention` and a `message` event.
+- `slack_post` (`src/pan/gateway/slack_post.py`): the single Slack egress path (INV-4). Every
+  worker→thread post routes through this one function, which logs value-free (thread ts + text
+  length, never the body) and delegates to `SlackAdapter.post_message`; an adapter failure surfaces
+  as `SlackPostError`. Depends on the `SlackAdapter` Protocol, not a concrete — no Slack SDK import.

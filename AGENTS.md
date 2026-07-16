@@ -51,9 +51,10 @@ Current modules (Task 1, built):
 - `src/pan/gateway/app.py` — `BoltSlackAdapter`, Bolt Socket Mode gateway; `handle_event` auth →
   `:eyes:` ack → inbox append (INV-1); sole Slack SDK importer + client-construction point (BR-1/BR-3).
 
+- `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (INV-4); value-free.
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (Task 13).
 - `src/pan/spawn.py` — `ClaudeLauncher` and `spawn_worker` orchestration (Task 14).
 - `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed-nudge callback (Task 15).
 - `src/pan/hooks/{stop,notification,pretooluse_gate}.py` — Claude Code hook entrypoints (Tasks 16-17).
