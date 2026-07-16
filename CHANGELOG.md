@@ -41,3 +41,13 @@ as it works (see `AGENT_LOOP.md` step 9).
   malformed JSON, or a missing required field is translated to `ConfigMissingError`; error messages
   carry only the path, never file contents. `PanConfig` holds no secrets (tokens live in
   `credentials.json`), so nothing here calls `.get_secret_value()`.
+- Credentials store (`src/pan/credentials.py`): `save_credentials` / `load_credentials` over
+  `~/.pan/credentials.json` (the gccli-style 0600 file, not the OS keychain — the deliberate,
+  BR-3-enforced deviation for Linux-VPS portability). `save_credentials` is the sole sanctioned
+  `.get_secret_value()` call site outside Slack-client construction; it writes the token payload to a
+  fresh `O_EXCL` temp file created at 0600 and atomically `os.replace`s it into place, so a secret
+  never touches disk at looser-than-0600 permissions even when overwriting a pre-existing loose file.
+  `load_credentials` parses the JSON at the boundary into `SlackCredentials` (`SecretStr` fields),
+  raises `CredentialsError` on a missing or malformed file, and warns (via the named logger, mode and
+  path only — never a token) when the file is group/other-readable. Tokens stay `SecretStr` end to
+  end and mask as `**********` in repr/str.
