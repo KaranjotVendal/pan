@@ -23,7 +23,7 @@ Current modules (Task 1, built):
   default WARNING; idempotent; `propagate=False`).
 - `src/pan/errors.py` — the `PanError` taxonomy (all nine subclasses).
 - `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
-  `InboxStore`, `ThreadMap`, `HerdrAdapter` today; `SlackAdapter`, `GitWorktreeAdapter`,
+  `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter` today; `SlackAdapter`,
   `MorcliAdapter`, `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
@@ -38,10 +38,11 @@ Current modules (Task 1, built):
   (INV-7); `Clock` injected for deterministic `updated_at`.
 
 - `src/pan/adapters/herdr.py` — `ShellHerdrAdapter`, shells the real `herdr` CLI (BR-2, INV-8).
+- `src/pan/adapters/git_worktree.py` — `ShellGitWorktreeAdapter`, shells `git worktree`; `--force`
+  teardown; branch-escape guard (BR-2, INV-8).
 
 Planned modules (per the plan, one line each):
 
-- `src/pan/adapters/git_worktree.py` — `ShellGitWorktreeAdapter`, shells `git worktree` (Task 9).
 - `src/pan/adapters/morcli.py` — `ShellMorcliAdapter`, shells `morcli` (Task 10).
 - `src/pan/gateway/__init__.py`, `src/pan/gateway/auth.py` — pure `auth_check` (Task 11).
 - `src/pan/gateway/app.py` — `BoltSlackAdapter`, event handler, `:eyes:` ack, inbox append (Task 12).

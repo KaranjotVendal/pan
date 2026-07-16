@@ -6,9 +6,8 @@ from typing import Protocol
 
 from pan.models import InboxItem, ThreadRecord, WorkerStatus
 
-# The remaining seam Protocols (SlackAdapter, GitWorktreeAdapter, MorcliAdapter, AgentLauncher,
-# InboxWatcher) land here as their implementing tasks arrive, so every seam has a single import
-# point.
+# The remaining seam Protocols (SlackAdapter, MorcliAdapter, AgentLauncher, InboxWatcher) land
+# here as their implementing tasks arrive, so every seam has a single import point.
 
 
 class Clock(Protocol):
@@ -41,3 +40,9 @@ class HerdrAdapter(Protocol):
     def send_text(self, pane_id: str, text: str) -> None: ...
 
     def kill_pane(self, pane_id: str) -> None: ...
+
+
+class GitWorktreeAdapter(Protocol):
+    def create_worktree(self, repo: Path, branch: str, base: Path) -> Path: ...
+
+    def remove_worktree(self, path: Path) -> None: ...

@@ -80,3 +80,12 @@ as it works (see `AGENT_LOOP.md` step 9).
   subprocess failures, non-JSON output, and OS errors become `HerdrError`. Logs are value-free (pane/
   workspace ids and text length only — never the message body). The exact nudge keystroke and JSON key
   names are flagged for live reconfirmation (R-2).
+- `ShellGitWorktreeAdapter` (`src/pan/adapters/git_worktree.py`), implementing the new
+  `GitWorktreeAdapter` seam Protocol: the only module permitted to shell `git` (BR-2).
+  `create_worktree(repo, branch, base)` runs `git -C <repo> worktree add <base>/<branch> -b <branch>`
+  and returns the worktree `Path`, rejecting (`SpawnError`) a branch whose target would escape `base`
+  (traversal guard via `is_relative_to`). `remove_worktree(path)` runs `git -C <path> worktree remove
+  --force <path>` — teardown forces removal because a worker leaves its worktree dirty, and its result
+  is already captured by then. Git failures (non-zero exit with stderr detail, or a missing git
+  binary) translate to `SpawnError`; only a `pathlib.Path` crosses the boundary (INV-8). Subprocess is
+  a list argv (no shell injection). Logs are value-free.
