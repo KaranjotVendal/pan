@@ -15,6 +15,7 @@ from pan.adapters.herdr import ShellHerdrAdapter
 from pan.adapters.morcli import ShellMorcliAdapter
 from pan.config import load_config
 from pan.credentials import load_credentials, save_credentials
+from pan.directive import parse_directive
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -116,11 +117,22 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
     config = _config()
     items = FileInboxStore(config.paths.inbox).drain()
+    # Attach the deterministically-parsed directive to each item so the orchestrator
+    # reads the mode/cleaned_text from here (parse_directive runs in code) rather than
+    # re-deriving it by judgment — enforcing INV-3.
     if as_json:
-        typer.echo(json.dumps([item.model_dump(mode="json") for item in items]))
+        payload = [
+            {
+                "item": item.model_dump(mode="json"),
+                "directive": parse_directive(item.raw_text).model_dump(mode="json"),
+            }
+            for item in items
+        ]
+        typer.echo(json.dumps(payload))
         return
     for item in items:
-        typer.echo(f"{item.id} {item.channel} {item.thread_ts}")
+        directive = parse_directive(item.raw_text)
+        typer.echo(f"{item.id} {item.channel} {item.thread_ts} {directive.mode.value}")
 
 
 @app.command()

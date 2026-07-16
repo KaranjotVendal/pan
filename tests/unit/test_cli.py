@@ -83,7 +83,10 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
     assert result.exit_code == 0
     emitted = json.loads(result.stdout)
-    assert [item["id"] for item in emitted] == ["Ev1"]
+    assert [entry["item"]["id"] for entry in emitted] == ["Ev1"]
+    # The deterministically-parsed directive travels with each item (INV-3).
+    assert emitted[0]["directive"]["mode"] == "delegate"
+    assert emitted[0]["directive"]["cleaned_text"] == "do it"
     # Drain emptied the store.
     assert FileInboxStore(config.paths.inbox).drain() == []
 

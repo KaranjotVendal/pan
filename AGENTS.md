@@ -67,10 +67,13 @@ Current modules (Task 1, built):
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer toolbelt (gateway/config/inbox/spawn/threads/
   slack-post/status/stop/pause) + single `_run` error boundary mapping `PanError` → exit code.
 
+- `src/pan/skills/orchestrating/SKILL.md` — the orchestrator's drain → read-directive → route loop
+  prose; mechanical steps are `pan` subcommands, model does only the fuzzy reuse/repo/comprehension calls.
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/skills/orchestrating/SKILL.md` — drain-classify-route loop prose (Task 19).
-- `src/pan/power.py`, `launchd/*.plist.template`, `README.md` — always-on and smoke (Task 20).
+- `src/pan/power.py`, `launchd/*.plist.template`, `README.md` — always-on and smoke (Task 20, DEFERRED
+  to the final human-driven session — live).
 
 Other locations:
 

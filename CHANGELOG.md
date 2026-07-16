@@ -175,3 +175,14 @@ as it works (see `AGENT_LOOP.md` step 9).
   refinements over the plan's sketch: `spawn`/`slack-post` take `--channel` (channel isn't on
   `ThreadRecord`), `spawn` takes `--repo` (default cwd), and `status`/`stop` key on `--thread`
   (the thread map is keyed by `thread_ts`) with `status` resolving the morcli handle from the record.
+- Orchestrating skill (`src/pan/skills/orchestrating/SKILL.md`): the prose the persistent
+  `pan-orchestrator` session runs on each inbox nudge — a drain → read-directive → look-up-binding →
+  route loop. It shells `pan inbox drain --json` (which now attaches the deterministically-parsed
+  `directive` block per item, so mode is fixed in code per INV-3 — see below), then routes on a
+  precedence ladder: STATUS first (answer from `pan status`, or a "no active worker" note; never relay
+  an empty status into a pane), then a live-worker relay, then a fresh spawn for a finished/absent
+  thread or `force_new`. The skill states explicitly that the model makes only the fuzzy calls
+  (reuse-vs-spawn, repo, task comprehension) and every mechanical step is a `pan` subcommand.
+- `pan inbox drain --json` now runs `parse_directive` in code and emits `{"item", "directive"}` per
+  entry, so the orchestrator reads the mode/`cleaned_text` deterministically rather than re-deriving
+  them by judgment (enforces INV-3; the flag table stays the single source of truth in `directive.py`).
