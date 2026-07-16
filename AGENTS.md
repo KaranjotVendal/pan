@@ -28,10 +28,10 @@ Current modules (Task 1, built):
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
   pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
+- `src/pan/directive.py` — `parse_directive`, pure deterministic flag parsing (INV-3).
 
 Planned modules (per the plan, one line each):
 
-- `src/pan/directive.py` — `parse_directive`, pure deterministic flag parsing (Task 3).
 - `src/pan/config.py` — `load_config` composition root over `~/.config/pan/config.json` (Task 4).
 - `src/pan/credentials.py` — load/save `SlackCredentials` at `~/.pan/credentials.json`, 0600 (Task 5).
 - `src/pan/inbox.py` — `FileInboxStore`, atomic drain, event-id dedupe (Task 6).
