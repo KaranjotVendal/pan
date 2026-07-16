@@ -100,3 +100,9 @@ as it works (see `AGENT_LOOP.md` step 9).
   extends the tech-spec's original nine-item taxonomy to ten — no existing error fit (reusing
   `HerdrError`, whose meaning is "herdr subprocess failed", would be a misnomer), and the morcli
   adapter genuinely introduces this failure mode.
+- `auth_check` (`src/pan/gateway/auth.py`): the gateway's safety gate 2 — pure allowlist + channel
+  policy enforced before any work. Returns `None` when the sender is in the `users` mapping and the
+  channel is permitted (the `"*"` wildcard means all channels, or the channel is explicitly listed);
+  raises `UnauthorizedSenderError` otherwise. Fail-closed: an unknown sender, an empty `users` map,
+  and an explicitly empty `channels` list all deny. Pure logic — no Slack SDK import — and the
+  denial is logged value-free (channel only, no sender payload).

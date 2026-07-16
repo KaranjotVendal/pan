@@ -45,9 +45,11 @@ Current modules (Task 1, built):
 - `src/pan/adapters/morcli.py` — `ShellMorcliAdapter`, shells `morcli streams --json`, maps agent
   status to `WorkerStatus` (BR-2, INV-8); raises `MorcliError`.
 
+- `src/pan/gateway/__init__.py`, `src/pan/gateway/auth.py` — pure `auth_check` (safety gate 2;
+  fail-closed allowlist + channel policy; no Slack SDK import).
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/gateway/__init__.py`, `src/pan/gateway/auth.py` — pure `auth_check` (Task 11).
 - `src/pan/gateway/app.py` — `BoltSlackAdapter`, event handler, `:eyes:` ack, inbox append (Task 12).
 - `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (Task 13).
 - `src/pan/spawn.py` — `ClaudeLauncher` and `spawn_worker` orchestration (Task 14).
