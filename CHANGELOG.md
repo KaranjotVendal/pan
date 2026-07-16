@@ -61,3 +61,10 @@ as it works (see `AGENT_LOOP.md` step 9).
   `received_at`, and empties the store. A malformed entry is quarantined to `.corrupt` and surfaced as
   `InboxError`, while cleanly-parsed siblings are restored for a later drain rather than lost. Logs are
   value-free (id/channel/count only, never `raw_text`).
+- `FileThreadMap` (`src/pan/threadmap.py`), implementing the new `ThreadMap` seam Protocol (added to
+  `src/pan/seams.py`): the single source of truth for the thread-to-worker binding (INV-7), a JSON
+  object at `~/.pan/threads.json` keyed by `thread_ts`. `put` upserts a `ThreadRecord`, `get` returns
+  the record or `None`, and `update_status` transitions the worker status and bumps `updated_at` from
+  an injected `Clock` seam (so the timestamp is deterministic in tests), preserving every other field;
+  it raises `ThreadNotFoundError` when the thread is unknown. Writes are atomic (temp-file + replace)
+  and `Path`/enum/`datetime` fields survive the disk round-trip. Logs are value-free (thread/status).
