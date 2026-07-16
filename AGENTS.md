@@ -21,7 +21,9 @@ Current modules (Task 1, built):
 - `src/pan/__init__.py` — package marker.
 - `src/pan/logging.py` — `initialise_logger` (file DEBUG, console on stderr from `PAN_LOG_LEVEL`,
   default WARNING; idempotent; `propagate=False`).
-- `src/pan/errors.py` — the `PanError` taxonomy (all nine subclasses).
+- `src/pan/errors.py` — the `PanError` taxonomy (the original nine subclasses plus `MorcliError`,
+  added in the morcli-adapter task for morcli subprocess failures — a deliberate extension of the
+  tech-spec's 9-item list).
 - `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
   `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter` today; `SlackAdapter`,
   `MorcliAdapter`, `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
@@ -40,10 +42,11 @@ Current modules (Task 1, built):
 - `src/pan/adapters/herdr.py` — `ShellHerdrAdapter`, shells the real `herdr` CLI (BR-2, INV-8).
 - `src/pan/adapters/git_worktree.py` — `ShellGitWorktreeAdapter`, shells `git worktree`; `--force`
   teardown; branch-escape guard (BR-2, INV-8).
+- `src/pan/adapters/morcli.py` — `ShellMorcliAdapter`, shells `morcli streams --json`, maps agent
+  status to `WorkerStatus` (BR-2, INV-8); raises `MorcliError`.
 
 Planned modules (per the plan, one line each):
 
-- `src/pan/adapters/morcli.py` — `ShellMorcliAdapter`, shells `morcli` (Task 10).
 - `src/pan/gateway/__init__.py`, `src/pan/gateway/auth.py` — pure `auth_check` (Task 11).
 - `src/pan/gateway/app.py` — `BoltSlackAdapter`, event handler, `:eyes:` ack, inbox append (Task 12).
 - `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (Task 13).

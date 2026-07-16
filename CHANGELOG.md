@@ -89,3 +89,14 @@ as it works (see `AGENT_LOOP.md` step 9).
   is already captured by then. Git failures (non-zero exit with stderr detail, or a missing git
   binary) translate to `SpawnError`; only a `pathlib.Path` crosses the boundary (INV-8). Subprocess is
   a list argv (no shell injection). Logs are value-free.
+- `ShellMorcliAdapter` (`src/pan/adapters/morcli.py`), implementing the new `MorcliAdapter` seam
+  Protocol: the only module permitted to shell `morcli` (BR-2). `session_status(handle)` runs
+  `morcli streams --json`, finds the stream whose `session_id` or `workspace_id` matches the handle
+  (absorbing the open R-7 handle-binding ambiguity), and maps the agent status to a `WorkerStatus`
+  (`working`/`idle` → RUNNING, `blocked` → BLOCKED, `done` → DONE, `unknown` → FAILED). An
+  unrecognized status, an unknown handle, non-JSON/non-list output, a non-zero exit, or a missing
+  `morcli` binary all raise `MorcliError`; only a `WorkerStatus` crosses the boundary (INV-8).
+- New `MorcliError` (`src/pan/errors.py`): a `PanError` subclass for morcli subprocess failures. This
+  extends the tech-spec's original nine-item taxonomy to ten — no existing error fit (reusing
+  `HerdrError`, whose meaning is "herdr subprocess failed", would be a misnomer), and the morcli
+  adapter genuinely introduces this failure mode.
