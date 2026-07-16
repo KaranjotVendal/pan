@@ -61,9 +61,11 @@ Current modules (Task 1, built):
 - `src/pan/hooks/{stop,notification}.py` — Stop/Notification hook cores: parse hook JSON → resolve
   thread → post via `slack_post` → mark DONE/BLOCKED; `thread_ts`/`channel` injected, `stdin` seam.
 
+- `src/pan/hooks/pretooluse_gate.py` — dormant gated-ops PreToolUse gate (safety gate 4); empty
+  `gated_ops` → allow; match → approval + block on decision; deny → `GatedOpDeniedError` + deny JSON.
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/hooks/pretooluse_gate.py` — dormant gated-ops PreToolUse gate (Task 17).
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer app, sub-apps, single `_run` error boundary (Task 18).
 - `src/pan/skills/orchestrating/SKILL.md` — drain-classify-route loop prose (Task 19).
 - `src/pan/power.py`, `launchd/*.plist.template`, `README.md` — always-on and smoke (Task 20).

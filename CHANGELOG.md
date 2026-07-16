@@ -153,3 +153,14 @@ as it works (see `AGENT_LOOP.md` step 9).
   command at spawn — since the Claude Code payloads carry no thread context; `stdin` is an injectable
   seam for testing. Logs are value-free (thread + status). The transcript shape and the spawn-time
   correlation are flagged for live reconfirmation.
+- Dormant gated-ops gate (`src/pan/hooks/pretooluse_gate.py`): safety gate 4, built but inert in v1.
+  `pretooluse_gate` parses the Claude Code PreToolUse hook JSON into a frozen boundary model, matches
+  the pending command against `PanConfig.gated_ops`, and — with `gated_ops` empty (the v1 default) —
+  emits an allow decision and touches no Slack, so populating `gated_ops` later activates the gate
+  with no code change. On a match it posts an approval request through the single `slack_post` egress
+  and blocks on the decision (the inbox round-trip in production, an injected callable in tests):
+  approve emits an allow decision; deny emits a deny decision to stdout (the sanctioned BR-5
+  exception, via `stdout.write` + flush — never `print`) and raises `GatedOpDeniedError`. The gated-op
+  log is value-free (the matched config pattern + the allow/deny bool, never the full command). The
+  decision-JSON format and the required fail-closed behavior on approval-infra failure are flagged in
+  TODOS.md for when the gate is activated.
