@@ -26,7 +26,7 @@ Current modules (Task 1, built):
   tech-spec's 9-item list).
 - `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
   `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`, `SlackAdapter`,
-  `AgentLauncher` today; `InboxWatcher` lands here as its task arrives).
+  `AgentLauncher`, `InboxWatcher` — all seams now defined).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
   pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
@@ -56,9 +56,10 @@ Current modules (Task 1, built):
 - `src/pan/spawn.py` — `ClaudeLauncher` + `spawn_worker`: worktree → workspace → launch → thread-map
   put → ack (INV-4/INV-7); `AgentLauncher.launch(worktree, pane_id, brief) -> None`.
 
+- `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed content-free nudge to the orchestrator (INV-2).
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed-nudge callback (Task 15).
 - `src/pan/hooks/{stop,notification,pretooluse_gate}.py` — Claude Code hook entrypoints (Tasks 16-17).
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer app, sub-apps, single `_run` error boundary (Task 18).
 - `src/pan/skills/orchestrating/SKILL.md` — drain-classify-route loop prose (Task 19).

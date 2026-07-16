@@ -136,3 +136,9 @@ as it works (see `AGENT_LOOP.md` step 9).
   `launch(…, workspace, …) -> ThreadRecord`, since the launcher needs the pane id (not the workspace
   id) to send the brief and the orchestrator owns record construction (the record's required
   thread_ts/channel are not available to the launcher). Spawn logs are value-free (label + thread ts).
+- `WatchdogInboxWatcher` (`src/pan/watcher.py`), implementing the final seam Protocol `InboxWatcher`:
+  the filesystem watcher that wakes the orchestrator. `on_inbox_changed` issues exactly one fixed,
+  content-free nudge to the orchestrator pane via `HerdrAdapter.nudge` — no payload ever crosses the
+  pane (INV-2); the request travels through the durable inbox. `start()` (live observer thread, not
+  unit-tested) wires a `watchdog` observer over the inbox dir whose callback invokes
+  `on_inbox_changed`. Value-free logs.

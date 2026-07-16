@@ -6,8 +6,7 @@ from typing import Protocol
 
 from pan.models import InboxItem, ThreadRecord, WorkerStatus
 
-# The remaining seam Protocol (InboxWatcher) lands here as its implementing task arrives, so every
-# seam has a single import point.
+# Every seam Protocol lives here for a single import point.
 
 
 class SlackAdapter(Protocol):
@@ -65,3 +64,9 @@ class AgentLauncher(Protocol):
     # orchestrator (spawn_worker) owns ThreadRecord construction, since the record's
     # required thread_ts/channel context is not available to the launcher.
     def launch(self, worktree: Path, pane_id: str, brief: str) -> None: ...
+
+
+class InboxWatcher(Protocol):
+    def on_inbox_changed(self) -> None: ...
+
+    def start(self) -> None: ...
