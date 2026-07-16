@@ -26,10 +26,11 @@ Current modules (Task 1, built):
   `SlackAdapter`, `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`,
   `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
+- `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
+  pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
 
 Planned modules (per the plan, one line each):
 
-- `src/pan/models.py` — enums and domain/config pydantic models (Task 2).
 - `src/pan/directive.py` — `parse_directive`, pure deterministic flag parsing (Task 3).
 - `src/pan/config.py` — `load_config` composition root over `~/.config/pan/config.json` (Task 4).
 - `src/pan/credentials.py` — load/save `SlackCredentials` at `~/.pan/credentials.json`, 0600 (Task 5).

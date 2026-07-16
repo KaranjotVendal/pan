@@ -21,3 +21,10 @@ as it works (see `AGENT_LOOP.md` step 9).
 - Seam Protocols (`src/pan/seams.py`): `Clock` and `IdGen` as the single import point for injectable
   seams (the remaining seam Protocols land here as their tasks arrive).
 - Clock and id-generator adapters (`src/pan/adapters/clock.py`): `SystemClock` and `UuidGen`.
+- Domain and config models (`src/pan/models.py`): the `TaskMode`, `WorkerStatus`, `Autonomy`, and
+  `Agent` `StrEnum`s; the frozen domain models `Directive` and `InboxItem` and the mutable
+  `ThreadRecord`; and the config models `SlackCredentials`, `SlackConfig`, `UserPolicy`,
+  `OrchestratorConfig`, `Defaults`, `PanPaths`, and the composed `PanConfig`. Tokens are typed
+  `SecretStr`, paths are `pathlib.Path`, and models are frozen wherever the value is immutable so the
+  gateway, config loader, and stores can parse untrusted JSON into typed domain objects at the
+  boundary.
