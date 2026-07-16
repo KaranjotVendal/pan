@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 from pan.models import InboxItem, ThreadRecord, WorkerStatus
 
-# The remaining seam Protocols (SlackAdapter, HerdrAdapter, GitWorktreeAdapter, MorcliAdapter,
-# AgentLauncher, InboxWatcher) land here as their implementing tasks arrive, so every seam has
-# a single import point.
+# The remaining seam Protocols (SlackAdapter, GitWorktreeAdapter, MorcliAdapter, AgentLauncher,
+# InboxWatcher) land here as their implementing tasks arrive, so every seam has a single import
+# point.
 
 
 class Clock(Protocol):
@@ -30,3 +31,13 @@ class ThreadMap(Protocol):
     def put(self, record: ThreadRecord) -> None: ...
 
     def update_status(self, thread_ts: str, status: WorkerStatus) -> None: ...
+
+
+class HerdrAdapter(Protocol):
+    def create_workspace(self, label: str, cwd: Path) -> tuple[str, str]: ...
+
+    def nudge(self, pane_id: str) -> None: ...
+
+    def send_text(self, pane_id: str, text: str) -> None: ...
+
+    def kill_pane(self, pane_id: str) -> None: ...

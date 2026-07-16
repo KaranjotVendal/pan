@@ -68,3 +68,15 @@ as it works (see `AGENT_LOOP.md` step 9).
   an injected `Clock` seam (so the timestamp is deterministic in tests), preserving every other field;
   it raises `ThreadNotFoundError` when the thread is unknown. Writes are atomic (temp-file + replace)
   and `Path`/enum/`datetime` fields survive the disk round-trip. Logs are value-free (thread/status).
+- `ShellHerdrAdapter` (`src/pan/adapters/herdr.py`), implementing the new `HerdrAdapter` seam Protocol
+  (added to `src/pan/seams.py`): shells the real `herdr` CLI over its JSON socket-API helpers, the only
+  module permitted to invoke `herdr`/`subprocess` (BR-2). `create_workspace` runs `herdr workspace
+  create --cwd <path> --label <label> --no-focus` and, because that command returns only workspace
+  metadata (no pane id), resolves the created pane with a follow-up `herdr pane list --workspace <id>`
+  (selecting the pane in the workspace's active tab, else the first pane), returning `(workspace_id,
+  pane_id)`. `nudge` issues the fixed, content-free `herdr pane send-keys <pane> Enter` (no payload
+  crosses the pane — INV-2); `send_text`/`kill_pane` map to `pane send-text` / `pane close`. All herdr
+  JSON is parsed inside the adapter and only plain `pan` domain values cross the boundary (INV-8);
+  subprocess failures, non-JSON output, and OS errors become `HerdrError`. Logs are value-free (pane/
+  workspace ids and text length only — never the message body). The exact nudge keystroke and JSON key
+  names are flagged for live reconfirmation (R-2).
