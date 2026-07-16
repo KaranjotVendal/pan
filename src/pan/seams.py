@@ -6,8 +6,16 @@ from typing import Protocol
 
 from pan.models import InboxItem, ThreadRecord, WorkerStatus
 
-# The remaining seam Protocols (SlackAdapter, AgentLauncher, InboxWatcher) land here as their
-# implementing tasks arrive, so every seam has a single import point.
+# The remaining seam Protocols (AgentLauncher, InboxWatcher) land here as their implementing tasks
+# arrive, so every seam has a single import point.
+
+
+class SlackAdapter(Protocol):
+    def add_reaction(self, channel: str, ts: str, name: str) -> None: ...
+
+    def post_message(self, channel: str, thread_ts: str, text: str) -> None: ...
+
+    def start(self) -> None: ...
 
 
 class Clock(Protocol):

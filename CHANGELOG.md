@@ -106,3 +106,16 @@ as it works (see `AGENT_LOOP.md` step 9).
   raises `UnauthorizedSenderError` otherwise. Fail-closed: an unknown sender, an empty `users` map,
   and an explicitly empty `channels` list all deny. Pure logic — no Slack SDK import — and the
   denial is logged value-free (channel only, no sender payload).
+- `BoltSlackAdapter` (`src/pan/gateway/app.py`), implementing the new `SlackAdapter` seam Protocol:
+  the always-on Bolt Socket Mode gateway and the sole importer of `slack_sdk`/`slack_bolt` (BR-1) and
+  the single Slack-client construction point (`.get_secret_value()` for the bot token in `__init__`
+  and the app token in `start()` — BR-3). Its `handle_event` parses an untrusted Slack event dict into
+  a typed `InboxItem` at the boundary, auth-checks the sender, adds a fast `:eyes:` reaction to the
+  message ts BEFORE appending (INV-1 ack ordering), and appends to the `InboxStore` — it never spawns,
+  classifies, or touches the thread map (stateless gateway, INV-1). A denied sender is dropped with no
+  reaction and no append. A top-level app-mention roots its thread at the message ts
+  (`is_thread_reply=False`); a reply carries the parent `thread_ts`. `add_reaction`/`post_message`
+  translate `SlackApiError` to `SlackPostError`. `start()` (live Socket Mode, not unit-tested) wires
+  the app-mention and message handlers, using the pure `_should_forward_message` filter to forward
+  only human thread replies that don't mention the bot — avoiding the double-append when Slack
+  delivers an in-thread mention as both an `app_mention` and a `message` event.

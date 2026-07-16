@@ -25,8 +25,8 @@ Current modules (Task 1, built):
   added in the morcli-adapter task for morcli subprocess failures — a deliberate extension of the
   tech-spec's 9-item list).
 - `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
-  `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter` today; `SlackAdapter`,
-  `MorcliAdapter`, `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
+  `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`, `SlackAdapter`
+  today; `AgentLauncher` and `InboxWatcher` land here as their tasks arrive).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
   pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
@@ -48,9 +48,11 @@ Current modules (Task 1, built):
 - `src/pan/gateway/__init__.py`, `src/pan/gateway/auth.py` — pure `auth_check` (safety gate 2;
   fail-closed allowlist + channel policy; no Slack SDK import).
 
+- `src/pan/gateway/app.py` — `BoltSlackAdapter`, Bolt Socket Mode gateway; `handle_event` auth →
+  `:eyes:` ack → inbox append (INV-1); sole Slack SDK importer + client-construction point (BR-1/BR-3).
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/gateway/app.py` — `BoltSlackAdapter`, event handler, `:eyes:` ack, inbox append (Task 12).
 - `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (Task 13).
 - `src/pan/spawn.py` — `ClaudeLauncher` and `spawn_worker` orchestration (Task 14).
 - `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed-nudge callback (Task 15).
