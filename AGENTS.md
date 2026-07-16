@@ -25,8 +25,8 @@ Current modules (Task 1, built):
   added in the morcli-adapter task for morcli subprocess failures — a deliberate extension of the
   tech-spec's 9-item list).
 - `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
-  `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`, `SlackAdapter`
-  today; `AgentLauncher` and `InboxWatcher` land here as their tasks arrive).
+  `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`, `SlackAdapter`,
+  `AgentLauncher` today; `InboxWatcher` lands here as its task arrives).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
   pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
@@ -53,9 +53,11 @@ Current modules (Task 1, built):
 
 - `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (INV-4); value-free.
 
+- `src/pan/spawn.py` — `ClaudeLauncher` + `spawn_worker`: worktree → workspace → launch → thread-map
+  put → ack (INV-4/INV-7); `AgentLauncher.launch(worktree, pane_id, brief) -> None`.
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/spawn.py` — `ClaudeLauncher` and `spawn_worker` orchestration (Task 14).
 - `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed-nudge callback (Task 15).
 - `src/pan/hooks/{stop,notification,pretooluse_gate}.py` — Claude Code hook entrypoints (Tasks 16-17).
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer app, sub-apps, single `_run` error boundary (Task 18).

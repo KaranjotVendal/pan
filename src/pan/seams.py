@@ -6,8 +6,8 @@ from typing import Protocol
 
 from pan.models import InboxItem, ThreadRecord, WorkerStatus
 
-# The remaining seam Protocols (AgentLauncher, InboxWatcher) land here as their implementing tasks
-# arrive, so every seam has a single import point.
+# The remaining seam Protocol (InboxWatcher) lands here as its implementing task arrives, so every
+# seam has a single import point.
 
 
 class SlackAdapter(Protocol):
@@ -58,3 +58,10 @@ class GitWorktreeAdapter(Protocol):
 
 class MorcliAdapter(Protocol):
     def session_status(self, handle: str) -> WorkerStatus: ...
+
+
+class AgentLauncher(Protocol):
+    # Starts a worker agent session in the given pane with the task brief. The
+    # orchestrator (spawn_worker) owns ThreadRecord construction, since the record's
+    # required thread_ts/channel context is not available to the launcher.
+    def launch(self, worktree: Path, pane_id: str, brief: str) -> None: ...

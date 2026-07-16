@@ -123,3 +123,16 @@ as it works (see `AGENT_LOOP.md` step 9).
   worker→thread post routes through this one function, which logs value-free (thread ts + text
   length, never the body) and delegates to `SlackAdapter.post_message`; an adapter failure surfaces
   as `SlackPostError`. Depends on the `SlackAdapter` Protocol, not a concrete — no Slack SDK import.
+- `spawn_worker` + `ClaudeLauncher` (`src/pan/spawn.py`), adding the `AgentLauncher` seam Protocol:
+  the worker-spawn orchestration. `spawn_worker` derives the stream label (`pan-<stream>`, or
+  `pan-<short-id>` when no stream is given) and runs create_worktree → create_workspace → launch →
+  `ThreadMap.put` (the SPAWNING record — the sole thread→worker binding, INV-7) → ack via `slack_post`
+  ("on it — stream pan-…", INV-4). A `SpawnError`/`HerdrError` from any step records a FAILED
+  `ThreadRecord`, posts a spawn-failed notice through the single egress path, and re-raises
+  `SpawnError`. `ClaudeLauncher.launch` starts the worker by sending `claude <shell-quoted brief>`
+  into the pane (herdr `send_text`) and submitting it with the fixed Enter nudge; the brief is
+  `shlex.quote`d so arbitrary task text can never run as a shell command. The `AgentLauncher` seam is
+  `launch(worktree, pane_id, brief) -> None` — a deliberate refinement of the plan's illustrative
+  `launch(…, workspace, …) -> ThreadRecord`, since the launcher needs the pane id (not the workspace
+  id) to send the brief and the orchestrator owns record construction (the record's required
+  thread_ts/channel are not available to the launcher). Spawn logs are value-free (label + thread ts).
