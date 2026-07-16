@@ -1,0 +1,14 @@
+# superpowers working artifacts (specs/plans) — local review only
+/docs/*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# environments / tooling caches
+.venv/
+.pytest_cache/
+.ruff_cache/

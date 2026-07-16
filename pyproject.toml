@@ -1,0 +1,52 @@
+[project]
+name = "pan"
+version = "0.1.0"
+description = "Slack-driven laptop coding-agent orchestrator"
+requires-python = ">=3.14"
+authors = [{ name = "Karanjot Vendal", email = "karanjotgharu60@gmail.com" }]
+dependencies = [
+    "pydantic>=2.13.4",
+    "slack-bolt>=1.30.0",
+    "typer>=0.27.0",
+    "watchdog>=6.0.0",
+]
+
+[project.scripts]
+pan = "pan.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pan"
+module-root = "src"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.src]
+include = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+    "ruff>=0.15.21",
+    "ty>=0.0.60",
+]
