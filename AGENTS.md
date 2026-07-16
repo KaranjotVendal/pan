@@ -22,9 +22,9 @@ Current modules (Task 1, built):
 - `src/pan/logging.py` — `initialise_logger` (file DEBUG, console on stderr from `PAN_LOG_LEVEL`,
   default WARNING; idempotent; `propagate=False`).
 - `src/pan/errors.py` — the `PanError` taxonomy (all nine subclasses).
-- `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen` today;
-  `SlackAdapter`, `InboxStore`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`, `MorcliAdapter`,
-  `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
+- `src/pan/seams.py` — the single import point for every seam `Protocol` (`Clock`, `IdGen`,
+  `InboxStore` today; `SlackAdapter`, `ThreadMap`, `HerdrAdapter`, `GitWorktreeAdapter`,
+  `MorcliAdapter`, `AgentLauncher`, `InboxWatcher` land here as their tasks arrive).
 - `src/pan/adapters/__init__.py`, `src/pan/adapters/clock.py` — `SystemClock`, `UuidGen`.
 - `src/pan/models.py` — enums (`TaskMode`, `WorkerStatus`, `Autonomy`, `Agent`) and domain/config
   pydantic models (`Directive`, `InboxItem`, `ThreadRecord`, `SlackCredentials`, `PanConfig`, ...).
@@ -33,9 +33,10 @@ Current modules (Task 1, built):
 - `src/pan/credentials.py` — load/save `SlackCredentials` at `~/.pan/credentials.json`, atomic 0600
   write; sole sanctioned `.get_secret_value()` call site outside Slack-client construction (BR-3).
 
+- `src/pan/inbox.py` — `FileInboxStore`, atomic claim/rename drain, event-id dedupe (INV-6, R-6).
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/inbox.py` — `FileInboxStore`, atomic drain, event-id dedupe (Task 6).
 - `src/pan/threadmap.py` — `FileThreadMap`, thread-to-worker binding (Task 7).
 - `src/pan/adapters/herdr.py` — `ShellHerdrAdapter`, shells `herdr` (Task 8).
 - `src/pan/adapters/git_worktree.py` — `ShellGitWorktreeAdapter`, shells `git worktree` (Task 9).

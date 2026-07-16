@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-# The remaining seam Protocols (SlackAdapter, InboxStore, ThreadMap, HerdrAdapter,
-# GitWorktreeAdapter, MorcliAdapter, AgentLauncher, InboxWatcher) are added here in
-# Task 2 once `pan.models` exists, so every seam has a single import point.
+from pan.models import InboxItem
+
+# The remaining seam Protocols (SlackAdapter, ThreadMap, HerdrAdapter, GitWorktreeAdapter,
+# MorcliAdapter, AgentLauncher, InboxWatcher) land here as their implementing tasks arrive,
+# so every seam has a single import point.
 
 
 class Clock(Protocol):
@@ -14,3 +16,9 @@ class Clock(Protocol):
 
 class IdGen(Protocol):
     def new_id(self) -> str: ...
+
+
+class InboxStore(Protocol):
+    def append(self, item: InboxItem) -> None: ...
+
+    def drain(self) -> list[InboxItem]: ...

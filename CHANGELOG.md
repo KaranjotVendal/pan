@@ -51,3 +51,13 @@ as it works (see `AGENT_LOOP.md` step 9).
   raises `CredentialsError` on a missing or malformed file, and warns (via the named logger, mode and
   path only — never a token) when the file is group/other-readable. Tokens stay `SecretStr` end to
   end and mask as `**********` in repr/str.
+- `FileInboxStore` (`src/pan/inbox.py`), implementing the new `InboxStore` seam Protocol (added to
+  `src/pan/seams.py`): a file-per-event on-disk inbox over `~/.pan/inbox/`. `append` writes each event
+  to `{event_id}.json` via a temp-file + atomic replace, using the Slack event id as the filename so a
+  redelivered event before a drain resolves to one file and is drained exactly once (INV-6); it rejects
+  an event id that is not a safe single path segment (no `/`, `\`, `..`, NUL) so a hostile id cannot
+  escape the inbox directory. `drain` claims each entry with an atomic rename (so a concurrent gateway
+  append or a second drainer cannot lose or double-return an event — R-6), returns the items ordered by
+  `received_at`, and empties the store. A malformed entry is quarantined to `.corrupt` and surfaced as
+  `InboxError`, while cleanly-parsed siblings are restored for a later drain rather than lost. Logs are
+  value-free (id/channel/count only, never `raw_text`).
