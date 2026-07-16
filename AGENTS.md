@@ -58,9 +58,12 @@ Current modules (Task 1, built):
 
 - `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed content-free nudge to the orchestrator (INV-2).
 
+- `src/pan/hooks/{stop,notification}.py` — Stop/Notification hook cores: parse hook JSON → resolve
+  thread → post via `slack_post` → mark DONE/BLOCKED; `thread_ts`/`channel` injected, `stdin` seam.
+
 Planned modules (per the plan, one line each):
 
-- `src/pan/hooks/{stop,notification,pretooluse_gate}.py` — Claude Code hook entrypoints (Tasks 16-17).
+- `src/pan/hooks/pretooluse_gate.py` — dormant gated-ops PreToolUse gate (Task 17).
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer app, sub-apps, single `_run` error boundary (Task 18).
 - `src/pan/skills/orchestrating/SKILL.md` — drain-classify-route loop prose (Task 19).
 - `src/pan/power.py`, `launchd/*.plist.template`, `README.md` — always-on and smoke (Task 20).

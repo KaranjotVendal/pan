@@ -142,3 +142,14 @@ as it works (see `AGENT_LOOP.md` step 9).
   pane (INV-2); the request travels through the durable inbox. `start()` (live observer thread, not
   unit-tested) wires a `watchdog` observer over the inbox dir whose callback invokes
   `on_inbox_changed`. Value-free logs.
+- Completion hooks (`src/pan/hooks/stop.py`, `src/pan/hooks/notification.py`): the reply layer that
+  runs when a worker finishes or needs input. Each parses the Claude Code hook JSON from stdin into a
+  frozen pydantic boundary model, resolves the `ThreadRecord` (raising `ThreadNotFoundError` — and
+  posting/transitioning nothing — when the thread is unknown), posts to the thread through the single
+  `slack_post` egress (INV-4), and transitions the worker status. `stop_hook` posts the final summary
+  (the last assistant text block extracted from the transcript JSONL, else a default) and marks
+  `DONE`; `notification_hook` posts the Notification `message` (the question, else a default) and
+  marks `BLOCKED`. The thread routing (`thread_ts`/`channel`) is injected — baked into the hook
+  command at spawn — since the Claude Code payloads carry no thread context; `stdin` is an injectable
+  seam for testing. Logs are value-free (thread + status). The transcript shape and the spawn-time
+  correlation are flagged for live reconfirmation.
