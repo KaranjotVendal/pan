@@ -164,3 +164,14 @@ as it works (see `AGENT_LOOP.md` step 9).
   log is value-free (the matched config pattern + the allow/deny bool, never the full command). The
   decision-JSON format and the required fail-closed behavior on approval-infra failure are flagged in
   TODOS.md for when the gate is activated.
+- Typer CLI toolbelt (`src/pan/cli.py`, `src/pan/__main__.py`): the `pan` console entry with sub-apps
+  `config`/`inbox`/`threads` and commands `gateway`, `config set-token`, `config show`, `inbox drain
+  --json`, `spawn`, `threads get`, `threads set`, `slack-post`, `status`, `stop`, `pause`. Each command
+  is a thin boundary that loads `PanConfig`, constructs the adapters it needs, and calls the pure core.
+  `_run()` is the single error boundary: it maps each `PanError` subclass to a documented exit code
+  (10–19, the base → 1) via `_exit_code_for`, translates the vendored click exceptions, and lets
+  unclassified exceptions surface as tracebacks (Principle 4); `main()` = `SystemExit(_run())`. `config
+  show` masks credentials (SecretStr serialization — never `.get_secret_value()`, R-4). Deliberate
+  refinements over the plan's sketch: `spawn`/`slack-post` take `--channel` (channel isn't on
+  `ThreadRecord`), `spawn` takes `--repo` (default cwd), and `status`/`stop` key on `--thread`
+  (the thread map is keyed by `thread_ts`) with `status` resolving the morcli handle from the record.
