@@ -34,3 +34,10 @@ as it works (see `AGENT_LOOP.md` step 9).
   → `target_stream`; `--agent <x>` parsed but reserved for v2. `cleaned_text` strips every recognized
   flag (including a dangling value-flag and a value-flag whose value is another flag) while preserving
   the task prose. No I/O and no model judgment, so `TaskMode` is deterministic per INV-3.
+- `load_config` (`src/pan/config.py`): the single config composition root. Reads
+  `~/.config/pan/config.json` (or an explicit path), parses the JSON at the boundary into a
+  `PanConfig`, expands `~` in the path-bearing fields (`paths.*` and `orchestrator.worktree_base`),
+  and falls back to model defaults for omitted optional sections. A missing file, non-object or
+  malformed JSON, or a missing required field is translated to `ConfigMissingError`; error messages
+  carry only the path, never file contents. `PanConfig` holds no secrets (tokens live in
+  `credentials.json`), so nothing here calls `.get_secret_value()`.
