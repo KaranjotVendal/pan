@@ -95,6 +95,7 @@ def test_thread_record_defaults_to_spawning() -> None:
         thread_ts="1718000000.000100",
         workspace_name="pan-task-3",
         workspace_id="ws_abc",
+        channel="C0001",
         worktree_path=Path("/Users/me/dev/pan-worktrees/task-3"),
         created_at=now,
         updated_at=now,
@@ -104,6 +105,21 @@ def test_thread_record_defaults_to_spawning() -> None:
     assert record.agent is Agent.CLAUDE
     assert record.pane_ids == []
     assert record.morcli_session is None
+
+
+def test_thread_record_carries_channel() -> None:
+    now = datetime(2026, 7, 16, 10, 0, 0)
+    record = ThreadRecord(
+        thread_ts="1718000000.000100",
+        workspace_name="pan-task-3",
+        workspace_id="ws_abc",
+        channel="C0001",
+        worktree_path=Path("/Users/me/dev/pan-worktrees/task-3"),
+        created_at=now,
+        updated_at=now,
+    )
+
+    assert record.channel == "C0001"
 
 
 @pytest.mark.parametrize(

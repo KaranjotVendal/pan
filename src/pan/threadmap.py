@@ -37,6 +37,14 @@ class FileThreadMap:
     def get(self, thread_ts: str) -> ThreadRecord | None:
         return self._read_all().get(thread_ts)
 
+    def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
+        # The completion hooks resolve their thread from the worker's cwd; the thread
+        # map stays the single source of truth (INV-7). First exact match wins.
+        for record in self._read_all().values():
+            if record.worktree_path == worktree_path:
+                return record
+        return None
+
     def put(self, record: ThreadRecord) -> None:
         records = self._read_all()
         records[record.thread_ts] = record

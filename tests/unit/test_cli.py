@@ -23,8 +23,10 @@ from pan.errors import (
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
+from pan.hooks.notification import notification_hook
+from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
-from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadRecord
+from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadRecord, WorkerStatus
 from pan.threadmap import FileThreadMap
 
 runner = CliRunner()
@@ -60,14 +62,15 @@ def _item(event_id: str) -> InboxItem:
     )
 
 
-def _record(thread_ts: str) -> ThreadRecord:
+def _record(thread_ts: str, worktree_path: Path = Path("/tmp/wt")) -> ThreadRecord:
     now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     return ThreadRecord(
         thread_ts=thread_ts,
         workspace_name="pan-task",
         workspace_id="ws1",
+        channel="C1",
         pane_ids=["p1"],
-        worktree_path=Path("/tmp/wt"),
+        worktree_path=worktree_path,
         created_at=now,
         updated_at=now,
     )
@@ -225,3 +228,85 @@ def test_run_maps_pan_error_to_exit_code(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(cli, "app", boom)
 
     assert cli._run() == 15
+
+
+class _HookThreadMap:
+    def __init__(self, record: ThreadRecord) -> None:
+        self._record = record
+        self.status_updates: list[tuple[str, WorkerStatus]] = []
+
+    def get(self, thread_ts: str) -> ThreadRecord | None:
+        return self._record if thread_ts == self._record.thread_ts else None
+
+    def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
+        return self._record if worktree_path == self._record.worktree_path else None
+
+    def put(self, record: ThreadRecord) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
+        self.status_updates.append((thread_ts, status))
+
+
+class _HookSlack:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, str, str]] = []
+
+    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
+        self.posts.append((channel, thread_ts, text))
+
+    def start(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+
+def _hook_payload(cwd: str, event: str) -> str:
+    return json.dumps({"hook_event_name": event, "cwd": cwd, "transcript_path": None})
+
+
+def test_hook_stop_resolves_by_cwd_posts_and_marks_done() -> None:
+    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
+    thread_map, slack = _HookThreadMap(record), _HookSlack()
+
+    cli._dispatch_completion_hook(stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, slack)
+
+    assert slack.posts[0][0:2] == ("C1", "t-1")
+    assert thread_map.status_updates == [("t-1", WorkerStatus.DONE)]
+
+
+def test_hook_notification_resolves_by_cwd_posts_and_marks_blocked() -> None:
+    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
+    thread_map, slack = _HookThreadMap(record), _HookSlack()
+    payload = json.dumps(
+        {"hook_event_name": "Notification", "cwd": "/wt/pan-a", "message": "need input"}
+    )
+
+    cli._dispatch_completion_hook(notification_hook, payload, thread_map, slack)
+
+    assert slack.posts == [("C1", "t-1", "need input")]
+    assert thread_map.status_updates == [("t-1", WorkerStatus.BLOCKED)]
+
+
+@pytest.mark.parametrize(
+    "raw_stdin",
+    ['{"hook_event_name": "Stop", "cwd": "/wt/other", "transcript_path": null}', "not json"],
+    ids=["cwd-matches-no-record", "unparseable-stdin"],
+)
+def test_hook_exits_cleanly_without_posting(raw_stdin: str) -> None:
+    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
+    thread_map, slack = _HookThreadMap(record), _HookSlack()
+
+    cli._dispatch_completion_hook(stop_hook, raw_stdin, thread_map, slack)
+
+    assert slack.posts == []
+    assert thread_map.status_updates == []
+
+
+def test_hook_subcommands_are_registered() -> None:
+    result = runner.invoke(cli.app, ["hook", "--help"])
+
+    assert result.exit_code == 0
+    assert "stop" in result.stdout
+    assert "notification" in result.stdout

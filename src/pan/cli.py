@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -31,9 +34,12 @@ from pan.errors import (
 )
 from pan.gateway.app import BoltSlackAdapter
 from pan.gateway.slack_post import slack_post
+from pan.hooks.notification import notification_hook
+from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
 from pan.logging import initialise_logger
 from pan.models import PanConfig, SlackCredentials, WorkerStatus
+from pan.seams import SlackAdapter, ThreadMap
 from pan.spawn import ClaudeLauncher, spawn_worker
 from pan.threadmap import FileThreadMap
 
@@ -45,9 +51,11 @@ app = typer.Typer(
 config_app = typer.Typer(no_args_is_help=True, help="Manage config and credentials")
 inbox_app = typer.Typer(no_args_is_help=True, help="Inbox queue operations")
 threads_app = typer.Typer(no_args_is_help=True, help="Thread-map operations")
+hook_app = typer.Typer(no_args_is_help=True, help="Claude Code worker hook entrypoints")
 app.add_typer(config_app, name="config")
 app.add_typer(inbox_app, name="inbox")
 app.add_typer(threads_app, name="threads")
+app.add_typer(hook_app, name="hook")
 
 # Documented taxonomy -> exit-code table. Unclassified exceptions are defects and
 # surface as tracebacks (Principle 4), never mapped here.
@@ -199,6 +207,59 @@ def slack_post_command(
         credentials, config, FileInboxStore(config.paths.inbox), SystemClock()
     )
     slack_post(adapter, channel, thread, text)
+
+
+def _extract_cwd(raw_stdin: str) -> str | None:
+    try:
+        payload = json.loads(raw_stdin)
+    except json.JSONDecodeError:
+        return None
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    return cwd if isinstance(cwd, str) else None
+
+
+def _dispatch_completion_hook(
+    hook_fn: Callable[..., None],
+    raw_stdin: str,
+    thread_map: ThreadMap,
+    slack: SlackAdapter,
+) -> None:
+    # Resolve the worker's thread from its cwd via the thread map (INV-7), then hand
+    # the already-read stdin to the existing hook function. If no record matches the
+    # cwd (or stdin is unparseable), exit cleanly — a hook must never crash the worker.
+    cwd = _extract_cwd(raw_stdin)
+    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if record is None:
+        logger.warning("completion hook: no thread record for cwd")
+        return
+    hook_fn(
+        record.thread_ts,
+        record.channel,
+        thread_map,
+        slack,
+        stdin=io.StringIO(raw_stdin),
+    )
+
+
+def _run_completion_hook(hook_fn: Callable[..., None]) -> None:
+    raw_stdin = sys.stdin.read()
+    config = _config()
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    credentials = load_credentials(config.paths.credentials)
+    slack = BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), SystemClock())
+    _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, slack)
+
+
+@hook_app.command("stop")
+def hook_stop() -> None:
+    """Claude Code Stop hook: post the worker's final summary and mark the thread DONE."""
+    _run_completion_hook(stop_hook)
+
+
+@hook_app.command("notification")
+def hook_notification() -> None:
+    """Claude Code Notification hook: post the worker's question and mark the thread BLOCKED."""
+    _run_completion_hook(notification_hook)
 
 
 @app.command()

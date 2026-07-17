@@ -15,6 +15,28 @@ _(none yet)_
 
 ## Discoveries / follow-ups
 
+- **Completion-hook cross-thread blast radius (Task 21, Security persona).** The `pan hook
+  stop`/`notification` dispatch trusts the worker-process-supplied `cwd` to select which thread to
+  post to and mark DONE/BLOCKED. `get_by_worktree` exact-matches a unique `worktree_path`, and `cwd`
+  comes from Claude Code's runtime (not agent text), so within the trust boundary it's bounded to
+  already-registered worktrees. Hardening idea: inject a tamper-resistant worker→thread token at
+  spawn (env var / settings value) that the hook echoes back and cross-checks against the resolved
+  record's `thread_ts`, so a spoofed/confused `cwd` can't drive another thread's lifecycle.
+- **Completion-hook reads the thread-map file 3x per invocation (Task 21, Performance persona).**
+  `_dispatch_completion_hook` calls `get_by_worktree` (read 1), then the existing `stop_hook`/
+  `notification_hook` re-check `thread_map.get(thread_ts)` (read 2) before `update_status` (read 3).
+  Negligible for a one-shot hook against a tiny single-user JSON, but the redundant `get` could be
+  removed by threading the already-resolved record through to the hook function.
+- **Type the completion-hook dispatcher precisely (Task 21, Architect/Code personas).**
+  `_dispatch_completion_hook`'s `hook_fn: Callable[..., None]` erases the shared
+  `(thread_ts, channel, ThreadMap, SlackAdapter, *, stdin: TextIO) -> None` signature (a plain
+  `Callable` can't express the keyword-only `stdin`). A small `CompletionHook` Protocol would type
+  the seam. Non-blocking.
+- **Thin coverage on the completion-hook composition root (Task 21, Test persona).**
+  `cli._run_completion_hook` (reads `sys.stdin`, loads config, builds `FileThreadMap` +
+  `BoltSlackAdapter`) is unexercised, and `_extract_cwd`'s valid-JSON-dict-without-`cwd` / non-dict /
+  non-str-`cwd` branches aren't directly asserted (they all reach the same clean-exit path). Add
+  cases when convenient.
 - **Document directive mode precedence in the tech spec.** `parse_directive` (Task 3,
   `src/pan/directive.py`) resolves STATUS > SYNC > DELEGATE when multiple mode flags are present
   (e.g. `--sync --status` → STATUS). This is deliberate (STATUS is the read-only, no-worker path, so
@@ -84,6 +106,14 @@ final session.
   spawning in its own fresh git worktree + herdr workspace, the file created and its contents posted
   back in-thread, a follow-up reply routing to the same worker, and `@pan --status` reporting the
   worker's live state. Gateway / spawn / hooks are not considered done until this passes.
+- **Task 21 live smoke — worker auto-reply via completion hooks (DEFERRED, human session).**
+  Trigger `@pan <task>` and confirm the worker posts its result back to the thread on completion
+  (Stop hook) and posts a question when blocked (Notification hook). Mocks cannot catch the real
+  Claude Code hook JSON shape or hook invocation. WATCH FOR: `get_by_worktree` exact-matches the hook
+  JSON's `cwd` against the stored `worktree_path`; on macOS these can differ by symlink resolution
+  (`/tmp` vs `/private/tmp`) — if the hook silently no-ops (no post, "no thread record for cwd" in the
+  log), normalize both sides with `Path.resolve()` in `FileThreadMap.get_by_worktree` and/or the CLI
+  `_extract_cwd`. Also confirm the worker's `cwd` at Stop is the worktree root (not a subdir).
 - **R-2 — herdr nudge keystroke + create/pane-list output shapes (verify-live-api).**
   `ShellHerdrAdapter` (`src/pan/adapters/herdr.py`) was built against the real `herdr` CLI this
   session, but two things need a live orchestrator to confirm: (1) that `herdr pane send-keys <pane>

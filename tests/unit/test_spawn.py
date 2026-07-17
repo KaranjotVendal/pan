@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -101,6 +102,7 @@ class FakeIdGen:
 def _spawn(
     *,
     stream: str | None,
+    base: Path,
     git: FakeGit,
     herdr: FakeHerdr,
     launcher: FakeLauncher,
@@ -112,7 +114,7 @@ def _spawn(
         channel="C1",
         task="do the thing",
         repo=Path("/repo"),
-        base=Path("/base"),
+        base=base,
         stream=stream,
         git=git,
         herdr=herdr,
@@ -124,13 +126,14 @@ def _spawn(
     )
 
 
-def test_spawn_worker_command_order_and_record() -> None:
+def test_spawn_worker_command_order_and_record(tmp_path: Path) -> None:
     timeline: list[str] = []
     git, herdr, launcher = FakeGit(timeline), FakeHerdr(timeline), FakeLauncher(timeline)
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
     record = _spawn(
         stream="backend",
+        base=tmp_path,
         git=git,
         herdr=herdr,
         launcher=launcher,
@@ -142,22 +145,24 @@ def test_spawn_worker_command_order_and_record() -> None:
     assert record.status is WorkerStatus.SPAWNING
     assert record.workspace_name == "pan-backend"
     assert record.workspace_id == "wsid"
+    assert record.channel == "C1"
     assert record.pane_ids == ["pane1"]
-    assert record.worktree_path == Path("/base/pan-backend")
+    assert record.worktree_path == tmp_path / "pan-backend"
     assert record.created_at == _FIXED_NOW
     assert record.updated_at == _FIXED_NOW
     # The launched worker got the task brief.
-    assert launcher.calls == [(Path("/base/pan-backend"), "pane1", "do the thing")]
+    assert launcher.calls == [(tmp_path / "pan-backend", "pane1", "do the thing")]
     # The record is the sole thread->worker binding (INV-7).
     assert thread_map.records["1718000000.000200"] is record
 
 
-def test_spawn_worker_posts_ack_via_egress() -> None:
+def test_spawn_worker_posts_ack_via_egress(tmp_path: Path) -> None:
     timeline: list[str] = []
     slack = FakeSlack()
 
     _spawn(
         stream="backend",
+        base=tmp_path,
         git=FakeGit(timeline),
         herdr=FakeHerdr(timeline),
         launcher=FakeLauncher(timeline),
@@ -168,11 +173,12 @@ def test_spawn_worker_posts_ack_via_egress() -> None:
     assert slack.posts == [("C1", "1718000000.000200", "on it — stream pan-backend")]
 
 
-def test_spawn_worker_without_stream_derives_label_from_id() -> None:
+def test_spawn_worker_without_stream_derives_label_from_id(tmp_path: Path) -> None:
     timeline: list[str] = []
 
     record = _spawn(
         stream=None,
+        base=tmp_path,
         git=FakeGit(timeline),
         herdr=FakeHerdr(timeline),
         launcher=FakeLauncher(timeline),
@@ -183,13 +189,37 @@ def test_spawn_worker_without_stream_derives_label_from_id() -> None:
     assert record.workspace_name == "pan-abcd1234"
 
 
-def test_herdr_failure_wraps_as_spawn_error_and_marks_failed() -> None:
+def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) -> None:
+    timeline: list[str] = []
+    thread_map = FakeThreadMap()
+
+    record = _spawn(
+        stream="backend",
+        base=tmp_path,
+        git=FakeGit(timeline),
+        herdr=FakeHerdr(timeline),
+        launcher=FakeLauncher(timeline),
+        thread_map=thread_map,
+        slack=FakeSlack(),
+    )
+
+    settings_path = record.worktree_path / ".claude" / "settings.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+    stop_command = settings["hooks"]["Stop"][0]["hooks"][0]
+    notification_command = settings["hooks"]["Notification"][0]["hooks"][0]
+    assert stop_command == {"type": "command", "command": "pan hook stop"}
+    assert notification_command == {"type": "command", "command": "pan hook notification"}
+
+
+def test_herdr_failure_wraps_as_spawn_error_and_marks_failed(tmp_path: Path) -> None:
     timeline: list[str] = []
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
     with pytest.raises(SpawnError):
         _spawn(
             stream="backend",
+            base=tmp_path,
             git=FakeGit(timeline),
             herdr=FakeHerdr(timeline, fail=True),
             launcher=FakeLauncher(timeline),
@@ -199,18 +229,21 @@ def test_herdr_failure_wraps_as_spawn_error_and_marks_failed() -> None:
 
     failed = thread_map.records["1718000000.000200"]
     assert failed.status is WorkerStatus.FAILED
+    # The failed record also carries the channel so it stays a usable binding.
+    assert failed.channel == "C1"
     # The failure is surfaced to the thread through the single egress path.
     assert len(slack.posts) == 1
     assert slack.posts[0][0:2] == ("C1", "1718000000.000200")
 
 
-def test_git_failure_wraps_as_spawn_error_and_marks_failed() -> None:
+def test_git_failure_wraps_as_spawn_error_and_marks_failed(tmp_path: Path) -> None:
     timeline: list[str] = []
     thread_map = FakeThreadMap()
 
     with pytest.raises(SpawnError):
         _spawn(
             stream="backend",
+            base=tmp_path,
             git=FakeGit(timeline, fail=True),
             herdr=FakeHerdr(timeline),
             launcher=FakeLauncher(timeline),

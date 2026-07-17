@@ -37,7 +37,8 @@ Current modules (Task 1, built):
 
 - `src/pan/inbox.py` — `FileInboxStore`, atomic claim/rename drain, event-id dedupe (INV-6, R-6).
 - `src/pan/threadmap.py` — `FileThreadMap` over `~/.pan/threads.json`, sole thread-to-worker binding
-  (INV-7); `Clock` injected for deterministic `updated_at`.
+  (INV-7); `Clock` injected for deterministic `updated_at`; `get_by_worktree` resolves a record by
+  worktree path (used by the completion hooks to find their thread from the worker's cwd).
 
 - `src/pan/adapters/herdr.py` — `ShellHerdrAdapter`, shells the real `herdr` CLI (BR-2, INV-8).
 - `src/pan/adapters/git_worktree.py` — `ShellGitWorktreeAdapter`, shells `git worktree`; `--force`
@@ -54,7 +55,9 @@ Current modules (Task 1, built):
 - `src/pan/gateway/slack_post.py` — `slack_post`, the single Slack egress path (INV-4); value-free.
 
 - `src/pan/spawn.py` — `ClaudeLauncher` + `spawn_worker`: worktree → workspace → launch → thread-map
-  put → ack (INV-4/INV-7); `AgentLauncher.launch(worktree, pane_id, brief) -> None`.
+  put → ack (INV-4/INV-7); `AgentLauncher.launch(worktree, pane_id, brief) -> None`. Also writes the
+  worker `.claude/settings.json` (Stop/Notification → `pan hook stop`/`notification`) and records
+  `channel` on the `ThreadRecord`.
 
 - `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed content-free nudge to the orchestrator (INV-2).
 
@@ -65,7 +68,9 @@ Current modules (Task 1, built):
   `gated_ops` → allow; match → approval + block on decision; deny → `GatedOpDeniedError` + deny JSON.
 
 - `src/pan/cli.py`, `src/pan/__main__.py` — Typer toolbelt (gateway/config/inbox/spawn/threads/
-  slack-post/status/stop/pause) + single `_run` error boundary mapping `PanError` → exit code.
+  slack-post/status/stop/pause, plus `hook stop`/`hook notification`) + single `_run` error boundary
+  mapping `PanError` → exit code. The `hook` commands resolve the thread from the worker's cwd via
+  `get_by_worktree` and dispatch to the existing Stop/Notification hook cores.
 
 - `src/pan/skills/orchestrating/SKILL.md` — the orchestrator's drain → read-directive → route loop
   prose; mechanical steps are `pan` subcommands, model does only the fuzzy reuse/repo/comprehension calls.

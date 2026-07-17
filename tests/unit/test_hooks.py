@@ -23,6 +23,7 @@ class FakeThreadMap:
                 thread_ts=seed_thread,
                 workspace_name="pan-task",
                 workspace_id="ws1",
+                channel="C1",
                 worktree_path=Path("/tmp/wt"),
                 created_at=now,
                 updated_at=now,

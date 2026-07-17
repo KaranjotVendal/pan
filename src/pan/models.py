@@ -55,6 +55,7 @@ class ThreadRecord(BaseModel):
     thread_ts: str
     workspace_name: str
     workspace_id: str
+    channel: str
     pane_ids: list[str] = Field(default_factory=list)
     worktree_path: Path
     agent: Agent = Agent.CLAUDE

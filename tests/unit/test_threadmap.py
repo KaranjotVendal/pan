@@ -21,14 +21,18 @@ class FakeClock:
         return self._now
 
 
-def _record(thread_ts: str = "1718000000.000100") -> ThreadRecord:
+def _record(
+    thread_ts: str = "1718000000.000100",
+    worktree_path: Path = Path("/Users/me/dev/pan-worktrees/task-3"),
+) -> ThreadRecord:
     created = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     return ThreadRecord(
         thread_ts=thread_ts,
         workspace_name="pan-task-3",
         workspace_id="ws_abc",
+        channel="C0001",
         pane_ids=["%1", "%2"],
-        worktree_path=Path("/Users/me/dev/pan-worktrees/task-3"),
+        worktree_path=worktree_path,
         agent=Agent.CLAUDE,
         morcli_session="mor_123",
         status=WorkerStatus.SPAWNING,
@@ -110,3 +114,23 @@ def test_put_is_idempotent_upsert(tmp_path: Path) -> None:
     assert fetched is not None
     assert fetched.workspace_id == "ws_replaced"
     assert thread_map.get("t2") is not None
+
+
+def test_get_by_worktree_returns_matching_record(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.put(_record("t1", worktree_path=Path("/wt/pan-a")))
+    thread_map.put(_record("t2", worktree_path=Path("/wt/pan-b")))
+
+    found = thread_map.get_by_worktree(Path("/wt/pan-b"))
+
+    assert found is not None
+    assert found.thread_ts == "t2"
+
+
+def test_get_by_worktree_returns_none_when_no_match(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.put(_record("t1", worktree_path=Path("/wt/pan-a")))
+
+    assert thread_map.get_by_worktree(Path("/wt/nope")) is None

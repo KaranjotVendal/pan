@@ -9,6 +9,26 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- Worker completion hooks wired for Slack auto-reply (Task 21, Milestone M8). Post-smoke, the worker
+  now replies its result to the originating thread on finish and asks its question when blocked:
+  - `ThreadRecord.channel: str` — the binding now carries the Slack channel so a completion hook can
+    reply without being handed a channel out of band.
+  - `ThreadMap.get_by_worktree(worktree_path)` (Protocol + `FileThreadMap`) — resolves the record
+    whose `worktree_path` matches, so a hook finds its thread from the worker's cwd (the thread map
+    stays the single source of truth, INV-7).
+  - `spawn_worker` sets `channel` on both the success and failed `ThreadRecord`, and writes the worker
+    `.claude/settings.json` into the worktree (before launch) registering the Claude Code `Stop` and
+    `Notification` hooks to run `pan hook stop` / `pan hook notification`. The settings schema was
+    confirmed against current Claude Code docs.
+  - `pan hook stop` / `pan hook notification` CLI commands — each reads the hook JSON from stdin,
+    extracts `cwd`, resolves the `ThreadRecord` via `get_by_worktree`, and calls the existing
+    `stop_hook` / `notification_hook` with the record's `thread_ts` + `channel` (Stop → posts the
+    summary and marks DONE; Notification → posts the question and marks BLOCKED). They reuse the same
+    Slack-adapter construction as `slack-post` (no Socket Mode in a hook, single egress INV-4), and a
+    hook that can't resolve its thread (unknown cwd or unparseable stdin) exits cleanly without
+    posting so it never crashes the worker. Live-verify of the real hook invocation is deferred to a
+    human session.
+
 - Project scaffold: `uv` + `uv_build` packaging (`pyproject.toml`, `.python-version`, `.gitignore`
   excluding `/docs/*`) with the Typer console-script entry, runtime deps (`typer`, `pydantic`,
   `slack_bolt`, `watchdog`) and dev deps (`pytest`, `respx`, `ruff`, `ty`).

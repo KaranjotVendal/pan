@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 from pathlib import Path
 
@@ -18,6 +19,23 @@ from pan.seams import (
 )
 
 logger = initialise_logger(__name__)
+
+# The Claude Code hooks settings written into each worker's worktree so its Stop and
+# Notification events auto-reply to the originating Slack thread. Non-tool events take a
+# list of {hooks: [{type, command}]} objects (matcher omitted). `pan hook stop` /
+# `pan hook notification` resolve the thread from the worker's cwd via the thread map.
+_WORKER_SETTINGS = {
+    "hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": "pan hook stop"}]}],
+        "Notification": [{"hooks": [{"type": "command", "command": "pan hook notification"}]}],
+    }
+}
+
+
+def _write_worker_settings(worktree_path: Path) -> None:
+    settings_dir = worktree_path / ".claude"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "settings.json").write_text(json.dumps(_WORKER_SETTINGS, indent=2))
 
 
 class ClaudeLauncher:
@@ -54,6 +72,9 @@ def spawn_worker(
 
     try:
         worktree_path = git.create_worktree(repo, label, base)
+        # Register the worker's completion hooks before it launches, so its Stop /
+        # Notification events auto-reply to the Slack thread (resolved by cwd).
+        _write_worker_settings(worktree_path)
         workspace_id, pane_id = herdr.create_workspace(label, worktree_path)
         launcher.launch(worktree_path, pane_id, task)
     except (SpawnError, HerdrError) as error:
@@ -63,6 +84,7 @@ def spawn_worker(
             thread_ts=thread_ts,
             workspace_name=label,
             workspace_id="",
+            channel=channel,
             worktree_path=base / label,
             status=WorkerStatus.FAILED,
             created_at=created_at,
@@ -77,6 +99,7 @@ def spawn_worker(
         thread_ts=thread_ts,
         workspace_name=label,
         workspace_id=workspace_id,
+        channel=channel,
         pane_ids=[pane_id],
         worktree_path=worktree_path,
         status=WorkerStatus.SPAWNING,
