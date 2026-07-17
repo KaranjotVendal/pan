@@ -114,7 +114,9 @@ def test_pane_commands_build_correct_argv(
     argument: str | None,
     expected_tail: list[str],
 ) -> None:
-    calls = _install_runner(monkeypatch, [(_envelope({}), 0)])
+    # These subcommands print NOTHING on success; empty stdout with returncode 0
+    # must not raise and must issue the correct herdr argv.
+    calls = _install_runner(monkeypatch, [("", 0)])
     adapter = ShellHerdrAdapter()
 
     method = getattr(adapter, method_name)
@@ -127,6 +129,7 @@ def test_pane_commands_build_correct_argv(
 
 
 def test_nonzero_exit_raises_herdr_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A no-output command still fails hard on a non-zero returncode.
     _install_runner(monkeypatch, [("", 3)])
 
     with pytest.raises(HerdrError):
@@ -134,10 +137,11 @@ def test_nonzero_exit_raises_herdr_error(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_non_json_output_raises_herdr_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # JSON-returning commands (create_workspace) still validate the envelope.
     _install_runner(monkeypatch, [("not json at all", 0)])
 
     with pytest.raises(HerdrError):
-        ShellHerdrAdapter().kill_pane("w1:p1")
+        ShellHerdrAdapter().create_workspace("x", Path("/tmp/x"))
 
 
 def test_missing_herdr_binary_raises_herdr_error(

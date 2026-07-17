@@ -38,15 +38,15 @@ class ShellHerdrAdapter:
     def nudge(self, pane_id: str) -> None:
         # The fixed, content-free nudge: a bare Enter keypress wakes the orchestrator
         # session to run its drain loop; no payload ever crosses the pane (INV-2).
-        self._run(["pane", "send-keys", pane_id, "Enter"])
+        self._run(["pane", "send-keys", pane_id, "Enter"], expect_json=False)
         logger.info(f"herdr nudge pane={pane_id}")
 
     def send_text(self, pane_id: str, text: str) -> None:
-        self._run(["pane", "send-text", pane_id, text])
+        self._run(["pane", "send-text", pane_id, text], expect_json=False)
         logger.info(f"herdr send-text pane={pane_id} len={len(text)}")
 
     def kill_pane(self, pane_id: str) -> None:
-        self._run(["pane", "close", pane_id])
+        self._run(["pane", "close", pane_id], expect_json=False)
         logger.info(f"herdr kill pane={pane_id}")
 
     def _select_pane_id(self, panes: list[Any], active_tab_id: object) -> str:
@@ -63,7 +63,7 @@ class ShellHerdrAdapter:
             raise HerdrError("herdr pane list entry is missing a pane_id")
         return str(first_pane["pane_id"])
 
-    def _run(self, args: list[str]) -> dict[str, Any]:
+    def _run(self, args: list[str], expect_json: bool = True) -> dict[str, Any]:
         command = [_HERDR, *args]
         subcommand = " ".join(args[:2])
         try:
@@ -73,6 +73,11 @@ class ShellHerdrAdapter:
 
         if completed.returncode != 0:
             raise HerdrError(f"herdr {subcommand} exited with code {completed.returncode}")
+
+        # Some herdr subcommands (pane send-text/send-keys/close) print nothing on
+        # success; there is no envelope to parse, so callers pass expect_json=False.
+        if not expect_json:
+            return {}
 
         try:
             envelope = json.loads(completed.stdout)
