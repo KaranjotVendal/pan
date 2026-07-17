@@ -11,6 +11,12 @@ from pan.seams import HerdrAdapter
 
 logger = initialise_logger(__name__)
 
+WAKE_INSTRUCTION = (
+    "A new item is in the pan inbox. Run your orchestrating drain-classify-route loop now: "
+    "shell `pan inbox drain --json`, then classify and route each item per the "
+    "orchestrating skill."
+)
+
 
 class WatchdogInboxWatcher:
     def __init__(self, herdr: HerdrAdapter, orchestrator_pane_id: str, inbox_dir: Path) -> None:
@@ -19,10 +25,12 @@ class WatchdogInboxWatcher:
         self._inbox_dir = inbox_dir
 
     def on_inbox_changed(self) -> None:
-        # Exactly one fixed, content-free nudge to the orchestrator pane. The payload
-        # never crosses the pane — it lives in the durable inbox (INV-2).
+        # INV-2: send a fixed wake instruction (so the orchestrator's Claude TUI actually
+        # wakes — a bare Enter with an empty prompt does nothing) and then the Enter that
+        # submits it. This carries NO task payload; the payload lives in the durable inbox.
+        self._herdr.send_text(self._orchestrator_pane_id, WAKE_INSTRUCTION)
         self._herdr.nudge(self._orchestrator_pane_id)
-        logger.info("watcher nudged orchestrator")
+        logger.info("watcher woke orchestrator")
 
     def start(self) -> None:  # pragma: no cover - live filesystem observer, not unit-tested
         self._inbox_dir.mkdir(parents=True, exist_ok=True)
