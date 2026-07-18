@@ -157,6 +157,32 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert captured["base"] == config.orchestrator.worktree_base
 
 
+def test_watcher_builds_from_config_and_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    herdr_sentinel = object()
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr_sentinel)
+    captured: dict[str, Any] = {}
+
+    class FakeWatcher:
+        def __init__(self, herdr: Any, orchestrator_pane_id: str, inbox_dir: Path) -> None:
+            captured["args"] = (herdr, orchestrator_pane_id, inbox_dir)
+
+        def start(self) -> None:
+            captured["started"] = True
+
+    monkeypatch.setattr(cli, "WatchdogInboxWatcher", FakeWatcher)
+
+    result = runner.invoke(cli.app, ["watcher"])
+
+    assert result.exit_code == 0
+    # Built from config: the ShellHerdrAdapter, the orchestrator pane id, the inbox dir.
+    assert captured["args"] == (herdr_sentinel, config.orchestrator.pane_id, config.paths.inbox)
+    assert captured["started"] is True
+
+
 def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda: config)

@@ -32,7 +32,7 @@ class WatchdogInboxWatcher:
         self._herdr.nudge(self._orchestrator_pane_id)
         logger.info("watcher woke orchestrator")
 
-    def start(self) -> None:  # pragma: no cover - live filesystem observer, not unit-tested
+    def start(self) -> None:
         self._inbox_dir.mkdir(parents=True, exist_ok=True)
         observer = Observer()
         observer.schedule(
@@ -47,7 +47,7 @@ class WatchdogInboxWatcher:
             observer.join()
 
 
-class _InboxEventHandler(FileSystemEventHandler):  # pragma: no cover - exercised only live
+class _InboxEventHandler(FileSystemEventHandler):
     def __init__(self, on_change: Callable[[], None]) -> None:
         self._on_change = on_change
 

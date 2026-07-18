@@ -9,6 +9,14 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `pan watcher` CLI command (Task 22, Milestone M9). The inbox watcher had no first-class
+  entrypoint (it was run via an ad-hoc script during the smoke); it now has one. `pan watcher` builds
+  `ShellHerdrAdapter` + `WatchdogInboxWatcher` from config (`orchestrator.pane_id`, `paths.inbox`) and
+  calls `start()` — a blocking, launchd-supervised long-runner just like `pan gateway`. The
+  `WatchdogInboxWatcher.start()` observer wiring and the `_InboxEventHandler` event forwarding, both
+  previously `# pragma: no cover`, are now unit-tested by mocking the `watchdog` Observer (no real
+  filesystem-event timing), and the pragmas are removed.
+
 - Worker completion hooks wired for Slack auto-reply (Task 21, Milestone M8). Post-smoke, the worker
   now replies its result to the originating thread on finish and asks its question when blocked:
   - `ThreadRecord.channel: str` — the binding now carries the Slack channel so a completion hook can

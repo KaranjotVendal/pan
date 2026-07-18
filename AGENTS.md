@@ -59,7 +59,8 @@ Current modules (Task 1, built):
   worker `.claude/settings.json` (Stop/Notification → `pan hook stop`/`notification`) and records
   `channel` on the `ThreadRecord`.
 
-- `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed content-free nudge to the orchestrator (INV-2).
+- `src/pan/watcher.py` — `WatchdogInboxWatcher`, fixed content-free nudge to the orchestrator (INV-2);
+  launched (blocking, launchd-supervised) by the `pan watcher` CLI command.
 
 - `src/pan/hooks/{stop,notification}.py` — Stop/Notification hook cores: parse hook JSON → resolve
   thread → post via `slack_post` → mark DONE/BLOCKED; `thread_ts`/`channel` injected, `stdin` seam.
@@ -67,8 +68,8 @@ Current modules (Task 1, built):
 - `src/pan/hooks/pretooluse_gate.py` — dormant gated-ops PreToolUse gate (safety gate 4); empty
   `gated_ops` → allow; match → approval + block on decision; deny → `GatedOpDeniedError` + deny JSON.
 
-- `src/pan/cli.py`, `src/pan/__main__.py` — Typer toolbelt (gateway/config/inbox/spawn/threads/
-  slack-post/status/stop/pause, plus `hook stop`/`hook notification`) + single `_run` error boundary
+- `src/pan/cli.py`, `src/pan/__main__.py` — Typer toolbelt (gateway/watcher/config/inbox/spawn/
+  threads/slack-post/status/stop/pause, plus `hook stop`/`hook notification`) + single `_run` error boundary
   mapping `PanError` → exit code. The `hook` commands resolve the thread from the worker's cwd via
   `get_by_worktree` and dispatch to the existing Stop/Notification hook cores.
 

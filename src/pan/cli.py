@@ -42,6 +42,7 @@ from pan.models import PanConfig, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
 from pan.spawn import ClaudeLauncher, spawn_worker
 from pan.threadmap import FileThreadMap
+from pan.watcher import WatchdogInboxWatcher
 
 logger = initialise_logger(__name__)
 
@@ -90,6 +91,15 @@ def gateway() -> None:
         credentials, config, FileInboxStore(config.paths.inbox), SystemClock()
     )
     adapter.start()
+
+
+@app.command()
+def watcher() -> None:
+    """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
+    config = _config()
+    WatchdogInboxWatcher(
+        ShellHerdrAdapter(), config.orchestrator.pane_id, config.paths.inbox
+    ).start()
 
 
 @config_app.command("set-token")
