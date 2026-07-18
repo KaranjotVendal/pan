@@ -9,6 +9,21 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- Caffeinate policy helper, launchd templates, and README (Task 23, Milestone M9) — the buildable,
+  non-live parts of the original always-on Task 20:
+  - `should_caffeinate(active_worker_count, on_ac_power)` in `src/pan/power.py`: a pure R-3 policy
+    predicate returning True only when on AC power AND at least one worker is active (so the machine
+    is never forced awake for nothing, and never on battery). The actuation that would call
+    `caffeinate`/`pmset disablesleep 1` off this decision stays deferred to the live human session;
+    this milestone ships only the decision, and the README says so.
+  - `launchd/com.pan.gateway.plist.template` and `launchd/com.pan.watcher.plist.template`:
+    LaunchAgent templates for the two always-on processes (`pan gateway`, `pan watcher`), both
+    `KeepAlive=true`/`RunAtLoad=true`, with a single `<PAN_HOME>` placeholder and no secrets (tokens
+    stay in `~/.pan/credentials.json` at 0600).
+  - `README.md`: install (`uv tool install --editable .`), the Slack app manifest at
+    `slack/manifest.yaml`, `pan config set-token`, the `~/.config/pan/config.json` shape, loading the
+    two LaunchAgents, the CLI command table, the directive-flag reference, and the example first task.
+
 - `pan watcher` CLI command (Task 22, Milestone M9). The inbox watcher had no first-class
   entrypoint (it was run via an ad-hoc script during the smoke); it now has one. `pan watcher` builds
   `ShellHerdrAdapter` + `WatchdogInboxWatcher` from config (`orchestrator.pane_id`, `paths.inbox`) and

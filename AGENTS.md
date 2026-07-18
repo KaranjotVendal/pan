@@ -76,10 +76,11 @@ Current modules (Task 1, built):
 - `src/pan/skills/orchestrating/SKILL.md` — the orchestrator's drain → read-directive → route loop
   prose; mechanical steps are `pan` subcommands, model does only the fuzzy reuse/repo/comprehension calls.
 
-Planned modules (per the plan, one line each):
-
-- `src/pan/power.py`, `launchd/*.plist.template`, `README.md` — always-on and smoke (Task 20, DEFERRED
-  to the final human-driven session — live).
+- `src/pan/power.py` — pure `should_caffeinate(active_worker_count, on_ac_power)` R-3 policy predicate
+  (True only on AC with ≥1 active worker); the `caffeinate`/`pmset` actuation off it is deferred/live.
+- `launchd/com.pan.{gateway,watcher}.plist.template` — LaunchAgent templates (`KeepAlive`/`RunAtLoad`
+  true, single `<PAN_HOME>` placeholder, no secrets) for the two always-on processes.
+- `README.md` — install, config, credentials, launchd setup, Slack manifest, CLI usage, first task.
 
 Other locations:
 

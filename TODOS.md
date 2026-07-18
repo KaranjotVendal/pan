@@ -95,6 +95,18 @@ _(none yet)_
   treated as sensitive on a shared host, mirror the credentials.json 0600 posture. Non-blocking
   (Security persona, Task 7).
 
+- **Wire `should_caffeinate` into the always-on power actuation (Task 23, Architect persona).**
+  `src/pan/power.py`'s `should_caffeinate` is the pure R-3 policy predicate (True only on AC with
+  >=1 active worker) but has no caller yet — nothing invokes `caffeinate` / `pmset disablesleep 1`
+  off it. The engagement layer that reads AC state + the live worker count and starts/stops
+  `caffeinate` is the deferred, live-verified part of the original Task 20. Until it lands,
+  lid-closed execution does not hold the machine awake (the README now says so). Non-blocking.
+- **README first-run posture is maximum blast radius (Task 23, Security persona).** The example
+  config ships `permission_mode: "bypass"` with `autonomy: "full"`, `channels: ["*"]`, `repos:
+  ["*"]` as the starting point. This is the intended full-auto-in-isolated-worktree design, but a
+  one-line nudge steering first-time users to scope `repos`/`channels` before enabling `bypass`
+  would tighten security ergonomics. Non-blocking.
+
 ## Deferred to final human session (live)
 
 These cannot run overnight — they need a real Slack connection, the phone, or a live-verify write
