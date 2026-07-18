@@ -7,8 +7,7 @@ which drains the inbox, parses deterministic directive flags, decides reuse-vs-s
 task as its own Claude session in an isolated git worktree plus herdr workspace. Workers post
 progress and results back to the originating Slack thread.
 
-The gateway and watcher are the two always-on processes; everything else runs on demand. The
-architecture, invariants, and boundary rules live in `docs/superpowers/specs/` and `AGENTS.md`.
+The gateway and watcher are the two always-on processes; everything else runs on demand.
 
 ## Requirements
 
@@ -20,10 +19,10 @@ architecture, invariants, and boundary rules live in `docs/superpowers/specs/` a
 
 ## Install
 
-`pan` is installed as an editable `uv` tool so the `pan` binary lands on your `PATH`:
+`pan` is installed as a `uv` tool so the `pan` binary lands on your `PATH`:
 
 ```sh
-command -v pan || uv tool install --editable .
+command -v pan || uv tool install .
 ```
 
 Run the quality gates during development with `uv run` (never `uv run` the finished CLI — use the

@@ -12,3 +12,9 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# Night Shift orchestration control files — local workflow artifacts, not product
+/AGENT_LOOP.md
+/AGENTS.md
+/REVIEW_PERSONAS.md
+/TODOS.md
