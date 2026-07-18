@@ -1,0 +1,31 @@
+display_information:
+  name: pan
+  description: Slack-driven laptop coding-agent orchestrator
+  background_color: "#1a1a1a"
+features:
+  bot_user:
+    display_name: pan
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # receive @pan mentions
+      - chat:write          # post acks / results into threads
+      - reactions:write     # the fast :eyes: ack
+      - channels:history    # read thread replies in public channels
+      - groups:history      # read thread replies in private channels
+      - im:history          # read DMs (optional; drop if DM triggering unwanted)
+      - mpim:history        # read group DMs (optional)
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention         # top-level @pan mention -> new task
+      - message.channels    # follow-up replies in public channels
+      - message.groups      # follow-up replies in private channels
+      - message.im          # DMs (optional)
+      - message.mpim        # group DMs (optional)
+  interactivity:
+    is_enabled: false
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
