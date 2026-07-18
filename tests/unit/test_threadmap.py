@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -134,3 +136,46 @@ def test_get_by_worktree_returns_none_when_no_match(tmp_path: Path) -> None:
     thread_map.put(_record("t1", worktree_path=Path("/wt/pan-a")))
 
     assert thread_map.get_by_worktree(Path("/wt/nope")) is None
+
+
+def test_read_tolerates_unparseable_legacy_record(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A record written before `channel` became required must not poison the whole
+    # read: the valid neighbour is still routable, the bad one is skipped.
+    valid_ts = "t-valid"
+    legacy_ts = "t-legacy"
+    valid_record = _record(valid_ts, worktree_path=Path("/wt/pan-valid"))
+    legacy_payload = _record(legacy_ts).model_dump(mode="json")
+    del legacy_payload["channel"]
+
+    threads_path = tmp_path / "threads.json"
+    threads_path.write_text(
+        json.dumps(
+            {
+                valid_ts: valid_record.model_dump(mode="json"),
+                legacy_ts: legacy_payload,
+            }
+        )
+    )
+
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(threads_path, clock)
+
+    # propagate=False on this logger, so attach caplog's handler directly.
+    threadmap_logger = logging.getLogger("pan.threadmap")
+    threadmap_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="pan.threadmap"):
+            loaded_valid = thread_map.get(valid_ts)
+            loaded_legacy = thread_map.get(legacy_ts)
+            found = thread_map.get_by_worktree(Path("/wt/pan-valid"))
+    finally:
+        threadmap_logger.removeHandler(caplog.handler)
+
+    assert loaded_valid is not None
+    assert loaded_valid.thread_ts == valid_ts
+    assert loaded_legacy is None
+    assert found is not None
+    assert found.thread_ts == valid_ts
+    assert any(legacy_ts in record.message for record in caplog.records)

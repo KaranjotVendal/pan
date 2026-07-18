@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from pan.errors import ThreadNotFoundError
 from pan.logging import initialise_logger
 from pan.models import ThreadRecord, WorkerStatus
@@ -17,13 +19,21 @@ class FileThreadMap:
         self._clock = clock
 
     def _read_all(self) -> dict[str, ThreadRecord]:
+        # Resilient read: a single legacy/malformed record (e.g. one written before
+        # `channel` became required) must not fail the whole read and block thread
+        # routing — validate each record individually and skip the ones that fail.
+        # Skipped records are dropped on the next _write_all; that is acceptable
+        # because they are invalid/legacy and can no longer be routed to anyway.
         if not self._threads_path.exists():
             return {}
         raw_records = json.loads(self._threads_path.read_text())
-        return {
-            thread_ts: ThreadRecord.model_validate(record)
-            for thread_ts, record in raw_records.items()
-        }
+        records: dict[str, ThreadRecord] = {}
+        for thread_ts, record in raw_records.items():
+            try:
+                records[thread_ts] = ThreadRecord.model_validate(record)
+            except ValidationError:
+                logger.warning(f"threadmap skipping unparseable record thread={thread_ts}")
+        return records
 
     def _write_all(self, records: dict[str, ThreadRecord]) -> None:
         payload = {
