@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for the pan inbox watcher (the independent, event-driven
+  process that nudges the orchestrator when a new inbox item lands). It runs as a
+  second agent so it is supervised independently of any Claude session's own loop.
+  This file carries NO secrets — the watcher only nudges the orchestrator pane.
+
+  To install, replace every <PAN_HOME> with your home directory (e.g. /Users/you),
+  save as ~/Library/LaunchAgents/com.pan.watcher.plist, then `launchctl load` it.
+  See README.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pan.watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><PAN_HOME>/.local/bin/pan</string>
+        <string>watcher</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PAN_LOG_LEVEL</key>
+        <string>INFO</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string><PAN_HOME>/.pan/logs/watcher.out.log</string>
+    <key>StandardErrorPath</key>
+    <string><PAN_HOME>/.pan/logs/watcher.err.log</string>
+</dict>
+</plist>

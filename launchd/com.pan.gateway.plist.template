@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for the pan Slack gateway (the always-on Bolt Socket Mode
+  process). This file carries NO secrets — the Slack tokens live in
+  <PAN_HOME>/.pan/credentials.json (mode 0600) and are read by the process itself.
+
+  To install, replace every <PAN_HOME> with your home directory (e.g. /Users/you),
+  save as ~/Library/LaunchAgents/com.pan.gateway.plist, then `launchctl load` it.
+  See README.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pan.gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><PAN_HOME>/.local/bin/pan</string>
+        <string>gateway</string>
+    </array>
+
+    <!-- The one process that must always be up; Socket Mode reconnects after a
+         network blip or wake. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PAN_LOG_LEVEL</key>
+        <string>INFO</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string><PAN_HOME>/.pan/logs/gateway.out.log</string>
+    <key>StandardErrorPath</key>
+    <string><PAN_HOME>/.pan/logs/gateway.err.log</string>
+</dict>
+</plist>
