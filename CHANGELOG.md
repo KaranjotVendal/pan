@@ -7,6 +7,18 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Fixed
+
+- Completion-hook cwd match now resolves symlinks (Task 24, Milestone M9).
+  `FileThreadMap.get_by_worktree` compared the worker's cwd (delivered by a Claude Code Stop/
+  Notification hook) to the stored `worktree_path` by exact string equality, which silently no-ops
+  when the two differ only by a symlinked prefix — on macOS the hook's cwd arrives as
+  `/private/tmp/...` while the stored path was recorded as `/tmp/...`, so the hook found no record,
+  posted nothing, and never marked the thread DONE/BLOCKED. The lookup now compares `Path.resolve()`
+  on both sides (symmetric, so it doesn't matter which side carries the symlink), keeping the
+  normalization in one place so the CLI hook boundary stays free of path handling. INV-7 (the thread
+  map as the sole binding) is preserved.
+
 ### Added
 
 - Caffeinate policy helper, launchd templates, and README (Task 23, Milestone M9) — the buildable,

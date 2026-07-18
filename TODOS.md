@@ -17,9 +17,10 @@ _(none yet)_
 
 - **Completion-hook cross-thread blast radius (Task 21, Security persona).** The `pan hook
   stop`/`notification` dispatch trusts the worker-process-supplied `cwd` to select which thread to
-  post to and mark DONE/BLOCKED. `get_by_worktree` exact-matches a unique `worktree_path`, and `cwd`
-  comes from Claude Code's runtime (not agent text), so within the trust boundary it's bounded to
-  already-registered worktrees. Hardening idea: inject a tamper-resistant worker→thread token at
+  post to and mark DONE/BLOCKED. `get_by_worktree` matches on the RESOLVED `worktree_path` (Task 24
+  hardened it from exact string match to `Path.resolve()` on both sides — symmetric, preserves the
+  injective real-worktree→record mapping), and `cwd` comes from Claude Code's runtime (not agent
+  text), so within the trust boundary it's bounded to already-registered worktrees. Hardening idea: inject a tamper-resistant worker→thread token at
   spawn (env var / settings value) that the hook echoes back and cross-checks against the resolved
   record's `thread_ts`, so a spoofed/confused `cwd` can't drive another thread's lifecycle.
 - **Completion-hook reads the thread-map file 3x per invocation (Task 21, Performance persona).**
@@ -106,6 +107,23 @@ _(none yet)_
   ["*"]` as the starting point. This is the intended full-auto-in-isolated-worktree design, but a
   one-line nudge steering first-time users to scope `repos`/`channels` before enabling `bypass`
   would tighten security ergonomics. Non-blocking.
+
+- **`get_by_worktree` resolves one `Path.resolve()` syscall per record (Task 24, Performance/
+  Architect/Domain personas).** The lookup now canonicalizes both the target and every stored
+  `worktree_path` in the scan loop; `resolve()` does a readlink/stat per record. Negligible at v1
+  scale (single-user map, one active thread per worker, one-shot hook process, first-match
+  short-circuit). If the map ever grows large or the lookup becomes hot-path, store the resolved
+  path on `ThreadRecord` at `put` time so lookups compare pre-canonicalized paths. Non-blocking.
+- **Add a mismatched-symlink negative test for `get_by_worktree` (Task 24, Test persona).** The new
+  test proves a symlinked prefix matches; a companion case asserting that a symlink resolving to a
+  DIFFERENT real dir does NOT match would harden the resolve() behavior against false positives.
+  Non-blocking.
+- **`_extract_cwd` accepts an empty-string `cwd` (Task 24, Security persona).** `cli._extract_cwd`
+  passes `cwd == ""` (it satisfies `isinstance(cwd, str)`), which becomes `Path(".")` and now
+  `.resolve()`s to the hook process's cwd rather than matching nothing. Harmless under the trust
+  model (the hook runs inside the worker's worktree, so it resolves to that same legitimate thread),
+  but treating `""`/relative `cwd` as "no cwd" (return `None`) would make the no-match path explicit.
+  Non-blocking.
 
 ## Deferred to final human session (live)
 

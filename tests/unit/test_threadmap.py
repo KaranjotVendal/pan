@@ -130,6 +130,28 @@ def test_get_by_worktree_returns_matching_record(tmp_path: Path) -> None:
     assert found.thread_ts == "t2"
 
 
+def test_get_by_worktree_matches_across_symlinked_prefix(tmp_path: Path) -> None:
+    # A worker's cwd delivered by a Claude Code hook can differ from the stored
+    # worktree_path only by a symlinked prefix (on macOS /tmp -> /private/tmp). The
+    # lookup must still resolve to the record. Build a real symlink so resolve()
+    # actually collapses it rather than relying on a platform-specific path.
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    real_dir = tmp_path / "real"
+    worktree = real_dir / "pan-a"
+    worktree.mkdir(parents=True)
+    linked_prefix = tmp_path / "linked"
+    linked_prefix.symlink_to(real_dir)
+
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    # Stored via the symlinked prefix, looked up via the resolved real path.
+    thread_map.put(_record("t1", worktree_path=linked_prefix / "pan-a"))
+
+    found = thread_map.get_by_worktree(worktree)
+
+    assert found is not None
+    assert found.thread_ts == "t1"
+
+
 def test_get_by_worktree_returns_none_when_no_match(tmp_path: Path) -> None:
     clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
     thread_map = FileThreadMap(tmp_path / "threads.json", clock)

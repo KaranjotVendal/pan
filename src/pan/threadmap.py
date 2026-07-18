@@ -49,9 +49,13 @@ class FileThreadMap:
 
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
         # The completion hooks resolve their thread from the worker's cwd; the thread
-        # map stays the single source of truth (INV-7). First exact match wins.
+        # map stays the single source of truth (INV-7). Compare RESOLVED paths so a
+        # symlinked prefix between the stored path and the hook's cwd still matches
+        # (on macOS /tmp -> /private/tmp). Resolving both sides here keeps the CLI hook
+        # boundary free of path normalization. First match wins.
+        target = worktree_path.resolve()
         for record in self._read_all().values():
-            if record.worktree_path == worktree_path:
+            if record.worktree_path.resolve() == target:
                 return record
         return None
 
