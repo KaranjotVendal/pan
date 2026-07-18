@@ -7,6 +7,22 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Changed
+
+- Reconciled the tech spec (`docs/superpowers/specs/2026-07-16-pan-tech-spec.md`) with what was
+  actually built (Task 25, Milestone M9 — doc-only, no code changed; the spec is a local working
+  artifact). Brought the contracts back in line with the implementation: added `MorcliError` to the
+  exception taxonomy (now ten, mapped to exit 19 at the CLI boundary) and mirrored `errors.py`
+  declaration order; added `channel: str` to the `ThreadRecord` domain model; corrected the seam and
+  CLI signatures that changed during the build — `AgentLauncher.launch(worktree, pane_id, brief) ->
+  None`, `ThreadMap.get_by_worktree`, `FileThreadMap(threads_path, clock)`,
+  `WatchdogInboxWatcher(herdr, orchestrator_pane_id, inbox_dir)`, `status`/`stop` keyed on
+  `--thread`, `spawn`/`slack-post` taking `--channel`, `threads set` requiring `--status`
+  (update-only), and the new `pan watcher` and `pan hook stop|notification` commands; and recorded
+  the corrected behaviors (the watcher sends a fixed `WAKE_INSTRUCTION` then Enter rather than a bare
+  Enter, `ShellHerdrAdapter._run` uses `expect_json=False` for no-output commands, the thread-map
+  read tolerates legacy/malformed records, and `get_by_worktree` matches on resolved paths).
+
 ### Fixed
 
 - Completion-hook cwd match now resolves symlinks (Task 24, Milestone M9).
