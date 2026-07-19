@@ -183,6 +183,7 @@ def spawn(
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
         id_gen=UuidGen(),
+        morcli=ShellMorcliAdapter(),
     )
 
 

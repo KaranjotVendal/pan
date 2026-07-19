@@ -35,6 +35,24 @@ class ShellMorcliAdapter:
                 return status
         raise MorcliError(f"no morcli stream for handle={handle}")
 
+    def resolve_session(self, workspace_id: str) -> str | None:
+        # Turn a freshly-created workspace id into morcli's session handle, best-effort.
+        # Returns None (not raising) when no stream matches yet — the just-spawned-session
+        # indexing lag is expected, and the handle is resolved later on the next status
+        # query, where the workspace id is still a valid morcli match.
+        for stream in self._run_streams():
+            if not isinstance(stream, dict):
+                continue
+            if (
+                stream.get("workspace_id") == workspace_id
+                or stream.get("session_id") == workspace_id
+            ):
+                session_id = stream.get("session_id")
+                if isinstance(session_id, str):
+                    logger.info(f"morcli resolved workspace={workspace_id} session={session_id}")
+                    return session_id
+        return None
+
     def _map_status(self, raw_status: object, handle: str) -> WorkerStatus:
         mapped = _STATUS_MAP.get(raw_status) if isinstance(raw_status, str) else None
         if mapped is None:

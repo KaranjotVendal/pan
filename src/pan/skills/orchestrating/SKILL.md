@@ -69,6 +69,27 @@ Then post the result back to the thread through the single egress path (INV-4):
 If no worker is bound to the thread (`pan threads get` returned `null`, so `pan status` would error),
 instead post a short "no active worker for this thread" reply via `pan slack-post` — do not spawn.
 
+### (a2) Sessions query — `directive.mode == "sessions"` (checked before any binding lookup)
+
+List ALL live sessions, reconciled against the pan thread map, and report; touch no worker. This is
+the "what's running / list all the threads" request. It is thread-independent — it does not resolve
+or need a binding, and `cleaned_text` is never relayed into a pane. Shell:
+
+    pan sessions --json
+
+This prints a JSON array of session summaries, each with `workspace_name`, `pane_id`, `agent_status`
+(herdr's live status), `is_pan_owned`, and — for pan-owned sessions — `thread_ts`, `pan_status` (the
+recorded status), and `drift` (true when `pan_status` disagrees with the live `agent_status`). Format
+it into a short, readable in-thread summary: one line per session, naming pan-owned ones by their
+thread and calling out any with `drift` true (pan says X, herdr says Y). Keep it plain text — no
+emojis. Then post it back through the single egress path (INV-4):
+
+    pan slack-post --thread <thread_ts> --channel <channel> --text '<sessions summary>'
+
+The reconcile, drift detection, and morcli enrichment all happen inside `pan sessions` (deterministic
+code); you only format the returned array and post it. Do not re-derive drift or re-query herdr
+yourself.
+
 ### (b) Follow-up to a live worker — a record exists with `status` spawning/running/blocked
 
 Relay `cleaned_text` into that worker's pane. Read `pane_ids[0]` from the record and send it:

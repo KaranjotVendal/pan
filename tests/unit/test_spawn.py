@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pan.errors import HerdrError, SpawnError
+from pan.errors import HerdrError, MorcliError, SpawnError
 from pan.models import ThreadRecord, WorkerStatus
 from pan.spawn import ClaudeLauncher, spawn_worker
 
@@ -99,6 +99,22 @@ class FakeIdGen:
         return "abcd1234-ffff-0000-1111-222233334444"
 
 
+class FakeMorcli:
+    def __init__(self, *, handle: str | None = "sess-wsid", fail: bool = False) -> None:
+        self._handle = handle
+        self._fail = fail
+        self.resolved: list[str] = []
+
+    def session_status(self, handle: str) -> WorkerStatus:  # pragma: no cover
+        raise NotImplementedError
+
+    def resolve_session(self, workspace_id: str) -> str | None:
+        self.resolved.append(workspace_id)
+        if self._fail:
+            raise MorcliError("morcli streams failed")
+        return self._handle
+
+
 def _spawn(
     *,
     stream: str | None,
@@ -108,6 +124,7 @@ def _spawn(
     launcher: FakeLauncher,
     thread_map: FakeThreadMap,
     slack: FakeSlack,
+    morcli: FakeMorcli | None = None,
 ) -> ThreadRecord:
     return spawn_worker(
         thread_ts="1718000000.000200",
@@ -123,6 +140,7 @@ def _spawn(
         slack=slack,
         clock=FakeClock(),
         id_gen=FakeIdGen(),
+        morcli=morcli if morcli is not None else FakeMorcli(),
     )
 
 
@@ -154,6 +172,71 @@ def test_spawn_worker_command_order_and_record(tmp_path: Path) -> None:
     assert launcher.calls == [(tmp_path / "pan-backend", "pane1", "do the thing")]
     # The record is the sole thread->worker binding (INV-7).
     assert thread_map.records["1718000000.000200"] is record
+
+
+def test_spawn_worker_captures_morcli_session_on_success(tmp_path: Path) -> None:
+    timeline: list[str] = []
+    thread_map = FakeThreadMap()
+    morcli = FakeMorcli(handle="sess-live-1")
+
+    record = _spawn(
+        stream="backend",
+        base=tmp_path,
+        git=FakeGit(timeline),
+        herdr=FakeHerdr(timeline),
+        launcher=FakeLauncher(timeline),
+        thread_map=thread_map,
+        slack=FakeSlack(),
+        morcli=morcli,
+    )
+
+    # The handle is resolved from the freshly created workspace id (R-7) and recorded
+    # so the reconciled sessions view shows real morcli linkage.
+    assert morcli.resolved == ["wsid"]
+    assert record.morcli_session == "sess-live-1"
+    assert thread_map.records["1718000000.000200"].morcli_session == "sess-live-1"
+
+
+def test_spawn_worker_tolerates_unindexed_morcli_session(tmp_path: Path) -> None:
+    # morcli lag: the just-spawned session is not indexed yet, so resolve_session
+    # returns None. The spawn still succeeds; morcli_session is resolved later.
+    timeline: list[str] = []
+
+    record = _spawn(
+        stream="backend",
+        base=tmp_path,
+        git=FakeGit(timeline),
+        herdr=FakeHerdr(timeline),
+        launcher=FakeLauncher(timeline),
+        thread_map=FakeThreadMap(),
+        slack=FakeSlack(),
+        morcli=FakeMorcli(handle=None),
+    )
+
+    assert record.status is WorkerStatus.SPAWNING
+    assert record.morcli_session is None
+
+
+def test_spawn_worker_tolerates_morcli_resolve_failure(tmp_path: Path) -> None:
+    # A morcli subprocess failure during the best-effort handle capture must not fail the
+    # already-launched worker: the spawn still succeeds with morcli_session None.
+    timeline: list[str] = []
+
+    record = _spawn(
+        stream="backend",
+        base=tmp_path,
+        git=FakeGit(timeline),
+        herdr=FakeHerdr(timeline),
+        launcher=FakeLauncher(timeline),
+        thread_map=FakeThreadMap(),
+        slack=FakeSlack(),
+        morcli=FakeMorcli(fail=True),
+    )
+
+    assert record.status is WorkerStatus.SPAWNING
+    assert record.morcli_session is None
+    # The worker was still launched despite the morcli failure.
+    assert timeline == ["worktree", "workspace", "launch"]
 
 
 def test_spawn_worker_posts_ack_via_egress(tmp_path: Path) -> None:

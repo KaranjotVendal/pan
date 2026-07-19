@@ -130,3 +130,53 @@ def test_value_flag_does_not_swallow_a_following_flag() -> None:
     assert directive.target_stream is None
     assert directive.force_new is True
     assert directive.cleaned_text == "build the thing"
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_cleaned",
+    [
+        ("--sessions", ""),
+        ("--sessions right now", "right now"),
+        ("what's running", "what's running"),
+        ("whats running?", "whats running?"),
+        ("list sessions", "list sessions"),
+        ("list threads", "list threads"),
+        ("can you list all the threads?", "can you list all the threads?"),
+    ],
+)
+def test_sessions_flag_and_soft_triggers_yield_sessions_mode(
+    raw_text: str, expected_cleaned: str
+) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.SESSIONS
+    assert directive.cleaned_text == expected_cleaned
+
+
+def test_sessions_flag_combines_with_other_flags_and_is_stripped() -> None:
+    directive = parse_directive("--sessions --new tidy up")
+
+    assert directive.mode is TaskMode.SESSIONS
+    assert directive.force_new is True
+    assert directive.cleaned_text == "tidy up"
+
+
+def test_sessions_flag_takes_precedence_over_status() -> None:
+    # Both are no-worker report modes; the broader "list all" sessions view wins.
+    directive = parse_directive("--status --sessions")
+
+    assert directive.mode is TaskMode.SESSIONS
+    assert directive.cleaned_text == ""
+
+
+def test_explicit_status_flag_beats_a_soft_sessions_trigger() -> None:
+    # An explicit mode flag is authoritative over the convenience soft trigger.
+    directive = parse_directive("--status list threads")
+
+    assert directive.mode is TaskMode.STATUS
+
+
+def test_ordinary_task_prose_does_not_trigger_sessions() -> None:
+    directive = parse_directive("build the dashboard that shows running jobs")
+
+    assert directive.mode is TaskMode.DELEGATE

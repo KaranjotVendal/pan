@@ -64,6 +64,10 @@ class GitWorktreeAdapter(Protocol):
 class MorcliAdapter(Protocol):
     def session_status(self, handle: str) -> WorkerStatus: ...
 
+    # Best-effort workspace_id -> session_id resolution at spawn (R-7). Returns None when
+    # morcli has not indexed the just-created session yet (the lag is tolerated).
+    def resolve_session(self, workspace_id: str) -> str | None: ...
+
 
 class AgentLauncher(Protocol):
     # Starts a worker agent session in the given pane with the task brief. The

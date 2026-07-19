@@ -11,6 +11,7 @@ class TaskMode(StrEnum):
     DELEGATE = "delegate"
     SYNC = "sync"
     STATUS = "status"
+    SESSIONS = "sessions"
 
 
 class WorkerStatus(StrEnum):

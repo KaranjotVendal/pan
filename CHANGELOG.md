@@ -26,6 +26,25 @@ as it works (see `AGENT_LOOP.md` step 9).
   and missing-cwd branches; the `collect_sessions` reconcile (pan-owned by name, resolved-cwd
   fallback, external, records-present-no-match, drift cross-product, morcli-error tolerated, no-morcli)
   and the `session_drift` matrix; and the `pan sessions` `--json` and human-table CLI paths.
+- The `@pan sessions` Slack path and real morcli session linkage (Task 27, Milestone M10). Added a
+  `TaskMode.SESSIONS` mode and taught `parse_directive` to route it: the explicit `--sessions` flag
+  (canonical) and a fixed, deterministic soft-trigger phrase set ("what's running", "list threads",
+  "list all the threads", ...) matched by pure string logic (INV-3), never model judgment. Precedence
+  is deterministic — an explicit `--sessions`/`--status` flag is authoritative (`--sessions` wins
+  when both appear), and the soft trigger outranks `--sync`/delegate but not an explicit `--status`.
+  The orchestrating skill gained a sessions route that runs `pan sessions --json`, formats the result,
+  and posts it in-thread through the single Slack egress (INV-4), touching no worker. Closed the R-7
+  null-`morcli_session` gap: `spawn_worker` now takes a `morcli` adapter and best-effort captures the
+  session handle at spawn via the new `MorcliAdapter.resolve_session(workspace_id) -> str | None`
+  (returns None on the indexing lag, tolerates a `MorcliError` so a morcli hiccup never fails the
+  already-launched worker). Added tests: the directive `--sessions`/soft-trigger/precedence cases;
+  `resolve_session` returns the session id / None on no-match / raises `MorcliError` on subprocess
+  failure; and `spawn_worker` captures the handle, tolerates the lag (None), and tolerates a
+  `MorcliError` without failing the spawn.
+
+  DEFERRED to a human session (mocks cannot exercise it): the live `@pan sessions` round-trip — from
+  the phone, the orchestrator running `pan sessions --json` and posting the reconciled summary through
+  the real Slack egress.
 
 ### Changed
 
