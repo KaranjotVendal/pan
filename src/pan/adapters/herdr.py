@@ -7,10 +7,23 @@ from typing import Any
 
 from pan.errors import HerdrError
 from pan.logging import initialise_logger
+from pan.models import AgentStatus, LiveSession
 
 logger = initialise_logger(__name__)
 
 _HERDR = "herdr"
+
+
+def _map_agent_status(raw_status: object) -> AgentStatus:
+    # Map herdr's vendor agent-status string to the closed AgentStatus set; any value
+    # that is not a known member (or a missing/non-string one) absorbs to UNKNOWN so an
+    # unexpected vendor value never crashes the adapter (tech-spec R-9).
+    if isinstance(raw_status, str):
+        try:
+            return AgentStatus(raw_status)
+        except ValueError:
+            return AgentStatus.UNKNOWN
+    return AgentStatus.UNKNOWN
 
 
 class ShellHerdrAdapter:
@@ -48,6 +61,46 @@ class ShellHerdrAdapter:
     def kill_pane(self, pane_id: str) -> None:
         self._run(["pane", "close", pane_id], expect_json=False)
         logger.info(f"herdr kill pane={pane_id}")
+
+    def list_workspaces(self) -> list[LiveSession]:
+        # Enumerate every live herdr workspace, then each workspace's panes, mapping the
+        # vendor JSON to LiveSession domain values (INV-8, BR-2). Each pane becomes one
+        # LiveSession; its agent_status carries whether it is an active agent or an idle
+        # shell. The exact `workspace list` / `pane list` JSON shape is version-dependent
+        # and deferred to live verification (tech-spec R-9).
+        workspaces = self._run(["workspace", "list"]).get("workspaces")
+        if not isinstance(workspaces, list):
+            raise HerdrError("herdr workspace list output is missing a workspaces array")
+
+        sessions: list[LiveSession] = []
+        for workspace in workspaces:
+            if not isinstance(workspace, dict) or "workspace_id" not in workspace:
+                continue
+            workspace_id = str(workspace["workspace_id"])
+            workspace_name = str(workspace.get("label") or workspace.get("name") or workspace_id)
+            workspace_cwd = workspace.get("cwd")
+
+            panes = self._run(["pane", "list", "--workspace", workspace_id]).get("panes")
+            if not isinstance(panes, list):
+                continue
+            for pane in panes:
+                if not isinstance(pane, dict) or "pane_id" not in pane:
+                    continue
+                cwd_value = pane.get("cwd") or workspace_cwd
+                if not isinstance(cwd_value, str):
+                    continue
+                sessions.append(
+                    LiveSession(
+                        workspace_name=workspace_name,
+                        workspace_id=workspace_id,
+                        pane_id=str(pane["pane_id"]),
+                        cwd=Path(cwd_value),
+                        agent_status=_map_agent_status(pane.get("agent_status")),
+                    )
+                )
+
+        logger.info(f"herdr list_workspaces sessions={len(sessions)}")
+        return sessions
 
     def _select_pane_id(self, panes: list[Any], active_tab_id: object) -> str:
         if isinstance(active_tab_id, str):

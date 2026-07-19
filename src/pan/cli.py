@@ -38,8 +38,9 @@ from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
 from pan.logging import initialise_logger
-from pan.models import PanConfig, SlackCredentials, WorkerStatus
+from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
+from pan.sessions import collect_sessions
 from pan.spawn import ClaudeLauncher, spawn_worker
 from pan.threadmap import FileThreadMap
 from pan.watcher import WatchdogInboxWatcher
@@ -284,6 +285,37 @@ def status(thread: str = typer.Option(..., "--thread")) -> None:
     handle = record.morcli_session or record.workspace_id
     worker_status = ShellMorcliAdapter().session_status(handle)
     typer.echo(worker_status.value)
+
+
+def _render_sessions_table(summaries: list[SessionSummary]) -> str:
+    header = f"{'PANE':<8} {'WORKSPACE':<20} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} DRIFT"
+    lines = [header]
+    for summary in summaries:
+        owner = "pan" if summary.is_pan_owned else "external"
+        pan_status = summary.pan_status.value if summary.pan_status is not None else "-"
+        drift = "DRIFT" if summary.drift else ""
+        lines.append(
+            f"{summary.pane_id:<8} {summary.workspace_name:<20} "
+            f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift}"
+        )
+    return "\n".join(lines)
+
+
+@app.command()
+def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
+    """List all live herdr claude sessions, reconciled against the pan thread map,
+    flagging status drift. --json emits the SessionSummary list for the orchestrator."""
+    config = _config()
+    clock = SystemClock()
+    summaries = collect_sessions(
+        ShellHerdrAdapter(),
+        FileThreadMap(config.paths.threads, clock),
+        ShellMorcliAdapter(),
+    )
+    if as_json:
+        typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
+        return
+    typer.echo(_render_sessions_table(summaries))
 
 
 @app.command()

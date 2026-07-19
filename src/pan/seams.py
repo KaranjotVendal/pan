@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from pan.models import InboxItem, ThreadRecord, WorkerStatus
+from pan.models import InboxItem, LiveSession, ThreadRecord, WorkerStatus
 
 # Every seam Protocol lives here for a single import point.
 
@@ -40,6 +40,8 @@ class ThreadMap(Protocol):
 
     def update_status(self, thread_ts: str, status: WorkerStatus) -> None: ...
 
+    def records(self) -> list[ThreadRecord]: ...
+
 
 class HerdrAdapter(Protocol):
     def create_workspace(self, label: str, cwd: Path) -> tuple[str, str]: ...
@@ -49,6 +51,8 @@ class HerdrAdapter(Protocol):
     def send_text(self, pane_id: str, text: str) -> None: ...
 
     def kill_pane(self, pane_id: str) -> None: ...
+
+    def list_workspaces(self) -> list[LiveSession]: ...
 
 
 class GitWorktreeAdapter(Protocol):

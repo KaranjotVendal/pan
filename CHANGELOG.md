@@ -7,6 +7,26 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Added
+
+- `pan sessions` — a reconciled "what's running" view (Task 26, Milestone M10). It enumerates ALL
+  live herdr claude sessions (a new `HerdrAdapter.list_workspaces()` shelling `herdr workspace list`
+  plus a `pane list` per workspace, mapping vendor JSON to the confined `LiveSession` domain type —
+  INV-8), left-joins the pan thread map to identify pan-owned sessions (by `workspace_name`, with a
+  symlink-safe resolved-cwd fallback), and FLAGS status drift between pan's recorded `WorkerStatus`
+  and herdr's live `AgentStatus` without healing it (report-only in v1; INV-7 stays read-only). The
+  reconcile lives in a new pure `collect_sessions(herdr, thread_map, morcli)` core in
+  `src/pan/sessions.py` with a directly-tested `session_drift` predicate (idle/working→running,
+  blocked→blocked, done→done; `SPAWNING` and `UNKNOWN` excluded; the live-test case pan-`blocked`
+  vs herdr-`idle` is drift). morcli enrichment is best-effort and tolerates `MorcliError` so a
+  morcli hiccup never drops a session. New models: `AgentStatus` (StrEnum, vocabulary flagged R-9 as
+  unverified against live herdr), frozen `LiveSession` and `SessionSummary`; new `ThreadMap.records()`
+  read accessor. The command prints a human table or, with `--json`, the `SessionSummary` list for
+  the orchestrator. Added tests: herdr `list_workspaces` argv/parse/agent-status-mapping/malformed
+  and missing-cwd branches; the `collect_sessions` reconcile (pan-owned by name, resolved-cwd
+  fallback, external, records-present-no-match, drift cross-product, morcli-error tolerated, no-morcli)
+  and the `session_drift` matrix; and the `pan sessions` `--json` and human-table CLI paths.
+
 ### Changed
 
 - Reconciled the tech spec (`docs/superpowers/specs/2026-07-16-pan-tech-spec.md`) with what was
