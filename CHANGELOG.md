@@ -7,6 +7,45 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Added
+
+- `pan sessions` — a reconciled "what's running" view (Task 26, Milestone M10). It enumerates ALL
+  live herdr claude sessions (a new `HerdrAdapter.list_workspaces()` shelling `herdr workspace list`
+  plus a `pane list` per workspace, mapping vendor JSON to the confined `LiveSession` domain type —
+  INV-8), left-joins the pan thread map to identify pan-owned sessions (by `workspace_name`, with a
+  symlink-safe resolved-cwd fallback), and FLAGS status drift between pan's recorded `WorkerStatus`
+  and herdr's live `AgentStatus` without healing it (report-only in v1; INV-7 stays read-only). The
+  reconcile lives in a new pure `collect_sessions(herdr, thread_map, morcli)` core in
+  `src/pan/sessions.py` with a directly-tested `session_drift` predicate (idle/working→running,
+  blocked→blocked, done→done; `SPAWNING` and `UNKNOWN` excluded; the live-test case pan-`blocked`
+  vs herdr-`idle` is drift). morcli enrichment is best-effort and tolerates `MorcliError` so a
+  morcli hiccup never drops a session. New models: `AgentStatus` (StrEnum, vocabulary flagged R-9 as
+  unverified against live herdr), frozen `LiveSession` and `SessionSummary`; new `ThreadMap.records()`
+  read accessor. The command prints a human table or, with `--json`, the `SessionSummary` list for
+  the orchestrator. Added tests: herdr `list_workspaces` argv/parse/agent-status-mapping/malformed
+  and missing-cwd branches; the `collect_sessions` reconcile (pan-owned by name, resolved-cwd
+  fallback, external, records-present-no-match, drift cross-product, morcli-error tolerated, no-morcli)
+  and the `session_drift` matrix; and the `pan sessions` `--json` and human-table CLI paths.
+- The `@pan sessions` Slack path and real morcli session linkage (Task 27, Milestone M10). Added a
+  `TaskMode.SESSIONS` mode and taught `parse_directive` to route it: the explicit `--sessions` flag
+  (canonical) and a fixed, deterministic soft-trigger phrase set ("what's running", "list threads",
+  "list all the threads", ...) matched by pure string logic (INV-3), never model judgment. Precedence
+  is deterministic — an explicit `--sessions`/`--status` flag is authoritative (`--sessions` wins
+  when both appear), and the soft trigger outranks `--sync`/delegate but not an explicit `--status`.
+  The orchestrating skill gained a sessions route that runs `pan sessions --json`, formats the result,
+  and posts it in-thread through the single Slack egress (INV-4), touching no worker. Closed the R-7
+  null-`morcli_session` gap: `spawn_worker` now takes a `morcli` adapter and best-effort captures the
+  session handle at spawn via the new `MorcliAdapter.resolve_session(workspace_id) -> str | None`
+  (returns None on the indexing lag, tolerates a `MorcliError` so a morcli hiccup never fails the
+  already-launched worker). Added tests: the directive `--sessions`/soft-trigger/precedence cases;
+  `resolve_session` returns the session id / None on no-match / raises `MorcliError` on subprocess
+  failure; and `spawn_worker` captures the handle, tolerates the lag (None), and tolerates a
+  `MorcliError` without failing the spawn.
+
+  DEFERRED to a human session (mocks cannot exercise it): the live `@pan sessions` round-trip — from
+  the phone, the orchestrator running `pan sessions --json` and posting the reconciled summary through
+  the real Slack egress.
+
 ### Changed
 
 - Reconciled the tech spec (`docs/superpowers/specs/2026-07-16-pan-tech-spec.md`) with what was

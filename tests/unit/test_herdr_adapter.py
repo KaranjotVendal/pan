@@ -9,6 +9,7 @@ import pytest
 
 from pan.adapters.herdr import ShellHerdrAdapter
 from pan.errors import HerdrError
+from pan.models import AgentStatus
 
 
 class FakeCompleted:
@@ -165,3 +166,93 @@ def test_create_workspace_with_no_panes_raises(
 
     with pytest.raises(HerdrError):
         ShellHerdrAdapter().create_workspace("x", Path("/tmp/x"))
+
+
+def test_list_workspaces_builds_commands_and_parses_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `workspace list` enumerates the live workspaces; a `pane list` per workspace
+    # resolves each pane's id / cwd / agent status. Every pane becomes a LiveSession
+    # and the vendor agent-status string maps into AgentStatus (an unrecognized string
+    # absorbs to UNKNOWN so an unexpected value never crashes the adapter).
+    list_out = _envelope({"workspaces": [{"workspace_id": "1", "label": "pan-backend"}]})
+    pane_out = _envelope(
+        {
+            "panes": [
+                {"pane_id": "1-1", "tab_id": "1:1", "cwd": "/tmp/wt", "agent_status": "working"},
+                {"pane_id": "1-2", "tab_id": "1:1", "cwd": "/tmp/wt", "agent_status": "mystery"},
+            ]
+        }
+    )
+    calls = _install_runner(monkeypatch, [(list_out, 0), (pane_out, 0)])
+
+    sessions = ShellHerdrAdapter().list_workspaces()
+
+    assert calls[0] == ["herdr", "workspace", "list"]
+    assert calls[1] == ["herdr", "pane", "list", "--workspace", "1"]
+    assert [session.pane_id for session in sessions] == ["1-1", "1-2"]
+    first_session = sessions[0]
+    assert first_session.workspace_name == "pan-backend"
+    assert first_session.workspace_id == "1"
+    assert first_session.cwd == Path("/tmp/wt")
+    assert first_session.agent_status is AgentStatus.WORKING
+    # An unrecognized vendor status absorbs to UNKNOWN, never a crash.
+    assert sessions[1].agent_status is AgentStatus.UNKNOWN
+
+
+def test_list_workspaces_reads_cwd_from_workspace_when_pane_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_out = _envelope(
+        {"workspaces": [{"workspace_id": "2", "label": "pan-ui", "cwd": "/tmp/ui"}]}
+    )
+    pane_out = _envelope({"panes": [{"pane_id": "2-1", "agent_status": "idle"}]})
+    _install_runner(monkeypatch, [(list_out, 0), (pane_out, 0)])
+
+    sessions = ShellHerdrAdapter().list_workspaces()
+
+    assert sessions[0].cwd == Path("/tmp/ui")
+    assert sessions[0].agent_status is AgentStatus.IDLE
+
+
+def test_list_workspaces_defaults_missing_agent_status_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_out = _envelope({"workspaces": [{"workspace_id": "3", "label": "pan-x"}]})
+    pane_out = _envelope({"panes": [{"pane_id": "3-1", "cwd": "/tmp/x"}]})
+    _install_runner(monkeypatch, [(list_out, 0), (pane_out, 0)])
+
+    sessions = ShellHerdrAdapter().list_workspaces()
+
+    assert sessions[0].agent_status is AgentStatus.UNKNOWN
+
+
+def test_list_workspaces_nonzero_exit_raises_herdr_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_runner(monkeypatch, [("", 5)])
+
+    with pytest.raises(HerdrError):
+        ShellHerdrAdapter().list_workspaces()
+
+
+def test_list_workspaces_missing_workspaces_array_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A malformed envelope with no workspaces array is a hard herdr failure.
+    _install_runner(monkeypatch, [(_envelope({"workspaces": "not-a-list"}), 0)])
+
+    with pytest.raises(HerdrError):
+        ShellHerdrAdapter().list_workspaces()
+
+
+def test_list_workspaces_drops_pane_with_no_resolvable_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pane carrying neither its own cwd nor a workspace cwd cannot be a LiveSession
+    # (cwd is required for the pan-ownership join), so it is silently omitted.
+    list_out = _envelope({"workspaces": [{"workspace_id": "4", "label": "pan-y"}]})
+    pane_out = _envelope({"panes": [{"pane_id": "4-1", "agent_status": "idle"}]})
+    _install_runner(monkeypatch, [(list_out, 0), (pane_out, 0)])
+
+    assert ShellHerdrAdapter().list_workspaces() == []

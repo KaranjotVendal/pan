@@ -123,3 +123,33 @@ def test_non_dict_stream_entries_are_skipped(monkeypatch: pytest.MonkeyPatch) ->
     _install_runner(monkeypatch, stdout=stdout)
 
     assert ShellMorcliAdapter().session_status("sess-1") is WorkerStatus.DONE
+
+
+def test_resolve_session_returns_session_id_for_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_runner(monkeypatch, stdout=_streams_json("working", session_id="sess-42"))
+
+    resolved = ShellMorcliAdapter().resolve_session("w1")
+
+    assert resolved == "sess-42"
+    assert calls[0] == ["morcli", "streams", "--json"]
+
+
+def test_resolve_session_returns_none_when_not_indexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The just-spawned-session lag: morcli has no stream for the workspace yet, so the
+    # handle resolution is best-effort and returns None rather than raising.
+    _install_runner(monkeypatch, stdout=_streams_json("working", session_id="sess-42"))
+
+    assert ShellMorcliAdapter().resolve_session("unknown-workspace") is None
+
+
+def test_resolve_session_nonzero_exit_raises_morcli_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_runner(monkeypatch, returncode=1)
+
+    with pytest.raises(MorcliError):
+        ShellMorcliAdapter().resolve_session("w1")

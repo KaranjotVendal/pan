@@ -11,6 +11,7 @@ class TaskMode(StrEnum):
     DELEGATE = "delegate"
     SYNC = "sync"
     STATUS = "status"
+    SESSIONS = "sessions"
 
 
 class WorkerStatus(StrEnum):
@@ -19,6 +20,20 @@ class WorkerStatus(StrEnum):
     BLOCKED = "blocked"
     DONE = "done"
     FAILED = "failed"
+
+
+class AgentStatus(StrEnum):
+    # herdr's live per-agent status vocabulary, modeled as a closed set so the reconcile
+    # compares typed values rather than raw strings. The members are inferred from the
+    # herdr skill docs and morcli's status map; VERIFY against real `herdr workspace
+    # list` / `pane list` output (tech-spec R-9) before treating them as final. UNKNOWN
+    # absorbs any value herdr reports that is not a known member, so an unexpected string
+    # never crashes the adapter.
+    IDLE = "idle"
+    WORKING = "working"
+    BLOCKED = "blocked"
+    DONE = "done"
+    UNKNOWN = "unknown"
 
 
 class Autonomy(StrEnum):
@@ -63,6 +78,32 @@ class ThreadRecord(BaseModel):
     status: WorkerStatus = WorkerStatus.SPAWNING
     created_at: datetime
     updated_at: datetime
+
+
+class LiveSession(BaseModel, frozen=True):
+    # The confined projection of one live herdr pane; the only session type the herdr
+    # adapter lets escape (INV-8). An immutable snapshot of the live view.
+    workspace_name: str
+    workspace_id: str
+    pane_id: str
+    cwd: Path
+    agent_status: AgentStatus
+
+
+class SessionSummary(BaseModel, frozen=True):
+    # A LiveSession flattened, plus the pan-owned join. The pan_* fields are None for an
+    # external (non-pan-owned) session. `drift` is meaningful only when is_pan_owned is
+    # True — an external session has no pan_status to disagree with.
+    workspace_name: str
+    workspace_id: str
+    pane_id: str
+    cwd: Path
+    agent_status: AgentStatus
+    thread_ts: str | None = None
+    pan_status: WorkerStatus | None = None
+    morcli_session: str | None = None
+    is_pan_owned: bool = False
+    drift: bool = False
 
 
 class SlackCredentials(BaseModel, frozen=True):

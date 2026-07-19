@@ -26,7 +26,15 @@ from pan.errors import (
 from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
-from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadRecord, WorkerStatus
+from pan.models import (
+    AgentStatus,
+    InboxItem,
+    PanConfig,
+    SessionSummary,
+    SlackCredentials,
+    ThreadRecord,
+    WorkerStatus,
+)
 from pan.threadmap import FileThreadMap
 
 runner = CliRunner()
@@ -225,6 +233,55 @@ def test_status_resolves_morcli_handle_from_thread(
     assert result.stdout.strip() == "running"
     # Resolved from the record's workspace_id (morcli_session is None until captured).
     assert handles == ["ws1"]
+
+
+def _summary(*, is_pan_owned: bool = True, drift: bool = False) -> SessionSummary:
+    return SessionSummary(
+        workspace_name="pan-a",
+        workspace_id="w1",
+        pane_id="1-1",
+        cwd=Path("/tmp/worktree"),
+        agent_status=AgentStatus.WORKING,
+        thread_ts="t-1" if is_pan_owned else None,
+        pan_status=WorkerStatus.RUNNING if is_pan_owned else None,
+        morcli_session="sess-1" if is_pan_owned else None,
+        is_pan_owned=is_pan_owned,
+        drift=drift,
+    )
+
+
+def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda herdr, thread_map, morcli: [_summary(drift=True)]
+    )
+
+    result = runner.invoke(cli.app, ["sessions", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data[0]["workspace_name"] == "pan-a"
+    assert data[0]["agent_status"] == "working"
+    assert data[0]["is_pan_owned"] is True
+    assert data[0]["drift"] is True
+    assert data[0]["thread_ts"] == "t-1"
+
+
+def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(
+        cli,
+        "collect_sessions",
+        lambda herdr, thread_map, morcli: [_summary(), _summary(is_pan_owned=False)],
+    )
+
+    result = runner.invoke(cli.app, ["sessions"])
+
+    assert result.exit_code == 0
+    assert "pan-a" in result.stdout
+    assert "1-1" in result.stdout
 
 
 @pytest.mark.parametrize(

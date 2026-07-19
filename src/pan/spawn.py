@@ -4,7 +4,7 @@ import json
 import shlex
 from pathlib import Path
 
-from pan.errors import HerdrError, SpawnError
+from pan.errors import HerdrError, MorcliError, SpawnError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import ThreadRecord, WorkerStatus
@@ -14,6 +14,7 @@ from pan.seams import (
     GitWorktreeAdapter,
     HerdrAdapter,
     IdGen,
+    MorcliAdapter,
     SlackAdapter,
     ThreadMap,
 )
@@ -66,6 +67,7 @@ def spawn_worker(
     slack: SlackAdapter,
     clock: Clock,
     id_gen: IdGen,
+    morcli: MorcliAdapter,
 ) -> ThreadRecord:
     label = f"pan-{stream}" if stream else f"pan-{id_gen.new_id()[:8]}"
     created_at = clock.now()
@@ -95,6 +97,16 @@ def spawn_worker(
         logger.info(f"spawn failed stream={label} thread={thread_ts}")
         raise SpawnError(f"spawn failed for stream {label}") from error
 
+    # Capture the morcli session handle at spawn (R-7), best-effort: resolve_session
+    # returns None if morcli has not indexed the just-created session yet, and a morcli
+    # subprocess failure is tolerated (the worker already launched) — either way the
+    # handle is resolved later on the first `pan status` / `pan sessions` query.
+    try:
+        morcli_session = morcli.resolve_session(workspace_id)
+    except MorcliError:
+        morcli_session = None
+        logger.info(f"morcli resolve tolerated stream={label} thread={thread_ts}")
+
     record = ThreadRecord(
         thread_ts=thread_ts,
         workspace_name=label,
@@ -102,6 +114,7 @@ def spawn_worker(
         channel=channel,
         pane_ids=[pane_id],
         worktree_path=worktree_path,
+        morcli_session=morcli_session,
         status=WorkerStatus.SPAWNING,
         created_at=created_at,
         updated_at=created_at,

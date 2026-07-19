@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from pan.models import InboxItem, ThreadRecord, WorkerStatus
+from pan.models import InboxItem, LiveSession, ThreadRecord, WorkerStatus
 
 # Every seam Protocol lives here for a single import point.
 
@@ -40,6 +40,8 @@ class ThreadMap(Protocol):
 
     def update_status(self, thread_ts: str, status: WorkerStatus) -> None: ...
 
+    def records(self) -> list[ThreadRecord]: ...
+
 
 class HerdrAdapter(Protocol):
     def create_workspace(self, label: str, cwd: Path) -> tuple[str, str]: ...
@@ -50,6 +52,8 @@ class HerdrAdapter(Protocol):
 
     def kill_pane(self, pane_id: str) -> None: ...
 
+    def list_workspaces(self) -> list[LiveSession]: ...
+
 
 class GitWorktreeAdapter(Protocol):
     def create_worktree(self, repo: Path, branch: str, base: Path) -> Path: ...
@@ -59,6 +63,10 @@ class GitWorktreeAdapter(Protocol):
 
 class MorcliAdapter(Protocol):
     def session_status(self, handle: str) -> WorkerStatus: ...
+
+    # Best-effort workspace_id -> session_id resolution at spawn (R-7). Returns None when
+    # morcli has not indexed the just-created session yet (the lag is tolerated).
+    def resolve_session(self, workspace_id: str) -> str | None: ...
 
 
 class AgentLauncher(Protocol):

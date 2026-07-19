@@ -47,6 +47,11 @@ class FileThreadMap:
     def get(self, thread_ts: str) -> ThreadRecord | None:
         return self._read_all().get(thread_ts)
 
+    def records(self) -> list[ThreadRecord]:
+        # All current bindings, for the reconcile view (collect_sessions) to left-join
+        # against live herdr sessions. Read-only; the thread map stays authoritative (INV-7).
+        return list(self._read_all().values())
+
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
         # The completion hooks resolve their thread from the worker's cwd; the thread
         # map stays the single source of truth (INV-7). Compare RESOLVED paths so a
