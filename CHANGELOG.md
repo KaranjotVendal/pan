@@ -9,6 +9,34 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `pan relay <target> <message>` — drive ANY live herdr session's pane by label, pan-owned OR
+  external (Task 28, Milestone M11). Makes the M10 read-only sessions view interactive: the command
+  builds `ShellHerdrAdapter`, enumerates the live set once via `list_workspaces()` (the M10 seam,
+  no new enumeration), resolves the target, and sends the message into its pane followed by a
+  content-free nudge (reusing the existing `send_text` + `nudge` seams — no new herdr write path).
+  Targeting is a new pure `resolve_target(selector, sessions)` core in a new `src/pan/interface.py`
+  (the interactive drive layer, kept separate from `sessions.py`'s read-only projection): exact-match
+  with precise-id precedence — a `workspace_id` match wins, then `pane_id`, then `workspace_name`
+  (label), of which zero raises `TargetNotFoundError` (CLI exit 20), one resolves, and more than one
+  raises `TargetAmbiguousError(selector, candidates)` (CLI exit 21), which carries the candidate
+  `LiveSession`s and renders their label + workspace_id + pane_id so the user can re-target by a
+  precise id (INV-3: exact string logic, no fuzzy judgment). `relay_to_session` returns the resolved
+  session so the CLI/orchestrator can build a precise ack; an unresolvable selector raises before any
+  send, so a bad target never drives a pane. Directives gained a leading-verb grammar: `relay
+  <target> <message...>` is recognized only in position 0 (a leading `!` before it still parses), the
+  second token is the `target`, and EVERYTHING after it is the `message` verbatim — no flag scan of
+  the body, so a flag-looking token inside a worker brief (`add the --json path`) survives; a
+  non-leading "relay" ("please relay this") stays DELEGATE. New `TaskMode.RELAY` and `Directive`
+  fields `target`/`message`; the value-free relay log records only pane_id, selector, and message
+  length (INV-9 — the message text is never a log argument). The orchestrating skill gained a RELAY
+  route (deterministic `pan relay`, single-egress ack, exit-20/21 not-found/candidate-list handling;
+  no fall back to spawn). Added tests: `resolve_target` precedence (unique label / workspace_id
+  precedence / pane_id / not-found / ambiguous-with-candidates incl. the rendered re-target string);
+  `relay_to_session` (sends into the resolved pane then nudges and returns the target; no send on an
+  unresolvable selector); the relay directive grammar (verbatim flag-looking message, leading `!`,
+  missing target, non-leading verb); and the `pan relay` CLI (echoes label+pane; not-found/ambiguous
+  propagate) plus exit-code table entries 20/21. The live-verify of the Slack `@pan relay` path is
+  deferred to a human session.
 - `pan sessions` — a reconciled "what's running" view (Task 26, Milestone M10). It enumerates ALL
   live herdr claude sessions (a new `HerdrAdapter.list_workspaces()` shelling `herdr workspace list`
   plus a `pane list` per workspace, mapping vendor JSON to the confined `LiveSession` domain type —

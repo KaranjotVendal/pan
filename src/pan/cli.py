@@ -29,6 +29,8 @@ from pan.errors import (
     PanError,
     SlackPostError,
     SpawnError,
+    TargetAmbiguousError,
+    TargetNotFoundError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
@@ -37,6 +39,7 @@ from pan.gateway.slack_post import slack_post
 from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
+from pan.interface import relay_to_session
 from pan.logging import initialise_logger
 from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
@@ -72,6 +75,8 @@ _EXIT_CODES: dict[type[PanError], int] = {
     SlackPostError: 17,
     GatedOpDeniedError: 18,
     MorcliError: 19,
+    TargetNotFoundError: 20,
+    TargetAmbiguousError: 21,
 }
 
 
@@ -317,6 +322,17 @@ def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
     typer.echo(_render_sessions_table(summaries))
+
+
+@app.command()
+def relay(
+    target: str = typer.Argument(..., help="session selector: label | workspace_id | pane_id"),
+    message: str = typer.Argument(..., help="text to send into the target pane"),
+) -> None:
+    """Relay a message into a live herdr session's pane (pan-owned or external)."""
+    herdr = ShellHerdrAdapter()
+    resolved = relay_to_session(herdr, target, message, herdr.list_workspaces())
+    typer.echo(f"relayed into {resolved.workspace_name} pane {resolved.pane_id}")
 
 
 @app.command()

@@ -180,3 +180,45 @@ def test_ordinary_task_prose_does_not_trigger_sessions() -> None:
     directive = parse_directive("build the dashboard that shows running jobs")
 
     assert directive.mode is TaskMode.DELEGATE
+
+
+def test_relay_verb_sets_target_and_verbatim_message() -> None:
+    directive = parse_directive("relay sra-codex re-run the failing test")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == "re-run the failing test"
+    assert directive.cleaned_text == "re-run the failing test"
+
+
+def test_relay_message_preserves_flag_looking_tokens() -> None:
+    # Everything after the target is the message verbatim — flag scanning must not run,
+    # so "--json" inside the brief is kept, not stripped.
+    directive = parse_directive("relay sra-codex add the --json path")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == "add the --json path"
+
+
+def test_relay_with_leading_bang_still_parses() -> None:
+    directive = parse_directive("!relay sra-codex ship it")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == "ship it"
+
+
+def test_relay_with_no_target_leaves_target_none() -> None:
+    directive = parse_directive("relay")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target is None
+    assert directive.message == ""
+
+
+def test_non_leading_relay_verb_stays_delegate() -> None:
+    directive = parse_directive("please relay this to the team")
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.target is None

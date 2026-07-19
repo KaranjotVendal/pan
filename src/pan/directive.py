@@ -25,6 +25,23 @@ def parse_directive(raw_text: str) -> Directive:
     if leading_bang_sync:
         stripped_text = stripped_text[1:].strip()
 
+    # Leading-verb grammar (checked before any flag scan, so the verb outranks every flag
+    # and the sessions soft trigger — INV-3): `relay <target> <message...>`. The verb is
+    # recognized only in position 0; the second token is the target and EVERYTHING after it
+    # is the message verbatim (no flag scan of the message body, so a flag-looking token
+    # inside a worker brief survives). A missing target leaves target=None for the resolver
+    # to surface deterministically rather than the parser guessing.
+    verb_tokens = stripped_text.split()
+    if verb_tokens and verb_tokens[0] == "relay":
+        target = verb_tokens[1] if len(verb_tokens) > 1 else None
+        message = " ".join(verb_tokens[2:])
+        return Directive(
+            mode=TaskMode.RELAY,
+            target=target,
+            message=message,
+            cleaned_text=message,
+        )
+
     has_sync_flag = leading_bang_sync
     has_status_flag = False
     has_sessions_flag = False

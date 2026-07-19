@@ -20,6 +20,8 @@ from pan.errors import (
     PanError,
     SlackPostError,
     SpawnError,
+    TargetAmbiguousError,
+    TargetNotFoundError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
@@ -29,6 +31,7 @@ from pan.inbox import FileInboxStore
 from pan.models import (
     AgentStatus,
     InboxItem,
+    LiveSession,
     PanConfig,
     SessionSummary,
     SlackCredentials,
@@ -284,6 +287,65 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "1-1" in result.stdout
 
 
+def _live(workspace_name: str, workspace_id: str, pane_id: str) -> LiveSession:
+    return LiveSession(
+        workspace_name=workspace_name,
+        workspace_id=workspace_id,
+        pane_id=pane_id,
+        cwd=Path("/tmp/worktree"),
+        agent_status=AgentStatus.WORKING,
+    )
+
+
+class _FakeHerdr:
+    def __init__(self, sessions: list[LiveSession]) -> None:
+        self._sessions = sessions
+        self.sent: list[tuple[str, str]] = []
+        self.nudged: list[str] = []
+
+    def list_workspaces(self) -> list[LiveSession]:
+        return self._sessions
+
+    def send_text(self, pane_id: str, text: str) -> None:
+        self.sent.append((pane_id, text))
+
+    def nudge(self, pane_id: str) -> None:
+        self.nudged.append(pane_id)
+
+
+def test_relay_echoes_resolved_label_and_pane(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+
+    result = runner.invoke(cli.app, ["relay", "sra-codex", "re-run the failing test"])
+
+    assert result.exit_code == 0
+    assert "relayed into sra-codex" in result.stdout
+    assert "wA:p1" in result.stdout
+    assert herdr.sent == [("wA:p1", "re-run the failing test")]
+    assert herdr.nudged == ["wA:p1"]
+
+
+def test_relay_not_found_propagates_target_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+
+    result = runner.invoke(cli.app, ["relay", "nope", "hello"])
+
+    assert isinstance(result.exception, TargetNotFoundError)
+    assert herdr.sent == []
+
+
+def test_relay_ambiguous_propagates_target_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("dup", "wA", "wA:p1"), _live("dup", "wB", "wB:p1")])
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+
+    result = runner.invoke(cli.app, ["relay", "dup", "hello"])
+
+    assert isinstance(result.exception, TargetAmbiguousError)
+    assert herdr.sent == []
+
+
 @pytest.mark.parametrize(
     "error, expected_code",
     [
@@ -297,6 +359,8 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
         (SlackPostError("x"), 17),
         (GatedOpDeniedError("x"), 18),
         (MorcliError("x"), 19),
+        (TargetNotFoundError("x"), 20),
+        (TargetAmbiguousError("x", []), 21),
         (PanError("x"), 1),
     ],
 )
