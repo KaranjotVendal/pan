@@ -298,10 +298,12 @@ def _live(workspace_name: str, workspace_id: str, pane_id: str) -> LiveSession:
 
 
 class _FakeHerdr:
-    def __init__(self, sessions: list[LiveSession]) -> None:
+    def __init__(self, sessions: list[LiveSession], read_pane_result: str = "recent text") -> None:
         self._sessions = sessions
+        self._read_pane_result = read_pane_result
         self.sent: list[tuple[str, str]] = []
         self.nudged: list[str] = []
+        self.read_pane_calls: list[tuple[str, int]] = []
 
     def list_workspaces(self) -> list[LiveSession]:
         return self._sessions
@@ -311,6 +313,20 @@ class _FakeHerdr:
 
     def nudge(self, pane_id: str) -> None:
         self.nudged.append(pane_id)
+
+    def read_pane(self, pane_id: str, lines: int) -> str:
+        self.read_pane_calls.append((pane_id, lines))
+        return self._read_pane_result
+
+
+class _FakeMorcli:
+    def __init__(self, transcript_result: str = "transcript text") -> None:
+        self._transcript_result = transcript_result
+        self.transcript_calls: list[str] = []
+
+    def transcript(self, handle: str) -> str:
+        self.transcript_calls.append(handle)
+        return self._transcript_result
 
 
 def test_relay_echoes_resolved_label_and_pane(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,6 +360,44 @@ def test_relay_ambiguous_propagates_target_ambiguous(monkeypatch: pytest.MonkeyP
 
     assert isinstance(result.exception, TargetAmbiguousError)
     assert herdr.sent == []
+
+
+def test_read_recent_echoes_raw_pane_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")], read_pane_result="RAW RECENT")
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+    monkeypatch.setattr(cli, "ShellMorcliAdapter", _FakeMorcli)
+
+    result = runner.invoke(cli.app, ["read", "sra-codex"])
+
+    assert result.exit_code == 0
+    assert "RAW RECENT" in result.stdout
+    # The recent-lines count comes from the named config constant, not an inlined literal.
+    assert herdr.read_pane_calls == [("wA:p1", cli.READ_RECENT_LINES)]
+
+
+def test_read_full_echoes_transcript_by_workspace_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
+    morcli = _FakeMorcli(transcript_result="FULL TRANSCRIPT")
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+    monkeypatch.setattr(cli, "ShellMorcliAdapter", lambda: morcli)
+
+    result = runner.invoke(cli.app, ["read", "sra-codex", "--full"])
+
+    assert result.exit_code == 0
+    assert "FULL TRANSCRIPT" in result.stdout
+    assert morcli.transcript_calls == ["wA"]
+    assert herdr.read_pane_calls == []
+
+
+def test_read_not_found_propagates_target_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
+    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+    monkeypatch.setattr(cli, "ShellMorcliAdapter", _FakeMorcli)
+
+    result = runner.invoke(cli.app, ["read", "nope"])
+
+    assert isinstance(result.exception, TargetNotFoundError)
+    assert herdr.read_pane_calls == []
 
 
 @pytest.mark.parametrize(

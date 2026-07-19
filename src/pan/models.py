@@ -13,6 +13,7 @@ class TaskMode(StrEnum):
     STATUS = "status"
     SESSIONS = "sessions"
     RELAY = "relay"  # drive a target session's pane with a message
+    READ = "read"  # read a target session's output (recent | --full transcript)
 
 
 class WorkerStatus(StrEnum):
@@ -59,6 +60,8 @@ class Directive(BaseModel, frozen=True):
     # address. `message` mirrors `cleaned_text` on the relay path.
     target: str | None = None
     message: str | None = None
+    # read the full transcript instead of recent lines (the `read` verb's --full modifier).
+    full: bool = False
     cleaned_text: str
 
 

@@ -26,11 +26,14 @@ def parse_directive(raw_text: str) -> Directive:
         stripped_text = stripped_text[1:].strip()
 
     # Leading-verb grammar (checked before any flag scan, so the verb outranks every flag
-    # and the sessions soft trigger — INV-3): `relay <target> <message...>`. The verb is
-    # recognized only in position 0; the second token is the target and EVERYTHING after it
-    # is the message verbatim (no flag scan of the message body, so a flag-looking token
-    # inside a worker brief survives). A missing target leaves target=None for the resolver
-    # to surface deterministically rather than the parser guessing.
+    # and the sessions soft trigger — INV-3). The verb is recognized only in position 0;
+    # the second token is the target, and a missing target leaves target=None for the
+    # resolver to surface deterministically rather than the parser guessing.
+    #
+    # `relay <target> <message...>`: EVERYTHING after the target is the message verbatim
+    # (no flag scan of the message body, so a flag-looking token inside a worker brief
+    # survives). `read <target> [--full]`: read carries no message; the remainder is scanned
+    # only for the --full modifier.
     verb_tokens = stripped_text.split()
     if verb_tokens and verb_tokens[0] == "relay":
         target = verb_tokens[1] if len(verb_tokens) > 1 else None
@@ -40,6 +43,15 @@ def parse_directive(raw_text: str) -> Directive:
             target=target,
             message=message,
             cleaned_text=message,
+        )
+    if verb_tokens and verb_tokens[0] == "read":
+        target = verb_tokens[1] if len(verb_tokens) > 1 else None
+        full = "--full" in verb_tokens[2:]
+        return Directive(
+            mode=TaskMode.READ,
+            target=target,
+            full=full,
+            cleaned_text="",
         )
 
     has_sync_flag = leading_bang_sync

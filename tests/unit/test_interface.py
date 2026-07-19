@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from pan.errors import TargetAmbiguousError, TargetNotFoundError
-from pan.interface import relay_to_session, resolve_target
-from pan.models import AgentStatus, LiveSession
+from pan.interface import read_session, relay_to_session, resolve_target
+from pan.models import AgentStatus, LiveSession, WorkerStatus
 
 
 def _live(
@@ -25,9 +25,11 @@ def _live(
 
 
 class RecordingHerdr:
-    def __init__(self) -> None:
+    def __init__(self, read_pane_result: str = "recent lines") -> None:
         self.sent: list[tuple[str, str]] = []
         self.nudged: list[str] = []
+        self.read_pane_calls: list[tuple[str, int]] = []
+        self._read_pane_result = read_pane_result
 
     def create_workspace(self, label: str, cwd: Path) -> tuple[str, str]:  # pragma: no cover
         raise NotImplementedError
@@ -43,6 +45,26 @@ class RecordingHerdr:
 
     def list_workspaces(self) -> list[LiveSession]:  # pragma: no cover
         raise NotImplementedError
+
+    def read_pane(self, pane_id: str, lines: int) -> str:
+        self.read_pane_calls.append((pane_id, lines))
+        return self._read_pane_result
+
+
+class RecordingMorcli:
+    def __init__(self, transcript_result: str = "full transcript") -> None:
+        self.transcript_calls: list[str] = []
+        self._transcript_result = transcript_result
+
+    def session_status(self, handle: str) -> WorkerStatus:  # pragma: no cover
+        raise NotImplementedError
+
+    def resolve_session(self, workspace_id: str) -> str | None:  # pragma: no cover
+        raise NotImplementedError
+
+    def transcript(self, handle: str) -> str:
+        self.transcript_calls.append(handle)
+        return self._transcript_result
 
 
 # Canned live set: two sessions sharing the label "sra-codex" (distinct workspace_ids /
@@ -117,3 +139,47 @@ def test_relay_does_not_send_when_target_unresolvable(selector: str) -> None:
 
     assert herdr.sent == []
     assert herdr.nudged == []
+
+
+def test_read_recent_reads_pane_and_leaves_morcli_untouched() -> None:
+    herdr = RecordingHerdr(read_pane_result="the recent pane text")
+    morcli = RecordingMorcli()
+
+    content = read_session(herdr, morcli, "sra-claude", _sessions(), full=False, lines=42)
+
+    assert content == "the recent pane text"
+    assert herdr.read_pane_calls == [("wC:p1", 42)]
+    assert morcli.transcript_calls == []
+
+
+def test_read_full_uses_transcript_and_leaves_pane_read_untouched() -> None:
+    herdr = RecordingHerdr()
+    morcli = RecordingMorcli(transcript_result="the full transcript")
+
+    content = read_session(herdr, morcli, "sra-claude", _sessions(), full=True, lines=42)
+
+    assert content == "the full transcript"
+    # full transcript resolves content-first by the target's workspace_id (M10 handle logic).
+    assert morcli.transcript_calls == ["wC"]
+    assert herdr.read_pane_calls == []
+
+
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize(
+    "selector, expected_error",
+    [
+        ("does-not-exist", TargetNotFoundError),
+        ("sra-codex", TargetAmbiguousError),  # duplicate label refused before any read
+    ],
+)
+def test_read_does_not_touch_seams_when_target_unresolvable(
+    selector: str, expected_error: type[Exception], full: bool
+) -> None:
+    herdr = RecordingHerdr()
+    morcli = RecordingMorcli()
+
+    with pytest.raises(expected_error):
+        read_session(herdr, morcli, selector, _sessions(), full=full, lines=10)
+
+    assert herdr.read_pane_calls == []
+    assert morcli.transcript_calls == []

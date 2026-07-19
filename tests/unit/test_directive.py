@@ -222,3 +222,44 @@ def test_non_leading_relay_verb_stays_delegate() -> None:
 
     assert directive.mode is TaskMode.DELEGATE
     assert directive.target is None
+
+
+def test_read_verb_sets_target_and_defaults_full_false() -> None:
+    directive = parse_directive("read sra-codex")
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target == "sra-codex"
+    assert directive.full is False
+    assert directive.cleaned_text == ""
+    assert directive.message is None
+
+
+def test_read_verb_with_full_flag_sets_full() -> None:
+    directive = parse_directive("read sra-codex --full")
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target == "sra-codex"
+    assert directive.full is True
+
+
+def test_read_with_leading_bang_still_parses() -> None:
+    directive = parse_directive("!read sra-codex --full")
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target == "sra-codex"
+    assert directive.full is True
+
+
+def test_read_with_no_target_leaves_target_none() -> None:
+    directive = parse_directive("read")
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target is None
+    assert directive.full is False
+
+
+def test_non_leading_read_verb_stays_delegate() -> None:
+    directive = parse_directive("please read the logs and report")
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.target is None

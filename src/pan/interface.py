@@ -3,7 +3,7 @@ from __future__ import annotations
 from pan.errors import TargetAmbiguousError, TargetNotFoundError
 from pan.logging import initialise_logger
 from pan.models import LiveSession
-from pan.seams import HerdrAdapter
+from pan.seams import HerdrAdapter, MorcliAdapter
 
 logger = initialise_logger(__name__)
 
@@ -44,3 +44,29 @@ def relay_to_session(
     herdr.nudge(target.pane_id)
     logger.info(f"relay pane={target.pane_id} selector={selector} len={len(message)}")
     return target
+
+
+def read_session(
+    herdr: HerdrAdapter,
+    morcli: MorcliAdapter,
+    selector: str,
+    sessions: list[LiveSession],
+    *,
+    full: bool,
+    lines: int,
+) -> str:
+    # Resolve the target and return its RAW output — the recent rendered lines by default
+    # (fast, via herdr), or the full transcript via morcli when full=True. The caller (the
+    # orchestrator) summarizes; the CLI stays deterministic and returns raw content. Both
+    # seams are injected for one testable signature but only the selected one is used.
+    # TargetNotFoundError / TargetAmbiguousError propagate before either seam is touched;
+    # a HerdrError / MorcliError from the read itself surfaces at the boundary.
+    target = resolve_target(selector, sessions)
+    if full:
+        content = morcli.transcript(target.workspace_id)
+    else:
+        content = herdr.read_pane(target.pane_id, lines)
+    logger.info(
+        f"read pane={target.pane_id} selector={selector} full={full} out_len={len(content)}"
+    )
+    return content

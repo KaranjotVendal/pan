@@ -26,9 +26,10 @@ has two objects:
 - `item` — the inbox event (`id`, `slack_user`, `channel`, `thread_ts`, `is_thread_reply`,
   `raw_text`, `received_at`).
 - `directive` — the result of the deterministic `parse_directive` run in code: `mode`
-  (`delegate`/`sync`/`status`/`sessions`/`relay`), `force_new`, `target_stream`, `agent`, `target`
-  (the relay selector), `message` (the relay text), and `cleaned_text` (the raw text with every
-  recognized flag stripped — this is the worker brief / relay text).
+  (`delegate`/`sync`/`status`/`sessions`/`relay`/`read`), `force_new`, `target_stream`, `agent`,
+  `target` (the relay/read selector), `message` (the relay text), `full` (read the full transcript),
+  and `cleaned_text` (the raw text with every recognized flag stripped — this is the worker brief /
+  relay text).
 
 If the list is empty, stop — there is nothing to do. Process the entries in the order returned.
 
@@ -114,6 +115,39 @@ If `pan relay` exits non-zero, translate the failure for the user (single egress
   Post that candidate list and ask the user to re-target by a precise `workspace_id` or `pane_id`.
 
 Do not fall back to spawning or to rung (b) — a relay names a session explicitly.
+
+### (a4) Read any live session — `directive.mode == "read"` (checked before any binding lookup)
+
+Report a live session's output; touch no worker. This is the `@pan read <target> [--full]` request.
+It is thread-independent: the target is `directive.target`, NOT the thread's bound worker, and
+`directive.full` selects recent-lines (default) vs the full transcript. `pan read` returns RAW
+content deterministically; producing the SUMMARY (default) is YOUR one fuzzy step here — the CLI
+never summarizes.
+
+Default (`directive.full` is false) — recent lines, summarized. Shell:
+
+    pan read '<directive.target>'
+
+This prints the target's recent rendered pane lines (raw). SUMMARIZE them with your own judgment into
+a short, readable account of what that session is doing, then post it through the single egress path
+(INV-4):
+
+    pan slack-post --thread <thread_ts> --channel <channel> --text '<your summary>'
+
+Full transcript (`directive.full` is true) — raw, chunked. Shell:
+
+    pan read '<directive.target>' --full
+
+This prints the full session transcript (raw, via morcli). It can far exceed Slack's per-message
+limit, so do NOT summarize it — post it verbatim, split into in-order chunks each under the Slack
+message limit, one `pan slack-post` per chunk (INV-4):
+
+    pan slack-post --thread <thread_ts> --channel <channel> --text '<chunk k/n>'
+
+For BOTH read paths, if `pan read` exits non-zero, translate the failure for the user through the
+single egress: exit 20 (`TargetNotFoundError`) → post "no live session named `<target>`"; exit 21
+(`TargetAmbiguousError`) → post the stderr candidate list (label + workspace_id + pane_id) and ask
+the user to re-target by a precise id. Do not spawn or relay — a read only observes.
 
 ### (b) Follow-up to a live worker — a record exists with `status` spawning/running/blocked
 

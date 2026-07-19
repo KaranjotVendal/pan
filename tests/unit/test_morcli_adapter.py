@@ -153,3 +153,58 @@ def test_resolve_session_nonzero_exit_raises_morcli_error(
 
     with pytest.raises(MorcliError):
         ShellMorcliAdapter().resolve_session("w1")
+
+
+def _install_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    streams_stdout: str,
+    open_stdout: str,
+    open_returncode: int = 0,
+) -> list[list[str]]:
+    # transcript makes two subprocess calls: `morcli streams --json` (handle resolution
+    # via resolve_session) then `morcli open <handle>`. Dispatch on the subcommand.
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> FakeCompleted:
+        calls.append(command)
+        if command[1] == "streams":
+            return FakeCompleted(streams_stdout, 0)
+        return FakeCompleted(open_stdout, open_returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_transcript_resolves_handle_then_opens_and_returns_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # streams maps workspace_id w1 -> session_id sess-9, so open targets session:sess-9.
+    calls = _install_dispatch(
+        monkeypatch, _streams_json("working", session_id="sess-9"), "TRANSCRIPT BODY"
+    )
+
+    content = ShellMorcliAdapter().transcript("w1")
+
+    assert content == "TRANSCRIPT BODY"
+    assert calls[-1] == ["morcli", "open", "session:sess-9"]
+
+
+def test_transcript_falls_back_to_raw_handle_when_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No matching stream -> resolve_session returns None -> open the handle as given.
+    calls = _install_dispatch(monkeypatch, json.dumps([]), "BODY")
+
+    content = ShellMorcliAdapter().transcript("raw-uuid")
+
+    assert content == "BODY"
+    assert calls[-1] == ["morcli", "open", "session:raw-uuid"]
+
+
+def test_transcript_open_failure_raises_morcli_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_dispatch(monkeypatch, json.dumps([]), "", open_returncode=2)
+
+    with pytest.raises(MorcliError):
+        ShellMorcliAdapter().transcript("x")

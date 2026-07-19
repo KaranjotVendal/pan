@@ -13,6 +13,11 @@ logger = initialise_logger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "pan" / "config.json"
 
+# Default recent-lines window for `pan read` (no --full): the number of rendered pane lines
+# fetched via `herdr pane read` before the orchestrator summarizes them. Named here rather
+# than inlined at the call site so the tunable is discoverable and overridable (Principle 7).
+READ_RECENT_LINES = 200
+
 
 def _expand_user_paths(raw_config: dict) -> None:
     paths = raw_config.get("paths")
