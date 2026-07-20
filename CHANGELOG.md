@@ -9,6 +9,61 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- Mobile smart-punctuation normalization + bare `sessions` routing in `parse_directive` (Task 31,
+  Milestone M12). A phone typed `@pan --sessions`, but the keyboard autocorrected the ASCII `--`
+  into an em-dash `—` glued to the word, so `—sessions` fell through the flag scan into DELEGATE and
+  spawned a worker instead of showing the read-only sessions view. `parse_directive` now runs a
+  leading `_normalize_punctuation(text)` pass (pure, deterministic, INV-3) on the whole stripped
+  text before any verb/flag detection: an em-dash `—` (U+2014) or en-dash `–` (U+2013) GLUED to a
+  word char becomes `--` (a SPACED prose dash like `plan — which` is real punctuation and is left
+  intact), and curly quotes (`“ ” ‘ ’`, also autocorrected) are straightened. It also adds a bare
+  leading `sessions` word as a SESSIONS trigger (position 0 only, mirroring the leading `relay`/
+  `read` verbs and carrying `cleaned_text=""` like `status`). Net: `--sessions`, `—sessions`,
+  `–sessions`, and bare `sessions` all deterministically route to `TaskMode.SESSIONS` — no worker
+  spawned; `read sra —full` is repaired to `--full`; relay/read verbs survive normalization
+  unchanged. Per R-6, normalization is whole-text in v1, so a glued em-dash inside a relay/delegate
+  message body (`fix—now`) is also repaired to `fix--now` — an accepted, documented tradeoff (the
+  phone-autocorrect case is the target). No new dependency, no new exception, no `Directive`/
+  `TaskMode` change (reuses `TaskMode.SESSIONS`). Added tests (`tests/unit/test_directive.py`,
+  parametrized): the four sessions spellings → SESSIONS (with and without a leading Slack mention);
+  bare `sessions` mid-prose stays DELEGATE; `read sra --full` and `read sra —full` both → full=True;
+  relay still parses after normalization; a spaced prose em-dash stays DELEGATE with prose intact and
+  is preserved verbatim inside a relay message; the R-6 glued-em-dash-in-relay case is repaired; and
+  curly double/single quotes are straightened with the message otherwise verbatim. The live-verify
+  that `@pan —sessions` (phone em-dash) routes to the sessions view without spawning is deferred to a
+  human session.
+- GFM → Slack mrkdwn rendering at the single egress (Task 30, Milestone M12). pan was posting
+  GitHub-flavored markdown (`**bold**`, `## Header`, `| a | b |` tables) into Slack, which renders a
+  different dialect (mrkdwn) — so bold showed literal asterisks, headers showed literal `#`, and
+  tables showed walls of pipes (confirmed live across three threads). A new pure
+  `to_slack_mrkdwn(text: str) -> str` in `src/pan/slack_format.py` now converts GFM to Slack mrkdwn,
+  adapting the placeholder-protection pipeline from Hermes' `gateway/platforms/slack.py::format_message`
+  (protect fenced code / inline code / `[t](u)`→`<u|t>` links / existing Slack entities `<@U…>`/`<#…>`/
+  `<url|text>` / blockquote markers → unescape-then-escape `& < >` → headers `#..######`→`*bold*`
+  (inner `**` stripped) → `***x***`→`*_x_*` → `**x**`→`*x*` → single `*x*`→`_x_` with the
+  both-sides-non-whitespace guard so `a * b * c` stays literal → `~~x~~`→`~x~` → restore placeholders
+  in reverse order) PLUS a step Hermes lacks: a GFM table (header row + a `:?-+:?` delimiter row whose
+  cell count matches the header, per the GFM rule) degrades to an aligned monospace fenced code block
+  (Slack has no table primitive), each column left-padded to its widest cell. The protect/restore
+  guarantee means fenced/inline code, existing Slack entities, and already-valid mrkdwn pass through
+  byte-for-byte (`**` inside code is never converted). The converter is applied at the SINGLE Slack
+  egress — inside `slack_post`, immediately before `SlackAdapter.post_message` — so EVERY message pan
+  emits (orchestrator summaries, worker Stop/Notification-hook output, acks, relay/read replies) is
+  normalized in one choke point (INV-4); the length-only log is unchanged (INV-9) and `mrkdwn=True`
+  stays. The converter is a pure `str -> str` leaf module importing only stdlib `re` and three named
+  `config.py` constants (`SLACK_MRKDWN_PLACEHOLDER_TEMPLATE`, `SLACK_TABLE_COLUMN_SEPARATOR`,
+  `SLACK_TABLE_PAD_CHAR` — Principle 7, no inlined tunables); it imports no `slack_sdk`, opens no
+  network/subprocess, and adds no dependency and no new exception (it is total: empty → empty; a regex
+  defect would be a fail-fast programming error, not a modeled failure). Added tests
+  (`tests/unit/test_slack_format.py`, parametrized): emphasis + headers incl. the `a * b * c`
+  disambiguation guard; links + strikethrough + blockquote; protected fenced/inline code and Slack
+  entities pass through untouched; `& < >` escaping with unescape-first (no double-escape) and a
+  protected entity left unescaped; a genuinely 3-column table and a 2-column table → aligned fenced
+  block; a pipe row without a delimiter row (and a prose-pipe line followed by a `---` divider) left
+  as prose with the divider surviving; totality (empty → empty, plain prose unchanged); and
+  `slack_post` runs text through the converter before `post_message` (asserted on the recorded seam
+  argument) with the value-free log still firing. The live-verify that a table/bold renders cleanly
+  in real Slack on desktop and mobile is deferred to a human session.
 - `pan read <target> [--full]` — read ANY live herdr session's output (Task 29, Milestone M11).
   Completes the M11 interactive interface alongside `pan relay`: the command enumerates the live set
   once via `list_workspaces()`, resolves the target with the same `resolve_target` precedence
