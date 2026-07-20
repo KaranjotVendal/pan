@@ -178,7 +178,9 @@ def _install_dispatch(
 def test_transcript_resolves_handle_then_opens_and_returns_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # streams maps workspace_id w1 -> session_id sess-9, so open targets session:sess-9.
+    # streams maps workspace_id w1 -> session_id sess-9. `morcli open` takes the raw session
+    # id as the handle (a `session:` prefix expects a base64-encoded id and fails live), so
+    # open targets the bare uuid.
     calls = _install_dispatch(
         monkeypatch, _streams_json("working", session_id="sess-9"), "TRANSCRIPT BODY"
     )
@@ -186,25 +188,29 @@ def test_transcript_resolves_handle_then_opens_and_returns_content(
     content = ShellMorcliAdapter().transcript("w1")
 
     assert content == "TRANSCRIPT BODY"
-    assert calls[-1] == ["morcli", "open", "session:sess-9"]
+    assert calls[-1] == ["morcli", "open", "sess-9"]
 
 
-def test_transcript_falls_back_to_raw_handle_when_unresolved(
+def test_transcript_resolve_miss_raises_without_opening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # No matching stream -> resolve_session returns None -> open the handle as given.
+    # No matching stream -> resolve_session returns None -> transcript raises a clear
+    # MorcliError and never calls `morcli open` with a bad handle.
     calls = _install_dispatch(monkeypatch, json.dumps([]), "BODY")
 
-    content = ShellMorcliAdapter().transcript("raw-uuid")
+    with pytest.raises(MorcliError):
+        ShellMorcliAdapter().transcript("raw-uuid")
 
-    assert content == "BODY"
-    assert calls[-1] == ["morcli", "open", "session:raw-uuid"]
+    assert all(command[1] != "open" for command in calls)
 
 
 def test_transcript_open_failure_raises_morcli_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_dispatch(monkeypatch, json.dumps([]), "", open_returncode=2)
+    # The handle resolves, so `morcli open` runs; a non-zero exit surfaces as MorcliError.
+    _install_dispatch(
+        monkeypatch, _streams_json("working", session_id="sess-9"), "", open_returncode=2
+    )
 
     with pytest.raises(MorcliError):
-        ShellMorcliAdapter().transcript("x")
+        ShellMorcliAdapter().transcript("w1")
