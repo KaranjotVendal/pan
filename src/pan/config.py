@@ -18,6 +18,15 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "pan" / "config.json"
 # than inlined at the call site so the tunable is discoverable and overridable (Principle 7).
 READ_RECENT_LINES = 200
 
+# Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
+# The sentinel template stashes a protected region behind a NUL-delimited key that survives
+# every later regex pass, then is restored verbatim (adapted from Hermes' `\x00SL<n>\x00`).
+SLACK_MRKDWN_PLACEHOLDER_TEMPLATE = "\x00SL{index}\x00"
+# A GFM table has no Slack primitive, so it degrades to an aligned monospace grid: each cell
+# left-justified with the pad char to its column width, columns joined by the separator.
+SLACK_TABLE_COLUMN_SEPARATOR = " | "
+SLACK_TABLE_PAD_CHAR = " "
+
 
 def _expand_user_paths(raw_config: dict) -> None:
     paths = raw_config.get("paths")

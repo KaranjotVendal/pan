@@ -44,6 +44,16 @@ def test_slack_post_delegates_to_post_message() -> None:
     assert adapter.calls == [("C1", "1718000000.000200", "work is done")]
 
 
+def test_slack_post_normalizes_to_mrkdwn_before_post_message() -> None:
+    # The single egress runs text through the GFM->mrkdwn converter (INV-4), so the
+    # adapter receives Slack mrkdwn, not the raw GFM body.
+    adapter = FakeSlackAdapter()
+
+    slack_post(adapter, "C1", "1718000000.000200", "See **the report**")
+
+    assert adapter.calls == [("C1", "1718000000.000200", "See *the report*")]
+
+
 def test_adapter_failure_surfaces_as_slack_post_error() -> None:
     adapter = FakeSlackAdapter(fail=True)
 
