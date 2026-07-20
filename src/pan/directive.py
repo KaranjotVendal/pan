@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import re
+
 from pan.models import Agent, Directive, TaskMode
 
 _VALID_AGENTS = {member.value for member in Agent}
+
+# A single leading Slack mention token (`<@U...>` — a Slack user id, uppercase-alnum), plus
+# any trailing whitespace, anchored at the START of the text only. Real Slack app-mention
+# text always begins with `<@BOTID>`; leaving it in place puts a non-verb token at position 0
+# and defeats the leading-verb grammar below (INV-3), mis-routing `@pan relay`/`@pan read`.
+_LEADING_MENTION = re.compile(r"^<@[A-Z0-9]+>\s*")
 
 # Fixed, deterministic soft-trigger phrase set for the reconciled sessions view. Matched
 # by pure substring logic on the cleaned prose (never model judgment), so INV-3 holds.
@@ -20,6 +28,12 @@ _SESSION_TRIGGERS = (
 
 def parse_directive(raw_text: str) -> Directive:
     stripped_text = raw_text.strip()
+
+    # Strip a single leading Slack mention before any verb/flag/mode detection, so the
+    # leading-verb check sees `relay`/`read` at position 0 and cleaned_text (worker briefs)
+    # never carries the stray mention. Only the leading one is removed; a mention inside a
+    # relay message body is preserved.
+    stripped_text = _LEADING_MENTION.sub("", stripped_text, count=1)
 
     leading_bang_sync = stripped_text.startswith("!")
     if leading_bang_sync:

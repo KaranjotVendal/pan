@@ -54,14 +54,21 @@ class ShellMorcliAdapter:
         return None
 
     def transcript(self, handle: str) -> str:
-        # Open the session's full transcript content-first via `morcli open`. Reuses the
-        # M10 resolve_session semantics: best-effort resolve the handle (a workspace_id or
-        # session id) to a morcli session id, falling back to the handle itself when morcli
-        # has no matching stream yet (R-6 lag). A genuine open failure raises MorcliError
-        # (surfaced at the boundary, unlike the tolerated enrichment on the sessions path).
-        session_id = self.resolve_session(handle) or handle
-        content = self._run_open(f"session:{session_id}")
-        logger.info(f"morcli transcript handle={handle} out_len={len(content)}")
+        # Open the session's full transcript content-first via `morcli open`. Reuses the M10
+        # resolve_session semantics to turn the handle (a workspace_id or session id) into a
+        # morcli session id, then opens that RAW session id — `morcli open` treats a bare
+        # UUID as a session handle; a `session:<uuid>` prefix expects a base64-encoded id and
+        # fails live ("session_id is not valid UTF-8"). When no stream is indexed for the
+        # handle, resolve_session returns None and we raise a clear MorcliError rather than
+        # opening a bad handle. A genuine open failure also raises MorcliError (surfaced at
+        # the boundary, unlike the tolerated enrichment on the sessions path).
+        session_id = self.resolve_session(handle)
+        if session_id is None:
+            raise MorcliError(f"no morcli session indexed for handle={handle}")
+        content = self._run_open(session_id)
+        logger.info(
+            f"morcli transcript handle={handle} session={session_id} out_len={len(content)}"
+        )
         return content
 
     def _run_open(self, target: str) -> str:

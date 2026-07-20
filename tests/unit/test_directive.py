@@ -263,3 +263,67 @@ def test_non_leading_read_verb_stays_delegate() -> None:
 
     assert directive.mode is TaskMode.DELEGATE
     assert directive.target is None
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_target, expected_message",
+    [
+        (
+            "<@U0BHY6GH48L> relay pan-test-target hello there",
+            "pan-test-target",
+            "hello there",
+        ),
+        (
+            "<@U0BHY6GH48L>relay pan-test-target hello there",
+            "pan-test-target",
+            "hello there",
+        ),
+    ],
+)
+def test_leading_mention_stripped_before_relay_verb(
+    raw_text: str, expected_target: str, expected_message: str
+) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == expected_target
+    assert directive.message == expected_message
+    assert "<@" not in (directive.message or "")
+    assert "<@" not in directive.cleaned_text
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_full",
+    [
+        ("<@U0BHY6GH48L> read pan-test-target", False),
+        ("<@U0BHY6GH48L> read pan-test-target --full", True),
+    ],
+)
+def test_leading_mention_stripped_before_read_verb(raw_text: str, expected_full: bool) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target == "pan-test-target"
+    assert directive.full is expected_full
+
+
+def test_leading_mention_stripped_before_sessions_flag() -> None:
+    directive = parse_directive("<@U0BHY6GH48L> --sessions")
+
+    assert directive.mode is TaskMode.SESSIONS
+
+
+def test_leading_mention_stripped_on_delegate_and_absent_from_cleaned_text() -> None:
+    directive = parse_directive("<@U0BHY6GH48L> create a file called notes.txt")
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.cleaned_text == "create a file called notes.txt"
+    assert "<@" not in directive.cleaned_text
+
+
+def test_only_leading_mention_stripped_not_one_in_message_body() -> None:
+    directive = parse_directive("<@U0BHY6GH48L> relay pan-test-target tell <@U9999FOO> hi")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "pan-test-target"
+    assert directive.message == "tell <@U9999FOO> hi"
