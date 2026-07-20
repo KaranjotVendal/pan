@@ -25,9 +25,32 @@ _SESSION_TRIGGERS = (
     "list all the threads",
 )
 
+# Phone keyboards autocorrect a typed ASCII `--` into an em-dash (U+2014) or en-dash
+# (U+2013) glued to the following word, so `@pan --sessions` arrives as `—sessions` and
+# falls through the flag scan into a spurious DELEGATE/spawn. Normalize a dash glued to a
+# word char back to `--`; a SPACED prose dash (`plan — which`) is real punctuation and is
+# left intact. Curly quotes (also autocorrected) are straightened. All exact string logic,
+# no model judgment (INV-3).
+_DASH_GLUED_TO_WORD = re.compile(r"[—–](?=\w)")
+_SMART_QUOTE_MAP = {
+    ord("“"): '"',
+    ord("”"): '"',
+    ord("‘"): "'",
+    ord("’"): "'",
+}
+
+
+def _normalize_punctuation(text: str) -> str:
+    text = _DASH_GLUED_TO_WORD.sub("--", text)
+    return text.translate(_SMART_QUOTE_MAP)
+
 
 def parse_directive(raw_text: str) -> Directive:
     stripped_text = raw_text.strip()
+
+    # Repair phone smart-punctuation on the whole text BEFORE any verb/flag detection, so a
+    # phone-mangled `—sessions`/`—full` is recognized as `--sessions`/`--full` (INV-3).
+    stripped_text = _normalize_punctuation(stripped_text)
 
     # Strip a single leading Slack mention before any verb/flag/mode detection, so the
     # leading-verb check sees `relay`/`read` at position 0 and cleaned_text (worker briefs)
@@ -67,6 +90,11 @@ def parse_directive(raw_text: str) -> Directive:
             full=full,
             cleaned_text="",
         )
+    if verb_tokens and verb_tokens[0] == "sessions":
+        # Bare leading `sessions` is a SESSIONS trigger (mirrors the leading relay/read
+        # verbs and the `--sessions` flag). Recognized only in position 0, so a `sessions`
+        # deeper in a task stays prose; it carries no target/message (cleaned_text="").
+        return Directive(mode=TaskMode.SESSIONS, cleaned_text="")
 
     has_sync_flag = leading_bang_sync
     has_status_flag = False

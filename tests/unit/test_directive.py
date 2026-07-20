@@ -327,3 +327,120 @@ def test_only_leading_mention_stripped_not_one_in_message_body() -> None:
     assert directive.mode is TaskMode.RELAY
     assert directive.target == "pan-test-target"
     assert directive.message == "tell <@U9999FOO> hi"
+
+
+# --- Task 31: mobile smart-punctuation normalization + bare `sessions` trigger ---
+
+# Phone autocorrect turns a typed `--` into an em/en-dash glued to the next word.
+_EM_DASH = "—"
+_EN_DASH = "–"
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "--sessions",
+        f"{_EM_DASH}sessions",  # phone autocorrected -- into an em-dash
+        f"{_EN_DASH}sessions",  # en-dash variant
+        "sessions",  # bare leading word
+    ],
+)
+def test_all_sessions_spellings_route_to_sessions_mode(raw_text: str) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.SESSIONS
+    assert directive.cleaned_text == ""
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "<@U0BHY6GH48L> --sessions",
+        f"<@U0BHY6GH48L> {_EM_DASH}sessions",
+        f"<@U0BHY6GH48L> {_EN_DASH}sessions",
+        "<@U0BHY6GH48L> sessions",
+    ],
+)
+def test_sessions_spellings_route_after_a_leading_mention(raw_text: str) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.SESSIONS
+
+
+def test_bare_sessions_word_mid_prose_stays_delegate() -> None:
+    # The trigger fires only in position 0 (mirrors the leading relay/read grammar), so a
+    # `sessions` deeper in a real task is ordinary prose.
+    directive = parse_directive("build the sessions dashboard")
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.cleaned_text == "build the sessions dashboard"
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_full",
+    [
+        ("read sra-codex --full", True),
+        (f"read sra-codex {_EM_DASH}full", True),
+    ],
+)
+def test_read_full_modifier_survives_punctuation_normalization(
+    raw_text: str, expected_full: bool
+) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.READ
+    assert directive.target == "sra-codex"
+    assert directive.full is expected_full
+
+
+def test_relay_verb_still_parses_after_normalization() -> None:
+    directive = parse_directive("relay sra-codex ship it")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == "ship it"
+
+
+def test_spaced_prose_em_dash_is_not_normalized_and_stays_delegate() -> None:
+    # An em-dash with whitespace around it is real prose punctuation, not a mangled `--`,
+    # so it is left intact and the directive stays DELEGATE.
+    raw_text = f"fix the plan {_EM_DASH} then ship"
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.cleaned_text == raw_text
+
+
+def test_glued_em_dash_inside_relay_message_is_normalized_r6() -> None:
+    # R-6 documented tradeoff: whole-text normalization repairs an em-dash glued to a word
+    # even inside a relay message body. Accepted — the phone-autocorrect case is the target.
+    directive = parse_directive(f"relay sra-codex fix{_EM_DASH}now")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == "fix--now"
+
+
+def test_spaced_em_dash_inside_relay_message_is_preserved_verbatim() -> None:
+    # The counterpart to the R-6 glued case: a real spaced em-dash in a relay brief is prose
+    # punctuation and survives verbatim (the glued-to-word rule does not fire).
+    directive = parse_directive(f"relay sra-codex fix {_EM_DASH} now")
+
+    assert directive.mode is TaskMode.RELAY
+    assert directive.target == "sra-codex"
+    assert directive.message == f"fix {_EM_DASH} now"
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_cleaned",
+    [
+        ("build the “thing” now", 'build the "thing" now'),
+        ("don’t break it", "don't break it"),
+        ("‘single’ quotes here", "'single' quotes here"),
+    ],
+)
+def test_curly_quotes_are_straightened(raw_text: str, expected_cleaned: str) -> None:
+    directive = parse_directive(raw_text)
+
+    assert directive.mode is TaskMode.DELEGATE
+    assert directive.cleaned_text == expected_cleaned
