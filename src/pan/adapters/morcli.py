@@ -53,6 +53,30 @@ class ShellMorcliAdapter:
                     return session_id
         return None
 
+    def transcript(self, handle: str) -> str:
+        # Open the session's full transcript content-first via `morcli open`. Reuses the
+        # M10 resolve_session semantics: best-effort resolve the handle (a workspace_id or
+        # session id) to a morcli session id, falling back to the handle itself when morcli
+        # has no matching stream yet (R-6 lag). A genuine open failure raises MorcliError
+        # (surfaced at the boundary, unlike the tolerated enrichment on the sessions path).
+        session_id = self.resolve_session(handle) or handle
+        content = self._run_open(f"session:{session_id}")
+        logger.info(f"morcli transcript handle={handle} out_len={len(content)}")
+        return content
+
+    def _run_open(self, target: str) -> str:
+        command = [_MORCLI, "open", target]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError as error:
+            raise MorcliError("failed to run morcli open") from error
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip()
+            raise MorcliError(f"morcli open exited with code {completed.returncode}: {detail}")
+
+        return completed.stdout
+
     def _map_status(self, raw_status: object, handle: str) -> WorkerStatus:
         mapped = _STATUS_MAP.get(raw_status) if isinstance(raw_status, str) else None
         if mapped is None:

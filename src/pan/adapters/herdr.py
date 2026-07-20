@@ -102,6 +102,17 @@ class ShellHerdrAdapter:
         logger.info(f"herdr list_workspaces sessions={len(sessions)}")
         return sessions
 
+    def read_pane(self, pane_id: str, lines: int) -> str:
+        # `herdr pane read` prints the pane's recent rendered output as TEXT, not the
+        # `{"result": {...}}` JSON envelope, so it goes through the raw-stdout _run_text
+        # path. The rendered-text format and the `--source recent` flag are version-
+        # dependent and deferred to live verification (tech-spec R-4).
+        text = self._run_text(
+            ["pane", "read", pane_id, "--source", "recent", "--lines", str(lines)]
+        )
+        logger.info(f"herdr read_pane pane={pane_id} lines={lines} out_len={len(text)}")
+        return text
+
     def _select_pane_id(self, panes: list[Any], active_tab_id: object) -> str:
         if isinstance(active_tab_id, str):
             for pane in panes:
@@ -115,6 +126,22 @@ class ShellHerdrAdapter:
         if not isinstance(first_pane, dict) or "pane_id" not in first_pane:
             raise HerdrError("herdr pane list entry is missing a pane_id")
         return str(first_pane["pane_id"])
+
+    def _run_text(self, args: list[str]) -> str:
+        # Raw-stdout sibling of _run for herdr commands that print TEXT rather than the
+        # JSON envelope (`pane read`). Same failure handling as _run: OSError and a
+        # non-zero exit both raise HerdrError; the stdout is returned verbatim.
+        command = [_HERDR, *args]
+        subcommand = " ".join(args[:2])
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError as error:
+            raise HerdrError(f"failed to run herdr {subcommand}") from error
+
+        if completed.returncode != 0:
+            raise HerdrError(f"herdr {subcommand} exited with code {completed.returncode}")
+
+        return completed.stdout
 
     def _run(self, args: list[str], expect_json: bool = True) -> dict[str, Any]:
         command = [_HERDR, *args]

@@ -54,6 +54,9 @@ class HerdrAdapter(Protocol):
 
     def list_workspaces(self) -> list[LiveSession]: ...
 
+    # Read a pane's recent rendered output as TEXT (not the JSON envelope).
+    def read_pane(self, pane_id: str, lines: int) -> str: ...
+
 
 class GitWorktreeAdapter(Protocol):
     def create_worktree(self, repo: Path, branch: str, base: Path) -> Path: ...
@@ -67,6 +70,9 @@ class MorcliAdapter(Protocol):
     # Best-effort workspace_id -> session_id resolution at spawn (R-7). Returns None when
     # morcli has not indexed the just-created session yet (the lag is tolerated).
     def resolve_session(self, workspace_id: str) -> str | None: ...
+
+    # Full session content via `morcli open`; resolves the handle via resolve_session.
+    def transcript(self, handle: str) -> str: ...
 
 
 class AgentLauncher(Protocol):

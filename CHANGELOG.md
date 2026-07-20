@@ -9,6 +9,66 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `pan read <target> [--full]` — read ANY live herdr session's output (Task 29, Milestone M11).
+  Completes the M11 interactive interface alongside `pan relay`: the command enumerates the live set
+  once via `list_workspaces()`, resolves the target with the same `resolve_target` precedence
+  (workspace_id > pane_id > label; `TargetNotFoundError` exit 20 / `TargetAmbiguousError` exit 21),
+  and returns RAW content — recent rendered pane lines by default (fast, via a new
+  `HerdrAdapter.read_pane(pane_id, lines)` shelling `herdr pane read <pane> --source recent --lines
+  N`), or the full transcript with `--full` (via a new `MorcliAdapter.transcript(handle)` wrapping
+  `morcli open`, reusing the M10 `resolve_session` handle logic). Because `herdr pane read` prints
+  TEXT rather than the `{"result": {...}}` JSON envelope, the herdr adapter grew a raw-stdout
+  `_run_text` helper (sibling of the JSON `_run`; same `HerdrError`-on-non-zero-exit handling); the
+  morcli adapter grew a `_run_open` helper (`MorcliError` on failure — a read that cannot read is a
+  real failure, unlike the tolerated best-effort enrichment on the sessions path). The
+  `read_session(herdr, morcli, selector, sessions, *, full, lines)` core in `interface.py` selects
+  the seam by `full` and touches only the one it needs; an unresolvable selector raises before either
+  seam. The CLI stays deterministic and returns RAW content (BR-5 sanctioned stdout) — the SUMMARY is
+  the orchestrator's job (INV-3): the new SKILL.md READ route runs `pan read`, LLM-summarizes the
+  recent lines, and posts through the single egress (INV-4); `--full` posts the transcript verbatim,
+  chunked to Slack's message limit. New `TaskMode.READ` and `Directive.full`; the `read <target>
+  [--full]` leading-verb grammar (verb only in position 0; token 1 = target; remainder scanned only
+  for `--full`; read carries no message, `cleaned_text` empty; a non-leading "please read the logs"
+  stays DELEGATE). The recent-lines window is a named `READ_RECENT_LINES` constant in `config.py`
+  (default 200), not an inlined literal. The read logs are value-free (pane_id / selector / full /
+  handle / lengths only — INV-9; the read content is never a log argument). Added tests: `read_pane`
+  (argv + verbatim TEXT via `_run_text`; non-zero exit → `HerdrError`); `transcript` (resolve+open
+  returns content, fallback to the raw handle when morcli has no stream yet, open failure →
+  `MorcliError`); `read_session` (recent reads the pane and leaves morcli untouched; full reads the
+  transcript by workspace_id and leaves the pane read untouched; an unresolvable selector — not-found
+  AND ambiguous — raises before either seam, parametrized over `full`); the read directive grammar;
+  and the `pan read` CLI (recent echoes raw pane text and passes `READ_RECENT_LINES`; `--full` echoes
+  the transcript by workspace_id; not-found propagates). The live-verify of the Slack `@pan read`
+  summary / `--full` chunked transcript and the real `herdr pane read` text format is deferred to a
+  human session.
+- `pan relay <target> <message>` — drive ANY live herdr session's pane by label, pan-owned OR
+  external (Task 28, Milestone M11). Makes the M10 read-only sessions view interactive: the command
+  builds `ShellHerdrAdapter`, enumerates the live set once via `list_workspaces()` (the M10 seam,
+  no new enumeration), resolves the target, and sends the message into its pane followed by a
+  content-free nudge (reusing the existing `send_text` + `nudge` seams — no new herdr write path).
+  Targeting is a new pure `resolve_target(selector, sessions)` core in a new `src/pan/interface.py`
+  (the interactive drive layer, kept separate from `sessions.py`'s read-only projection): exact-match
+  with precise-id precedence — a `workspace_id` match wins, then `pane_id`, then `workspace_name`
+  (label), of which zero raises `TargetNotFoundError` (CLI exit 20), one resolves, and more than one
+  raises `TargetAmbiguousError(selector, candidates)` (CLI exit 21), which carries the candidate
+  `LiveSession`s and renders their label + workspace_id + pane_id so the user can re-target by a
+  precise id (INV-3: exact string logic, no fuzzy judgment). `relay_to_session` returns the resolved
+  session so the CLI/orchestrator can build a precise ack; an unresolvable selector raises before any
+  send, so a bad target never drives a pane. Directives gained a leading-verb grammar: `relay
+  <target> <message...>` is recognized only in position 0 (a leading `!` before it still parses), the
+  second token is the `target`, and EVERYTHING after it is the `message` verbatim — no flag scan of
+  the body, so a flag-looking token inside a worker brief (`add the --json path`) survives; a
+  non-leading "relay" ("please relay this") stays DELEGATE. New `TaskMode.RELAY` and `Directive`
+  fields `target`/`message`; the value-free relay log records only pane_id, selector, and message
+  length (INV-9 — the message text is never a log argument). The orchestrating skill gained a RELAY
+  route (deterministic `pan relay`, single-egress ack, exit-20/21 not-found/candidate-list handling;
+  no fall back to spawn). Added tests: `resolve_target` precedence (unique label / workspace_id
+  precedence / pane_id / not-found / ambiguous-with-candidates incl. the rendered re-target string);
+  `relay_to_session` (sends into the resolved pane then nudges and returns the target; no send on an
+  unresolvable selector); the relay directive grammar (verbatim flag-looking message, leading `!`,
+  missing target, non-leading verb); and the `pan relay` CLI (echoes label+pane; not-found/ambiguous
+  propagate) plus exit-code table entries 20/21. The live-verify of the Slack `@pan relay` path is
+  deferred to a human session.
 - `pan sessions` — a reconciled "what's running" view (Task 26, Milestone M10). It enumerates ALL
   live herdr claude sessions (a new `HerdrAdapter.list_workspaces()` shelling `herdr workspace list`
   plus a `pane list` per workspace, mapping vendor JSON to the confined `LiveSession` domain type —

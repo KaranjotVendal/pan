@@ -12,6 +12,8 @@ class TaskMode(StrEnum):
     SYNC = "sync"
     STATUS = "status"
     SESSIONS = "sessions"
+    RELAY = "relay"  # drive a target session's pane with a message
+    READ = "read"  # read a target session's output (recent | --full transcript)
 
 
 class WorkerStatus(StrEnum):
@@ -53,6 +55,13 @@ class Directive(BaseModel, frozen=True):
     force_new: bool = False
     target_stream: str | None = None
     agent: Agent | None = None
+    # relay/read selector (label | workspace_id | pane_id) and the relay message. `target`
+    # is distinct from `target_stream` (a spawn stream label); it names a live session to
+    # address. `message` mirrors `cleaned_text` on the relay path.
+    target: str | None = None
+    message: str | None = None
+    # read the full transcript instead of recent lines (the `read` verb's --full modifier).
+    full: bool = False
     cleaned_text: str
 
 

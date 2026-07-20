@@ -16,7 +16,7 @@ from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.adapters.herdr import ShellHerdrAdapter
 from pan.adapters.morcli import ShellMorcliAdapter
-from pan.config import load_config
+from pan.config import READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
 from pan.directive import parse_directive
 from pan.errors import (
@@ -29,6 +29,8 @@ from pan.errors import (
     PanError,
     SlackPostError,
     SpawnError,
+    TargetAmbiguousError,
+    TargetNotFoundError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
@@ -37,6 +39,7 @@ from pan.gateway.slack_post import slack_post
 from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
+from pan.interface import read_session, relay_to_session
 from pan.logging import initialise_logger
 from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
@@ -72,6 +75,8 @@ _EXIT_CODES: dict[type[PanError], int] = {
     SlackPostError: 17,
     GatedOpDeniedError: 18,
     MorcliError: 19,
+    TargetNotFoundError: 20,
+    TargetAmbiguousError: 21,
 }
 
 
@@ -317,6 +322,33 @@ def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
     typer.echo(_render_sessions_table(summaries))
+
+
+@app.command()
+def relay(
+    target: str = typer.Argument(..., help="session selector: label | workspace_id | pane_id"),
+    message: str = typer.Argument(..., help="text to send into the target pane"),
+) -> None:
+    """Relay a message into a live herdr session's pane (pan-owned or external)."""
+    herdr = ShellHerdrAdapter()
+    resolved = relay_to_session(herdr, target, message, herdr.list_workspaces())
+    typer.echo(f"relayed into {resolved.workspace_name} pane {resolved.pane_id}")
+
+
+@app.command()
+def read(
+    target: str = typer.Argument(..., help="session selector: label | workspace_id | pane_id"),
+    full: bool = typer.Option(False, "--full", help="full transcript via morcli instead of recent"),
+) -> None:
+    """Print a live session's raw output: recent rendered lines, or the full transcript with --full."""
+    herdr = ShellHerdrAdapter()
+    morcli = ShellMorcliAdapter()
+    raw = read_session(
+        herdr, morcli, target, herdr.list_workspaces(), full=full, lines=READ_RECENT_LINES
+    )
+    # Sanctioned CLI stdout (BR-5): RAW content, never summarized here — the orchestrator
+    # owns the summary (INV-3 keeps the CLI deterministic).
+    typer.echo(raw)
 
 
 @app.command()

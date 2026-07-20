@@ -256,3 +256,34 @@ def test_list_workspaces_drops_pane_with_no_resolvable_cwd(
     _install_runner(monkeypatch, [(list_out, 0), (pane_out, 0)])
 
     assert ShellHerdrAdapter().list_workspaces() == []
+
+
+def test_read_pane_builds_recent_command_and_returns_text_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `herdr pane read` prints TEXT (not the JSON envelope), so it goes through the raw
+    # `_run_text` path and its stdout is returned verbatim.
+    calls = _install_runner(monkeypatch, [("line one\nline two\n", 0)])
+
+    text = ShellHerdrAdapter().read_pane("w42:p1", 150)
+
+    assert text == "line one\nline two\n"
+    assert calls[0] == [
+        "herdr",
+        "pane",
+        "read",
+        "w42:p1",
+        "--source",
+        "recent",
+        "--lines",
+        "150",
+    ]
+
+
+def test_read_pane_non_zero_exit_raises_herdr_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_runner(monkeypatch, [("", 3)])
+
+    with pytest.raises(HerdrError):
+        ShellHerdrAdapter().read_pane("w42:p1", 10)
