@@ -5,8 +5,11 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from pan.config import CODE_FENCE
 from pan.errors import SlackPostError, UnauthorizedSenderError
 from pan.gateway.auth import auth_check
+from pan.gateway.slack_post import slack_post
+from pan.help import parse_help_request, render_cli_help
 from pan.logging import initialise_logger
 from pan.models import InboxItem, PanConfig, SlackCredentials
 from pan.seams import Clock, InboxStore
@@ -67,6 +70,24 @@ class BoltSlackAdapter:
         # message ts; a reply carries the parent thread_ts.
         thread_ts = thread_ts_value or message_ts
 
+        raw_text = event.get("text", "")
+        help_request = parse_help_request(raw_text)
+        if help_request is not None:
+            # The SINGLE, deliberately narrow exception to INV-1 ("the gateway is dumb"): help
+            # is answered here, before the inbox/watcher/orchestrator, because it is read-only,
+            # spawns nothing and mutates no state — and instant help is the entire point. Do NOT
+            # widen this to other event types; anything beyond a pure read belongs in the
+            # orchestrator. No :eyes: either: the reply itself IS the acknowledgement.
+            fenced_help = f"{CODE_FENCE}\n{render_cli_help(help_request.command)}\n{CODE_FENCE}"
+            # Posted through the one egress (INV-4), so it runs through to_slack_mrkdwn like
+            # every other message (a fence passes through verbatim, keeping the columns).
+            slack_post(self, channel, thread_ts, fenced_help)
+            # Value-free (INV-9): the requested name is Slack-supplied text, so only whether
+            # one was given is logged here — help.py logs the sanitized name when it misses.
+            named = help_request.command is not None
+            logger.info(f"gateway answered help id={event_id} named={named}")
+            return
+
         # Fast :eyes: ack, ordered BEFORE the append so the sender sees acknowledgement
         # immediately and before any downstream work (INV-1).
         self.add_reaction(channel, message_ts, _EYES)
@@ -77,7 +98,7 @@ class BoltSlackAdapter:
             channel=channel,
             thread_ts=thread_ts,
             is_thread_reply=thread_ts_value is not None,
-            raw_text=event.get("text", ""),
+            raw_text=raw_text,
             received_at=self._clock.now(),
         )
         self._inbox.append(item)

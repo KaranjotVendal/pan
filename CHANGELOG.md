@@ -9,6 +9,54 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `@pan help` — instant, auto-generated command help in Slack (Task 32, Milestone M13). A phone user
+  talking to pan had no way to discover what to say, and typing `help` fell through `parse_directive`
+  to DELEGATE and spawned a worker briefed "help". The gateway now detects a help request and answers
+  it ITSELF, before the inbox, watcher and orchestrator: a new leaf module `src/pan/help.py` provides
+  pure `parse_help_request(raw_text) -> HelpRequest | None` and total
+  `render_cli_help(command_path=None) -> str`, and `BoltSlackAdapter.handle_event` posts the fenced
+  result through `slack_post` (the one egress, INV-4, so it runs through `to_slack_mrkdwn` — a fence
+  passes through verbatim, keeping the columns) and returns. This is a DELIBERATE, DOCUMENTED, NARROW
+  exception to INV-1 ("the gateway is dumb"), justified because help is read-only, spawns nothing and
+  mutates no state: no inbox append, no thread-map write, no worktree, and no `:eyes:` (the instant
+  reply IS the acknowledgement). Help is the only thing the gateway answers; every other event takes
+  the unchanged ack-then-append path, and an unauthorized sender's `help` is still dropped by
+  `auth_check` before detection. The help TEXT is generated in-process from the Typer app, so it can
+  never drift from the real CLI: a fresh `typer.main.get_command(app)` per call with
+  `rich_markup_mode = None` set recursively (Typer's default emits Rich boxes plus ANSI and returns an
+  empty string — unusable in a Slack code block), `info_name="pan <name>"` for a named command (a bare
+  name doubles the usage line to `pan pan relay`), the top-level listing filtered to the user-facing
+  commands, and an unknown name degraded to a one-line notice plus the listing rather than an error.
+  The `pan.cli` import is function-local, which is what breaks the
+  `gateway/app.py -> help.py -> cli.py -> gateway/app.py` cycle. Detection is deterministic (INV-3)
+  and phone-proof: it reuses `directive.py`'s `_LEADING_MENTION` strip and `_normalize_punctuation`,
+  so `help`, `--help`, `-h`, `?`, a phone-autocorrected `—help`, and `help <command>` all resolve with
+  or without the leading mention. A real task is never hijacked — more than two meaningful tokens is
+  not help, and in TRAILING position only the flag forms count (`relay --help` is help; `deploy ?` and
+  `retry help` are tasks and still reach the inbox). Because the Slack-only directive grammar lives in
+  `parse_directive` and not in Typer, the generator cannot see it, so a short hand-written
+  `SLACK_DIRECTIVE_FLAGS_FOOTER` (the `!` prefix, `--sync`, `--status`, `--sessions`, `--new`,
+  `--stream <name>`, the relay/read verbs) is appended to the top-level help and labels the generated
+  listing as terminal commands. The unknown-command notice echoes Slack-supplied text, so it is
+  reduced to a command-name charset and truncated to a bounded length first — a backtick run would
+  otherwise break out of the code fence and a `<!channel>` entity survives a fence unescaped. Four new
+  named constants live in `config.py` (Principle 7); no new dependency, no new exception type (both
+  functions are total), and no change to `parse_directive`, `TaskMode`, the `SlackAdapter` seam,
+  `slack_post` or `to_slack_mrkdwn`. Added tests (`tests/unit/test_help.py`, `tests/unit/
+  test_gateway_app.py`, parametrized): every help spelling with and without a mention and with phone
+  em/en-dashes; the named-command spellings in both orders; fifteen non-help negatives including a
+  task brief containing `--help`, the relay/read/sessions directives, and the two-word
+  `deploy ?`/`retry help`/`--status ?` shapes; the top-level listing asserted against the pre-footer
+  segment (user-facing commands present, infra commands absent, footer last); plain-text assertions
+  anchored on real rendered content so they cannot pass on the empty string Rich returns; the
+  `pan relay` usage line (not `pan pan relay`); a freshness test pinning a real option's help string;
+  the unknown-command fallback; the sanitizer against fences, Slack entities and a 50,000-character
+  name; non-mutation of the shared Typer app; and at the gateway, that a help mention posts a fenced
+  body and does NOT append or react, that a backtick command name cannot break the fence, that a
+  normal mention still acks and appends, and that an unauthorized help mention is still dropped. The
+  live-verify that `@pan help` and `@pan help relay` render as clean monospace on real desktop and
+  mobile Slack (and the R-2 column-width question) is deferred to a human session.
+
 - Mobile smart-punctuation normalization + bare `sessions` routing in `parse_directive` (Task 31,
   Milestone M12). A phone typed `@pan --sessions`, but the keyboard autocorrected the ASCII `--`
   into an em-dash `—` glued to the word, so `—sessions` fell through the flag scan into DELEGATE and
