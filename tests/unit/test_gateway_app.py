@@ -192,6 +192,104 @@ def test_should_forward_message(event: dict[str, Any], expected: bool) -> None:
     assert adapter._should_forward_message(event, "Bbot") is expected
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["<@B> help", "<@B> --help", "<@B> -h", "<@B> ?", "<@B> —help"],
+    ids=["bare-help", "double-dash", "short-flag", "question-mark", "phone-em-dash"],
+)
+def test_help_mention_posts_help_and_skips_the_inbox(text: str) -> None:
+    adapter, _client, inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {
+        "type": "app_mention",
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000200",
+        "text": text,
+    }
+
+    adapter.handle_event(event, "EvHelp")
+
+    # The narrow, documented INV-1 exception: help is answered by the gateway itself
+    # through the one egress (INV-4) — no :eyes:, no inbox append, no worker.
+    kinds = [entry[0] for entry in timeline]
+    assert kinds == ["post"]
+    assert inbox.items == []
+    posted_channel, posted_thread_ts, posted_text = timeline[0][1]
+    assert posted_channel == "C1"
+    assert posted_thread_ts == "1718000000.000200"
+    assert posted_text.startswith("```")
+    assert posted_text.rstrip().endswith("```")
+    assert "Usage: pan" in posted_text
+
+
+def test_help_mention_for_a_named_command_posts_that_command_help() -> None:
+    adapter, _client, inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {
+        "type": "app_mention",
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000200",
+        "text": "<@B> help relay",
+    }
+
+    adapter.handle_event(event, "EvHelpRelay")
+
+    assert inbox.items == []
+    assert "Usage: pan relay" in timeline[0][1][2]
+
+
+def test_help_for_a_backtick_command_name_keeps_the_fence_intact() -> None:
+    adapter, _client, _inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {
+        "type": "app_mention",
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000200",
+        "text": "<@B> help ```",
+    }
+
+    adapter.handle_event(event, "EvHelpFence")
+
+    # A user-supplied backtick run must not break out of the code block the help is posted in.
+    posted_text = timeline[0][1][2]
+    assert posted_text.count("```") == 2
+    assert "unknown command" in posted_text
+
+
+def test_non_help_mention_still_acks_and_appends() -> None:
+    adapter, _client, inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {
+        "type": "app_mention",
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000200",
+        "text": "<@B> add a --help flag to the tool and fix the login bug",
+    }
+
+    adapter.handle_event(event, "EvTask")
+
+    # Guards the INV-1 scope: help is the ONLY thing the gateway answers itself.
+    assert [entry[0] for entry in timeline] == ["reaction", "append"]
+    assert len(inbox.items) == 1
+
+
+def test_unauthorized_help_mention_is_still_dropped() -> None:
+    adapter, _client, inbox, timeline = _make_adapter({"U1": {"channels": ["C1"]}})
+    event = {
+        "type": "app_mention",
+        "user": "U_stranger",
+        "channel": "C1",
+        "ts": "1718000000.000200",
+        "text": "<@B> help",
+    }
+
+    adapter.handle_event(event, "EvHelpDenied")
+
+    # Auth precedes help detection: no post, no append, no reaction.
+    assert timeline == []
+    assert inbox.items == []
+
+
 @pytest.mark.parametrize("method_name", ["add_reaction", "post_message"])
 def test_client_failure_becomes_slack_post_error(method_name: str) -> None:
     adapter, client, _inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
