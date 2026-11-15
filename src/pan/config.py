@@ -13,10 +13,31 @@ logger = initialise_logger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "pan" / "config.json"
 
-# Default recent-lines window for `pan read` (no --full): the number of rendered pane lines
-# fetched via `herdr pane read` before the orchestrator summarizes them. Named here rather
-# than inlined at the call site so the tunable is discoverable and overridable (Principle 7).
+# Default recent-lines window for `pan read` (no --full): the lines of terminal history
+# fetched via `hc read` before the orchestrator summarizes them. Named here rather than
+# inlined at the call site so the tunable is discoverable and overridable (Principle 7).
 READ_RECENT_LINES = 200
+# `pan read --full` on a terminal pan has no transcript for (an external one) falls back to
+# this much hc screen history.
+READ_FULL_HISTORY_LINES = 5000
+
+# hc labels pan puts on the terminals it starts. Workers carry their thread and channel so
+# `hc ls --label` finds them without the thread map; `herdr.space` opts a terminal into a
+# Herdr app space (only when orchestrator.app_space is configured).
+PAN_ROLE_LABEL = "pan.role"
+PAN_THREAD_LABEL = "pan.thread"
+PAN_CHANNEL_LABEL = "pan.channel"
+WORKER_ROLE = "worker"
+ORCHESTRATOR_ROLE = "orchestrator"
+HERDR_SPACE_LABEL = "herdr.space"
+
+# The agent names hc reports for a running Claude Code session (`claude-code` once it
+# reports status; the program name before that).
+CLAUDE_AGENT_NAMES: frozenset[str] = frozenset({"claude-code", "claude"})
+
+# hc terminal names allow 1-32 of a-z 0-9 - _. Worker names are `pan-<stream>`.
+WORKER_NAME_PREFIX = "pan-"
+TERMINAL_NAME_MAX_LENGTH = 32
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -64,7 +85,7 @@ The commands above are terminal commands (pan <command>). From Slack, say these:
   --status                   the live state of this thread's worker
   --sessions                 list every live session (a bare "sessions" works too)
   --new                      force a new worker instead of reusing this thread's
-  --stream <name>            name the worker's workspace
+  --stream <name>            name the worker's terminal
   relay <target> <message>   send a message into a live session
   read <target> [--full]     read a live session's recent output (or all of it)
   help [command]             this help
@@ -80,9 +101,22 @@ def _expand_user_paths(raw_config: dict) -> None:
 
     orchestrator = raw_config.get("orchestrator")
     if isinstance(orchestrator, dict):
-        worktree_base = orchestrator.get("worktree_base")
-        if isinstance(worktree_base, str):
-            orchestrator["worktree_base"] = str(Path(worktree_base).expanduser())
+        for key in ("worktree_base", "cwd"):
+            value = orchestrator.get(key)
+            if isinstance(value, str):
+                orchestrator[key] = str(Path(value).expanduser())
+
+
+def _reject_herdr_era_orchestrator(raw_config: dict, config_path: Path) -> None:
+    # herdr pane ids went stale on every restart and herdr itself is gone; say exactly
+    # which keys replace them rather than failing with a generic missing-field error.
+    orchestrator = raw_config.get("orchestrator")
+    if isinstance(orchestrator, dict) and "pane_id" in orchestrator:
+        raise ConfigMissingError(
+            f"config orchestrator.pane_id is no longer used: {config_path}. Replace it with "
+            "orchestrator.terminal (the orchestrator's hc terminal name, default "
+            "pan-orchestrator) and orchestrator.cwd (the folder the orchestrator runs in)"
+        )
 
 
 def load_config(path: Path | None = None) -> PanConfig:
@@ -101,6 +135,7 @@ def load_config(path: Path | None = None) -> PanConfig:
     if not isinstance(raw_config, dict):
         raise ConfigMissingError(f"config file must be a JSON object: {config_path}")
 
+    _reject_herdr_era_orchestrator(raw_config, config_path)
     _expand_user_paths(raw_config)
 
     try:

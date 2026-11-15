@@ -1,28 +1,37 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
+from hc_fakes import FakeHc
 
+from pan.errors import HcError, TargetBlockedError, TerminalGoneError
 from pan.watcher import WAKE_INSTRUCTION, WatchdogInboxWatcher, _InboxEventHandler
 
 
-def test_on_inbox_changed_sends_wake_instruction_then_nudges_in_order() -> None:
-    # A single manager mock records call order across both seams: the fixed wake
-    # instruction must be typed first, then the Enter that submits it. Without the
-    # send_text the orchestrator's Claude TUI never wakes (bare Enter is a no-op).
-    herdr = Mock()
+def test_on_inbox_changed_sends_only_the_fixed_wake_instruction() -> None:
+    # One hc send pastes the fixed instruction and presses Enter; no payload, no separate
+    # keypress (INV-2).
+    hc = FakeHc()
 
-    watcher = WatchdogInboxWatcher(herdr, "%orchestrator", Path("/tmp/pan-inbox"))
-    watcher.on_inbox_changed()
+    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
 
-    herdr.assert_has_calls(
-        [
-            call.send_text("%orchestrator", WAKE_INSTRUCTION),
-            call.nudge("%orchestrator"),
-        ]
-    )
+    assert hc.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+
+
+@pytest.mark.parametrize(
+    "send_error",
+    [TargetBlockedError("blocked"), TerminalGoneError("gone"), HcError("hc missing")],
+)
+def test_on_inbox_changed_logs_and_survives_hc_failures(send_error: HcError) -> None:
+    # Under launchd a raise would crash-loop the watcher; the item stays in the inbox and
+    # the next change (or `pan up`) wakes the orchestrator instead.
+    hc = FakeHc(errors={"send": send_error})
+
+    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
+
+    assert hc.sent == []
 
 
 def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
@@ -34,7 +43,7 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     monkeypatch.setattr("pan.watcher.Observer", lambda: observer)
     inbox_dir = tmp_path / "inbox"
 
-    watcher = WatchdogInboxWatcher(Mock(), "%orchestrator", inbox_dir)
+    watcher = WatchdogInboxWatcher(Mock(), "pan-orchestrator", inbox_dir)
     watcher.start()
 
     # The inbox dir is created on demand, then one handler is scheduled on it

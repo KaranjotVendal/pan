@@ -14,37 +14,40 @@ from typer._click.exceptions import ClickException
 
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
-from pan.adapters.herdr import ShellHerdrAdapter
-from pan.adapters.morcli import ShellMorcliAdapter
-from pan.config import READ_RECENT_LINES, load_config
+from pan.adapters.hc import ShellHcAdapter
+from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
 from pan.directive import parse_directive
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HerdrError,
+    HcError,
     InboxError,
-    MorcliError,
     PanError,
     SlackPostError,
     SpawnError,
     TargetAmbiguousError,
+    TargetBlockedError,
     TargetNotFoundError,
+    TerminalGoneError,
+    TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
 from pan.gateway.app import BoltSlackAdapter
 from pan.gateway.slack_post import slack_post
 from pan.hooks.notification import notification_hook
+from pan.hooks.session_start import session_start_hook
 from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
 from pan.interface import read_session, relay_to_session
+from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
 from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
-from pan.sessions import collect_sessions
-from pan.spawn import ClaudeLauncher, spawn_worker
+from pan.sessions import collect_sessions, worker_status_for
+from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.threadmap import FileThreadMap
 from pan.watcher import WatchdogInboxWatcher
 
@@ -71,12 +74,14 @@ _EXIT_CODES: dict[type[PanError], int] = {
     InboxError: 13,
     ThreadNotFoundError: 14,
     SpawnError: 15,
-    HerdrError: 16,
+    HcError: 16,
     SlackPostError: 17,
     GatedOpDeniedError: 18,
-    MorcliError: 19,
     TargetNotFoundError: 20,
     TargetAmbiguousError: 21,
+    TerminalGoneError: 22,
+    TargetBlockedError: 23,
+    TerminalNameTakenError: 24,
 }
 
 
@@ -103,9 +108,7 @@ def gateway() -> None:
 def watcher() -> None:
     """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
     config = _config()
-    WatchdogInboxWatcher(
-        ShellHerdrAdapter(), config.orchestrator.pane_id, config.paths.inbox
-    ).start()
+    WatchdogInboxWatcher(ShellHcAdapter(), config.orchestrator.terminal, config.paths.inbox).start()
 
 
 @config_app.command("set-token")
@@ -167,11 +170,11 @@ def spawn(
     stream: str | None = typer.Option(None, "--stream"),
     repo: Path | None = typer.Option(None, "--repo"),
 ) -> None:
-    """Create worktree + workspace + worker session; record a ThreadRecord; post the ack."""
+    """Create worktree + hc terminal + worker session; record a ThreadRecord; post the ack."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
-    herdr = ShellHerdrAdapter()
+    hc = ShellHcAdapter()
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
     spawn_worker(
@@ -181,14 +184,43 @@ def spawn(
         repo=repo if repo is not None else Path.cwd(),
         base=config.orchestrator.worktree_base,
         stream=stream,
+        app_space=config.orchestrator.app_space,
         git=ShellGitWorktreeAdapter(),
-        herdr=herdr,
-        launcher=ClaudeLauncher(herdr),
+        hc=hc,
+        launcher=ClaudeLauncher(hc),
         thread_map=FileThreadMap(config.paths.threads, clock),
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
         id_gen=UuidGen(),
-        morcli=ShellMorcliAdapter(),
+    )
+
+
+@app.command()
+def reopen(
+    thread: str = typer.Option(..., "--thread"),
+    task: str = typer.Option(..., "--task"),
+) -> None:
+    """Reopen a thread's finished or lost worker in its existing worktree, continuing its
+    last Claude conversation with the follow-up task; post the ack."""
+    config = _config()
+    clock = SystemClock()
+    thread_map = FileThreadMap(config.paths.threads, clock)
+    record = thread_map.get(thread)
+    if record is None:
+        raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
+    credentials = load_credentials(config.paths.credentials)
+    hc = ShellHcAdapter()
+    # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
+    # only maps the exit code.
+    reopen_worker(
+        record=record,
+        task=task,
+        app_space=config.orchestrator.app_space,
+        hc=hc,
+        launcher=ClaudeLauncher(hc),
+        thread_map=thread_map,
+        slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
+        clock=clock,
     )
 
 
@@ -267,6 +299,20 @@ def _run_completion_hook(hook_fn: Callable[..., None]) -> None:
     _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, slack)
 
 
+@hook_app.command("session-start")
+def hook_session_start() -> None:
+    """Claude Code SessionStart hook: record the worker's session id and transcript path."""
+    raw_stdin = sys.stdin.read()
+    config = _config()
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    cwd = _extract_cwd(raw_stdin)
+    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if record is None:
+        logger.warning("session-start hook: no thread record for cwd")
+        return
+    session_start_hook(record.thread_ts, thread_map, stdin=io.StringIO(raw_stdin))
+
+
 @hook_app.command("stop")
 def hook_stop() -> None:
     """Claude Code Stop hook: post the worker's final summary and mark the thread DONE."""
@@ -281,27 +327,30 @@ def hook_notification() -> None:
 
 @app.command()
 def status(thread: str = typer.Option(..., "--thread")) -> None:
-    """Report a worker's live status from morcli (resolved via its thread record)."""
+    """Report a worker's live status from its hc terminal (resolved via its thread record)."""
     config = _config()
     record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    # morcli matches on session id / workspace id, not the stream label; resolve the
-    # handle from the record (morcli_session once captured, else the workspace id).
-    handle = record.morcli_session or record.workspace_id
-    worker_status = ShellMorcliAdapter().session_status(handle)
-    typer.echo(worker_status.value)
+    terminal = None
+    if record.terminal_address:
+        try:
+            terminal = ShellHcAdapter().get(record.terminal_address)
+        except TerminalGoneError:
+            terminal = None
+    typer.echo(worker_status_for(terminal, record.status).value)
 
 
 def _render_sessions_table(summaries: list[SessionSummary]) -> str:
-    header = f"{'PANE':<8} {'WORKSPACE':<20} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} DRIFT"
+    header = f"{'TERMINAL':<9} {'NAME':<24} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} DRIFT"
     lines = [header]
     for summary in summaries:
         owner = "pan" if summary.is_pan_owned else "external"
         pan_status = summary.pan_status.value if summary.pan_status is not None else "-"
+        display_name = summary.name or summary.where or summary.cwd.name
         drift = "DRIFT" if summary.drift else ""
         lines.append(
-            f"{summary.pane_id:<8} {summary.workspace_name:<20} "
+            f"{summary.address:<9} {display_name:<24} "
             f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift}"
         )
     return "\n".join(lines)
@@ -309,14 +358,11 @@ def _render_sessions_table(summaries: list[SessionSummary]) -> str:
 
 @app.command()
 def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
-    """List all live herdr claude sessions, reconciled against the pan thread map,
-    flagging status drift. --json emits the SessionSummary list for the orchestrator."""
+    """List all live hc terminals, reconciled against the pan thread map, flagging status
+    drift. --json emits the SessionSummary list for the orchestrator."""
     config = _config()
-    clock = SystemClock()
     summaries = collect_sessions(
-        ShellHerdrAdapter(),
-        FileThreadMap(config.paths.threads, clock),
-        ShellMorcliAdapter(),
+        ShellHcAdapter(), FileThreadMap(config.paths.threads, SystemClock())
     )
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
@@ -324,27 +370,39 @@ def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
     typer.echo(_render_sessions_table(summaries))
 
 
+_TARGET_HELP = "session selector: hc address | terminal name | Herdr app space label"
+
+
 @app.command()
 def relay(
-    target: str = typer.Argument(..., help="session selector: label | workspace_id | pane_id"),
-    message: str = typer.Argument(..., help="text to send into the target pane"),
+    target: str = typer.Argument(..., help=_TARGET_HELP),
+    message: str = typer.Argument(..., help="text to send into the target terminal"),
 ) -> None:
-    """Relay a message into a live herdr session's pane (pan-owned or external)."""
-    herdr = ShellHerdrAdapter()
-    resolved = relay_to_session(herdr, target, message, herdr.list_workspaces())
-    typer.echo(f"relayed into {resolved.workspace_name} pane {resolved.pane_id}")
+    """Relay a message into a live hc terminal (pan-owned or external)."""
+    hc = ShellHcAdapter()
+    resolved = relay_to_session(hc, target, message, hc.list_terminals())
+    typer.echo(
+        f"relayed into {resolved.name or resolved.where or resolved.address} terminal {resolved.address}"
+    )
 
 
 @app.command()
 def read(
-    target: str = typer.Argument(..., help="session selector: label | workspace_id | pane_id"),
-    full: bool = typer.Option(False, "--full", help="full transcript via morcli instead of recent"),
+    target: str = typer.Argument(..., help=_TARGET_HELP),
+    full: bool = typer.Option(False, "--full", help="full transcript instead of recent lines"),
 ) -> None:
-    """Print a live session's raw output: recent rendered lines, or the full transcript with --full."""
-    herdr = ShellHerdrAdapter()
-    morcli = ShellMorcliAdapter()
+    """Print a live session's raw output: recent lines, or the full transcript with --full."""
+    config = _config()
+    hc = ShellHcAdapter()
+    records = FileThreadMap(config.paths.threads, SystemClock()).records()
     raw = read_session(
-        herdr, morcli, target, herdr.list_workspaces(), full=full, lines=READ_RECENT_LINES
+        hc,
+        records,
+        target,
+        hc.list_terminals(),
+        full=full,
+        lines=READ_RECENT_LINES,
+        full_history_lines=READ_FULL_HISTORY_LINES,
     )
     # Sanctioned CLI stdout (BR-5): RAW content, never summarized here — the orchestrator
     # owns the summary (INV-3 keeps the CLI deterministic).
@@ -353,17 +411,40 @@ def read(
 
 @app.command()
 def stop(thread: str = typer.Option(..., "--thread")) -> None:
-    """Kill switch: kill the worker's pane(s) and mark the ThreadRecord FAILED."""
+    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED."""
     config = _config()
     thread_map = FileThreadMap(config.paths.threads, SystemClock())
     record = thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    herdr = ShellHerdrAdapter()
-    for pane_id in record.pane_ids:
-        herdr.kill_pane(pane_id)
+    if record.terminal_address:
+        ShellHcAdapter().remove(record.terminal_address)
     thread_map.update_status(thread, WorkerStatus.FAILED)
     typer.echo(f"stopped {thread}")
+
+
+@app.command()
+def up() -> None:
+    """Ensure the orchestrator runs in its hc terminal, mark workers lost while pan was down
+    FAILED, and wake an already-running orchestrator once. Safe to run any time."""
+    config = _config()
+    report = bring_up(
+        ShellHcAdapter(),
+        FileThreadMap(config.paths.threads, SystemClock()),
+        terminal=config.orchestrator.terminal,
+        cwd=config.orchestrator.cwd,
+        command=config.orchestrator.command,
+    )
+    state = "started" if report.started else "already running"
+    typer.echo(
+        f"orchestrator {config.orchestrator.terminal} {state} at {report.orchestrator_address}"
+    )
+    if report.lost_threads:
+        typer.echo(
+            f"marked {len(report.lost_threads)} lost worker(s) failed: {', '.join(report.lost_threads)}"
+        )
+    if not report.started and not report.woke:
+        typer.echo("could not wake the orchestrator; it will drain on its next wake")
 
 
 @app.command()

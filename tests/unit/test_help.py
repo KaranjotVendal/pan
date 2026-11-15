@@ -164,7 +164,7 @@ def test_named_command_help_renders_its_own_usage_and_flags() -> None:
 def test_named_command_help_is_generated_from_the_live_app() -> None:
     # The real `--full` option help string in cli.read — proving the text is
     # introspected from the Typer app, not a hand-written literal.
-    assert "full transcript via morcli instead of recent" in render_cli_help("read")
+    assert "full transcript instead of recent lines" in render_cli_help("read")
 
 
 @pytest.mark.parametrize(

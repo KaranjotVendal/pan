@@ -13,7 +13,7 @@ from pan.models import Agent
 def _minimal_config() -> dict:
     return {
         "orchestrator": {
-            "pane_id": "%3",
+            "cwd": "/Users/me/dev/pan",
             "worktree_base": "/Users/me/dev/pan-worktrees",
         },
         "defaults": {},
@@ -34,14 +34,15 @@ def _write_config(tmp_path: Path, data: dict) -> Path:
 
 def test_load_config_validates_into_pan_config(tmp_path: Path) -> None:
     data = _minimal_config()
-    data["orchestrator"]["workspace_name"] = "pan-orchestrator"
+    data["orchestrator"]["terminal"] = "t42"
+    data["orchestrator"]["app_space"] = "sp123"
     data["defaults"] = {"agent": "claude"}
     data["users"] = {"U1": {"channels": ["C1"]}}
 
     config = load_config(_write_config(tmp_path, data))
 
-    assert config.orchestrator.workspace_name == "pan-orchestrator"
-    assert config.orchestrator.pane_id == "%3"
+    assert config.orchestrator.terminal == "t42"
+    assert config.orchestrator.app_space == "sp123"
     assert config.defaults.agent is Agent.CLAUDE
     assert config.users["U1"].channels == ["C1"]
 
@@ -55,6 +56,9 @@ def test_omitted_optional_sections_fall_back_to_defaults(tmp_path: Path) -> None
     config = load_config(_write_config(tmp_path, _minimal_config()))
 
     assert config.slack.socket_mode is True
+    assert config.orchestrator.terminal == "pan-orchestrator"
+    assert config.orchestrator.app_space is None
+    assert config.orchestrator.command == ["claude"]
     assert config.gated_ops == []
     assert config.users == {}
 
@@ -71,6 +75,7 @@ def test_tilde_paths_expand_to_absolute(tmp_path: Path) -> None:
     data = _minimal_config()
     data["paths"]["inbox"] = "~/.pan/inbox"
     data["orchestrator"]["worktree_base"] = "~/dev/pan-worktrees"
+    data["orchestrator"]["cwd"] = "~/dev/pan"
 
     config = load_config(_write_config(tmp_path, data))
 
@@ -78,6 +83,15 @@ def test_tilde_paths_expand_to_absolute(tmp_path: Path) -> None:
     assert "~" not in str(config.paths.inbox)
     assert config.paths.inbox == Path.home() / ".pan" / "inbox"
     assert config.orchestrator.worktree_base == Path.home() / "dev" / "pan-worktrees"
+    assert config.orchestrator.cwd == Path.home() / "dev" / "pan"
+
+
+def test_herdr_era_pane_id_names_its_replacement(tmp_path: Path) -> None:
+    data = _minimal_config()
+    data["orchestrator"]["pane_id"] = "w1:p1"
+
+    with pytest.raises(ConfigMissingError, match="orchestrator.terminal"):
+        load_config(_write_config(tmp_path, data))
 
 
 def test_malformed_json_raises_config_missing_error(tmp_path: Path) -> None:

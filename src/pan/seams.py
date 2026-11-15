@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from pan.models import InboxItem, LiveSession, ThreadRecord, WorkerStatus
+from pan.models import InboxItem, Terminal, TerminalRead, ThreadRecord, WorkerStatus
 
 # Every seam Protocol lives here for a single import point.
 
@@ -42,20 +42,27 @@ class ThreadMap(Protocol):
 
     def records(self) -> list[ThreadRecord]: ...
 
+    def record_session(
+        self, thread_ts: str, session_id: str, transcript_path: Path | None
+    ) -> None: ...
 
-class HerdrAdapter(Protocol):
-    def create_workspace(self, label: str, cwd: Path) -> tuple[str, str]: ...
 
-    def nudge(self, pane_id: str) -> None: ...
+class HcAdapter(Protocol):
+    # `terminal` arguments accept any hc address form: t7, a name, or machine/t7.
+    def run(self, *, name: str, cwd: Path, argv: list[str], labels: dict[str, str]) -> Terminal: ...
 
-    def send_text(self, pane_id: str, text: str) -> None: ...
+    # Paste text and press Enter; raises TargetBlockedError when the target is blocked.
+    def send(self, terminal: str, text: str) -> None: ...
 
-    def kill_pane(self, pane_id: str) -> None: ...
+    def read(self, terminal: str, lines: int) -> TerminalRead: ...
 
-    def list_workspaces(self) -> list[LiveSession]: ...
+    # Raises TerminalGoneError when the terminal does not exist.
+    def get(self, terminal: str) -> Terminal: ...
 
-    # Read a pane's recent rendered output as TEXT (not the JSON envelope).
-    def read_pane(self, pane_id: str, lines: int) -> str: ...
+    def list_terminals(self, labels: dict[str, str] | None = None) -> list[Terminal]: ...
+
+    # Kill then remove; a terminal that is already gone counts as removed.
+    def remove(self, terminal: str) -> None: ...
 
 
 class GitWorktreeAdapter(Protocol):
@@ -64,22 +71,20 @@ class GitWorktreeAdapter(Protocol):
     def remove_worktree(self, path: Path) -> None: ...
 
 
-class MorcliAdapter(Protocol):
-    def session_status(self, handle: str) -> WorkerStatus: ...
-
-    # Best-effort workspace_id -> session_id resolution at spawn (R-7). Returns None when
-    # morcli has not indexed the just-created session yet (the lag is tolerated).
-    def resolve_session(self, workspace_id: str) -> str | None: ...
-
-    # Full session content via `morcli open`; resolves the handle via resolve_session.
-    def transcript(self, handle: str) -> str: ...
-
-
 class AgentLauncher(Protocol):
-    # Starts a worker agent session in the given pane with the task brief. The
-    # orchestrator (spawn_worker) owns ThreadRecord construction, since the record's
-    # required thread_ts/channel context is not available to the launcher.
-    def launch(self, worktree: Path, pane_id: str, brief: str) -> None: ...
+    # Starts a worker agent in a new terminal named `name`, in the worktree, with the task
+    # brief as its first task; continue_session resumes the worktree's last conversation.
+    # The orchestrator (spawn_worker) owns ThreadRecord construction, since the record's
+    # thread_ts/channel context is not the launcher's.
+    def launch(
+        self,
+        name: str,
+        worktree: Path,
+        brief: str,
+        labels: dict[str, str],
+        *,
+        continue_session: bool = False,
+    ) -> Terminal: ...
 
 
 class InboxWatcher(Protocol):

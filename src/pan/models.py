@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class TaskMode(StrEnum):
@@ -12,7 +13,7 @@ class TaskMode(StrEnum):
     SYNC = "sync"
     STATUS = "status"
     SESSIONS = "sessions"
-    RELAY = "relay"  # drive a target session's pane with a message
+    RELAY = "relay"  # send a message into a target terminal
     READ = "read"  # read a target session's output (recent | --full transcript)
 
 
@@ -25,17 +26,22 @@ class WorkerStatus(StrEnum):
 
 
 class AgentStatus(StrEnum):
-    # herdr's live per-agent status vocabulary, modeled as a closed set so the reconcile
-    # compares typed values rather than raw strings. The members are inferred from the
-    # herdr skill docs and morcli's status map; VERIFY against real `herdr workspace
-    # list` / `pane list` output (tech-spec R-9) before treating them as final. UNKNOWN
-    # absorbs any value herdr reports that is not a known member, so an unexpected string
-    # never crashes the adapter.
+    # hc's OSC 7501 agent status vocabulary, modeled as a closed set so the reconcile
+    # compares typed values rather than raw strings. NONE is a program that reports no
+    # status (a shell, or an agent that has not reported yet). UNKNOWN absorbs any value hc
+    # reports that is not a known member, so an unexpected string never crashes the adapter.
     IDLE = "idle"
     WORKING = "working"
     BLOCKED = "blocked"
     DONE = "done"
+    ERROR = "error"
+    NONE = "none"
     UNKNOWN = "unknown"
+
+
+class TerminalState(StrEnum):
+    LIVE = "live"
+    FINISHED = "finished"
 
 
 class Autonomy(StrEnum):
@@ -55,9 +61,9 @@ class Directive(BaseModel, frozen=True):
     force_new: bool = False
     target_stream: str | None = None
     agent: Agent | None = None
-    # relay/read selector (label | workspace_id | pane_id) and the relay message. `target`
-    # is distinct from `target_stream` (a spawn stream label); it names a live session to
-    # address. `message` mirrors `cleaned_text` on the relay path.
+    # relay/read selector (hc address | terminal name | Herdr app space label) and the relay
+    # message. `target` is distinct from `target_stream` (a spawn stream name); it names a
+    # live terminal to address. `message` mirrors `cleaned_text` on the relay path.
     target: str | None = None
     message: str | None = None
     # read the full transcript instead of recent lines (the `read` verb's --full modifier).
@@ -75,42 +81,74 @@ class InboxItem(BaseModel, frozen=True):
     received_at: datetime
 
 
+# Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
+# no longer exists, so it loads as lost (FAILED) and is never driven.
+_LEGACY_RECORD_KEYS = frozenset({"workspace_name", "workspace_id", "pane_ids", "morcli_session"})
+
+
 class ThreadRecord(BaseModel):
     thread_ts: str
-    workspace_name: str
-    workspace_id: str
+    # The worker's hc terminal: `terminal_name` is the stream name (also the git branch);
+    # `terminal_address` is hc's address (t7, machine/t7), empty when no terminal exists.
+    terminal_name: str
+    terminal_address: str = ""
     channel: str
-    pane_ids: list[str] = Field(default_factory=list)
     worktree_path: Path
     agent: Agent = Agent.CLAUDE
-    morcli_session: str | None = None
+    # Recorded by the worker's SessionStart hook; used by `pan read --full`.
+    claude_session_id: str | None = None
+    transcript_path: Path | None = None
     status: WorkerStatus = WorkerStatus.SPAWNING
     created_at: datetime
     updated_at: datetime
 
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_herdr_record(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict) or "terminal_name" in raw:
+            return raw
+        if not _LEGACY_RECORD_KEYS.intersection(raw):
+            return raw
+        upgraded = {key: value for key, value in raw.items() if key not in _LEGACY_RECORD_KEYS}
+        upgraded["terminal_name"] = raw.get("workspace_name", "")
+        upgraded["terminal_address"] = ""
+        if raw.get("status") != WorkerStatus.DONE.value:
+            upgraded["status"] = WorkerStatus.FAILED.value
+        return upgraded
 
-class LiveSession(BaseModel, frozen=True):
-    # The confined projection of one live herdr pane; the only session type the herdr
-    # adapter lets escape (INV-8). An immutable snapshot of the live view.
-    workspace_name: str
-    workspace_id: str
-    pane_id: str
+
+class Terminal(BaseModel, frozen=True):
+    # The confined projection of one hc terminal; the only terminal type the hc adapter
+    # lets escape (INV-8). `address` is hc's id (t7, machine/t7); `name` is unique among
+    # live terminals; `where` is the Herdr app's "space / tab" label when it shows one.
+    address: str
+    name: str | None = None
+    where: str | None = None
     cwd: Path
+    state: TerminalState
+    agent: str | None = None
     agent_status: AgentStatus
+
+
+class TerminalRead(BaseModel, frozen=True):
+    # `complete` is False when hc could return only the visible screen (the target was
+    # working, blocked or in error), so a summary of it must not overclaim.
+    text: str
+    complete: bool
 
 
 class SessionSummary(BaseModel, frozen=True):
-    # A LiveSession flattened, plus the pan-owned join. The pan_* fields are None for an
-    # external (non-pan-owned) session. `drift` is meaningful only when is_pan_owned is
-    # True — an external session has no pan_status to disagree with.
-    workspace_name: str
-    workspace_id: str
-    pane_id: str
+    # A Terminal flattened, plus the pan-owned join. The pan_* fields are None for an
+    # external (non-pan-owned) terminal. `drift` is meaningful only when is_pan_owned is
+    # True — an external terminal has no pan_status to disagree with.
+    address: str
+    name: str | None = None
+    where: str | None = None
     cwd: Path
+    agent: str | None = None
     agent_status: AgentStatus
     thread_ts: str | None = None
     pan_status: WorkerStatus | None = None
-    morcli_session: str | None = None
     is_pan_owned: bool = False
     drift: bool = False
 
@@ -131,9 +169,17 @@ class UserPolicy(BaseModel, frozen=True):
 
 
 class OrchestratorConfig(BaseModel, frozen=True):
-    workspace_name: str = "pan-orchestrator"
-    pane_id: str
+    # `terminal` is the orchestrator's hc name (an address also works). A name, because
+    # `pan up` always recreates the orchestrator under it while its address changes.
+    terminal: str = "pan-orchestrator"
+    cwd: Path
+    # The program `pan up` starts the orchestrator with; the boot brief is appended as the
+    # last argument. Add permission flags here if the orchestrator should not prompt.
+    command: list[str] = Field(default_factory=lambda: ["claude"])
     worktree_base: Path
+    # Optional Herdr app space id. When set, each worker is labelled into that space so it
+    # shows as a tab; when absent, workers stay hidden. pan never creates spaces.
+    app_space: str | None = None
 
 
 class Defaults(BaseModel, frozen=True):
