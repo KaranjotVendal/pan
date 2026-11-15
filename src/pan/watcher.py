@@ -6,8 +6,9 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from pan.errors import HcError
 from pan.logging import initialise_logger
-from pan.seams import HerdrAdapter
+from pan.seams import HcAdapter
 
 logger = initialise_logger(__name__)
 
@@ -19,17 +20,22 @@ WAKE_INSTRUCTION = (
 
 
 class WatchdogInboxWatcher:
-    def __init__(self, herdr: HerdrAdapter, orchestrator_pane_id: str, inbox_dir: Path) -> None:
-        self._herdr = herdr
-        self._orchestrator_pane_id = orchestrator_pane_id
+    def __init__(self, hc: HcAdapter, orchestrator_terminal: str, inbox_dir: Path) -> None:
+        self._hc = hc
+        self._orchestrator_terminal = orchestrator_terminal
         self._inbox_dir = inbox_dir
 
     def on_inbox_changed(self) -> None:
-        # INV-2: send a fixed wake instruction (so the orchestrator's Claude TUI actually
-        # wakes — a bare Enter with an empty prompt does nothing) and then the Enter that
-        # submits it. This carries NO task payload; the payload lives in the durable inbox.
-        self._herdr.send_text(self._orchestrator_pane_id, WAKE_INSTRUCTION)
-        self._herdr.nudge(self._orchestrator_pane_id)
+        # INV-2: send the fixed wake instruction; `hc send` pastes it and presses Enter.
+        # It carries NO task payload; the payload lives in the durable inbox. A blocked or
+        # missing orchestrator (or any hc failure) is logged, never raised: the item stays
+        # in the inbox, the next change re-nudges, and `pan up` sends a wake, whereas a
+        # crash would only make launchd restart the watcher in a loop.
+        try:
+            self._hc.send(self._orchestrator_terminal, WAKE_INSTRUCTION)
+        except HcError as error:
+            logger.warning(f"watcher could not wake orchestrator: {type(error).__name__}")
+            return
         logger.info("watcher woke orchestrator")
 
     def start(self) -> None:

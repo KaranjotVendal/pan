@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional LaunchAgent that runs `pan up` once at login: it starts the orchestrator
+  Claude session in its hc terminal (herdr-core restores no agents after a reboot), marks
+  workers lost in the reboot FAILED, and wakes an orchestrator that is already running.
+  It is not a long-running service: launchd re-runs it only if it fails (for example when
+  the hc core is not reachable yet at login), at most every ThrottleInterval seconds.
+  This file carries NO secrets.
+
+  To install, replace every <PAN_HOME> with your home directory (e.g. /Users/you),
+  save as ~/Library/LaunchAgents/com.pan.up.plist, then `launchctl load` it.
+  See README.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pan.up</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><PAN_HOME>/.local/bin/pan</string>
+        <string>up</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PAN_LOG_LEVEL</key>
+        <string>INFO</string>
+        <key>PATH</key>
+        <string><PAN_HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string><PAN_HOME>/.pan/logs/up.out.log</string>
+    <key>StandardErrorPath</key>
+    <string><PAN_HOME>/.pan/logs/up.err.log</string>
+</dict>
+</plist>

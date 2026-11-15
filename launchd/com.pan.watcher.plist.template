@@ -4,7 +4,7 @@
   LaunchAgent template for the pan inbox watcher (the independent, event-driven
   process that nudges the orchestrator when a new inbox item lands). It runs as a
   second agent so it is supervised independently of any Claude session's own loop.
-  This file carries NO secrets — the watcher only nudges the orchestrator pane.
+  This file carries NO secrets — the watcher only wakes the orchestrator's hc terminal.
 
   To install, replace every <PAN_HOME> with your home directory (e.g. /Users/you),
   save as ~/Library/LaunchAgents/com.pan.watcher.plist, then `launchctl load` it.
@@ -30,6 +30,10 @@
     <dict>
         <key>PAN_LOG_LEVEL</key>
         <string>INFO</string>
+        <!-- launchd's default PATH lacks ~/.local/bin, where uv puts pan and the herdr-core
+             installer puts hc; the watcher shells hc to wake the orchestrator. -->
+        <key>PATH</key>
+        <string><PAN_HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>StandardOutPath</key>

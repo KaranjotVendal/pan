@@ -6,11 +6,14 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HerdrError,
+    HcError,
     InboxError,
     PanError,
     SlackPostError,
     SpawnError,
+    TargetBlockedError,
+    TerminalGoneError,
+    TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
@@ -29,10 +32,17 @@ def test_pan_error_is_exception_subclass() -> None:
         InboxError,
         ThreadNotFoundError,
         SpawnError,
-        HerdrError,
+        HcError,
         SlackPostError,
         GatedOpDeniedError,
     ],
 )
 def test_taxonomy_subclasses_pan_error(exception_class: type[PanError]) -> None:
     assert issubclass(exception_class, PanError)
+
+
+@pytest.mark.parametrize(
+    "exception_class", [TerminalGoneError, TargetBlockedError, TerminalNameTakenError]
+)
+def test_hc_failure_kinds_subclass_hc_error(exception_class: type[PanError]) -> None:
+    assert issubclass(exception_class, HcError)

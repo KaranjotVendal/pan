@@ -9,6 +9,7 @@ import pytest
 
 from pan.errors import ThreadNotFoundError
 from pan.hooks.notification import notification_hook
+from pan.hooks.session_start import session_start_hook
 from pan.hooks.stop import stop_hook
 from pan.models import ThreadRecord, WorkerStatus
 
@@ -17,12 +18,13 @@ class FakeThreadMap:
     def __init__(self, *, seed_thread: str | None = "1718000000.000200") -> None:
         self.records: dict[str, ThreadRecord] = {}
         self.status_updates: list[tuple[str, WorkerStatus]] = []
+        self.sessions: list[tuple[str, str, Path | None]] = []
         if seed_thread is not None:
             now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
             self.records[seed_thread] = ThreadRecord(
                 thread_ts=seed_thread,
-                workspace_name="pan-task",
-                workspace_id="ws1",
+                terminal_name="pan-task",
+                terminal_address="t3",
                 channel="C1",
                 worktree_path=Path("/tmp/wt"),
                 created_at=now,
@@ -37,6 +39,9 @@ class FakeThreadMap:
 
     def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
         self.status_updates.append((thread_ts, status))
+
+    def record_session(self, thread_ts: str, session_id: str, transcript_path: Path | None) -> None:
+        self.sessions.append((thread_ts, session_id, transcript_path))
 
 
 class FakeSlack:
@@ -157,3 +162,28 @@ def test_hook_raises_when_thread_unknown(hook: object, payload: dict) -> None:
     # Nothing is posted or transitioned when the thread is unknown.
     assert slack.posts == []
     assert thread_map.status_updates == []
+
+
+def test_session_start_hook_records_session_id_and_transcript_path() -> None:
+    thread_map = FakeThreadMap()
+    payload = json.dumps(
+        {
+            "session_id": "s-42",
+            "transcript_path": "/home/.claude/projects/wt/s-42.jsonl",
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+        }
+    )
+
+    session_start_hook(_THREAD, thread_map, stdin=io.StringIO(payload))
+
+    assert thread_map.sessions == [(_THREAD, "s-42", Path("/home/.claude/projects/wt/s-42.jsonl"))]
+    assert thread_map.status_updates == []
+
+
+def test_session_start_hook_without_session_id_records_nothing() -> None:
+    thread_map = FakeThreadMap()
+
+    session_start_hook(_THREAD, thread_map, stdin=io.StringIO(json.dumps({})))
+
+    assert thread_map.sessions == []
