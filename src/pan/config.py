@@ -20,6 +20,9 @@ READ_RECENT_LINES = 200
 # `pan read --full` on a terminal pan has no transcript for (an external one) falls back to
 # this much hc screen history.
 READ_FULL_HISTORY_LINES = 5000
+# The watcher wakes the orchestrator once the inbox has been quiet this long, so a burst of
+# filesystem events (or several items arriving together) becomes a single wake.
+WATCHER_DEBOUNCE_SECONDS = 1.0
 
 # hc labels pan puts on the terminals it starts. Workers carry their thread and channel so
 # `hc ls --label` finds them without the thread map; `herdr.space` opts a terminal into a

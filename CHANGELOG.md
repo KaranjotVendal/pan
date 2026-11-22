@@ -7,6 +7,13 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Fixed
+
+- The watcher woke the orchestrator 5 times for one Slack message: every filesystem event in the
+  inbox folder sent a wake, including the append's temp-file writes and the orchestrator's own drain.
+  It now forwards only a new `<id>.json` entry, and a trailing debounce
+  (`WATCHER_DEBOUNCE_SECONDS`, 1 s) turns a burst into a single wake.
+
 ### Changed
 
 - Migrated from the herdr TUI CLI and morcli to herdr-core (`hc`). herdr is no longer installed and
