@@ -30,13 +30,13 @@ def _record(
     created = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     return ThreadRecord(
         thread_ts=thread_ts,
-        workspace_name="pan-task-3",
-        workspace_id="ws_abc",
+        terminal_name="pan-task-3",
+        terminal_address="t12",
         channel="C0001",
-        pane_ids=["%1", "%2"],
         worktree_path=worktree_path,
         agent=Agent.CLAUDE,
-        morcli_session="mor_123",
+        claude_session_id="session-123",
+        transcript_path=Path("/home/.claude/projects/x/session-123.jsonl"),
         status=WorkerStatus.SPAWNING,
         created_at=created,
         updated_at=created,
@@ -52,11 +52,12 @@ def test_put_then_get_round_trips_through_disk(tmp_path: Path) -> None:
     loaded = thread_map.get(record.thread_ts)
 
     assert loaded is not None
-    assert loaded.workspace_id == "ws_abc"
-    assert loaded.pane_ids == ["%1", "%2"]
+    assert loaded.terminal_name == "pan-task-3"
+    assert loaded.terminal_address == "t12"
     assert loaded.worktree_path == Path("/Users/me/dev/pan-worktrees/task-3")
     assert loaded.agent is Agent.CLAUDE
-    assert loaded.morcli_session == "mor_123"
+    assert loaded.claude_session_id == "session-123"
+    assert loaded.transcript_path == Path("/home/.claude/projects/x/session-123.jsonl")
     assert loaded.status is WorkerStatus.SPAWNING
     assert loaded.created_at == record.created_at
 
@@ -78,10 +79,10 @@ def test_update_status_transitions_and_bumps_updated_at(tmp_path: Path) -> None:
     # Only status and updated_at change — every other field survives the
     # read-modify-write cycle unchanged.
     assert updated.created_at == record.created_at
-    assert updated.pane_ids == record.pane_ids
-    assert updated.morcli_session == record.morcli_session
+    assert updated.terminal_name == record.terminal_name
+    assert updated.claude_session_id == record.claude_session_id
     assert updated.worktree_path == record.worktree_path
-    assert updated.workspace_id == record.workspace_id
+    assert updated.terminal_address == record.terminal_address
     assert updated.agent is record.agent
 
 
@@ -109,12 +110,12 @@ def test_put_is_idempotent_upsert(tmp_path: Path) -> None:
     thread_map.put(_record("t2"))
 
     replacement = _record("t1")
-    replacement.workspace_id = "ws_replaced"
+    replacement.terminal_address = "t99"
     thread_map.put(replacement)
 
     fetched = thread_map.get("t1")
     assert fetched is not None
-    assert fetched.workspace_id == "ws_replaced"
+    assert fetched.terminal_address == "t99"
     assert thread_map.get("t2") is not None
 
 
@@ -201,3 +202,29 @@ def test_read_tolerates_unparseable_legacy_record(
     assert found is not None
     assert found.thread_ts == valid_ts
     assert any(legacy_ts in record.message for record in caplog.records)
+
+
+def test_record_session_sets_session_fields_and_bumps_updated_at(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.put(_record())
+    later = datetime(2026, 7, 16, 10, 5, 0, tzinfo=UTC)
+    clock.set(later)
+
+    thread_map.record_session("1718000000.000100", "session-new", Path("/t/session-new.jsonl"))
+
+    updated = thread_map.get("1718000000.000100")
+    assert updated is not None
+    assert updated.claude_session_id == "session-new"
+    assert updated.transcript_path == Path("/t/session-new.jsonl")
+    assert updated.updated_at == later
+    assert updated.status is WorkerStatus.SPAWNING
+
+
+def test_record_session_unknown_thread_raises(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+
+    with pytest.raises(ThreadNotFoundError):
+        thread_map.record_session("nope", "session", None)

@@ -49,7 +49,7 @@ class FileThreadMap:
 
     def records(self) -> list[ThreadRecord]:
         # All current bindings, for the reconcile view (collect_sessions) to left-join
-        # against live herdr sessions. Read-only; the thread map stays authoritative (INV-7).
+        # against live hc terminals. Read-only; the thread map stays authoritative (INV-7).
         return list(self._read_all().values())
 
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
@@ -81,3 +81,18 @@ class FileThreadMap:
         records[thread_ts] = record
         self._write_all(records)
         logger.info(f"threadmap update thread={thread_ts} status={status}")
+
+    def record_session(self, thread_ts: str, session_id: str, transcript_path: Path | None) -> None:
+        # Written by the worker's SessionStart hook: the Claude session id and transcript
+        # path that `pan read --full` renders. A resumed or cleared session overwrites them.
+        records = self._read_all()
+        record = records.get(thread_ts)
+        if record is None:
+            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+
+        record.claude_session_id = session_id
+        record.transcript_path = transcript_path
+        record.updated_at = self._clock.now()
+        records[thread_ts] = record
+        self._write_all(records)
+        logger.info(f"threadmap session thread={thread_ts}")

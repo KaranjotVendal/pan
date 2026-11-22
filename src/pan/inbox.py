@@ -10,6 +10,8 @@ from pan.models import InboxItem
 
 logger = initialise_logger(__name__)
 
+_ENTRY_SUFFIX = ".json"
+_TEMP_PREFIX = "."
 _CLAIMED_SUFFIX = ".claimed"
 _CORRUPT_SUFFIX = ".corrupt"
 _PATH_SEPARATORS = ("/", "\\", "\x00")
@@ -28,6 +30,12 @@ def _require_safe_event_id(event_id: str) -> None:
         raise InboxError(f"unsafe inbox event id={event_id!r}")
 
 
+def is_inbox_entry_name(name: str) -> bool:
+    # A pending entry is `<event id>.json`. The append's temp file (`.<id>.json.tmp`) and a
+    # drain's claimed or quarantined files (`.claimed`, `.corrupt`) are not entries.
+    return name.endswith(_ENTRY_SUFFIX) and not name.startswith(_TEMP_PREFIX)
+
+
 class FileInboxStore:
     def __init__(self, inbox_dir: Path) -> None:
         self._inbox_dir = inbox_dir
@@ -35,7 +43,7 @@ class FileInboxStore:
     def append(self, item: InboxItem) -> None:
         _require_safe_event_id(item.id)
         self._inbox_dir.mkdir(parents=True, exist_ok=True)
-        entry_path = self._inbox_dir / f"{item.id}.json"
+        entry_path = self._inbox_dir / f"{item.id}{_ENTRY_SUFFIX}"
 
         # The event id is the filename, so a redelivered event (same id) before a
         # drain resolves to the same path and is drained exactly once (INV-6).
@@ -43,7 +51,7 @@ class FileInboxStore:
             logger.info(f"inbox append id={item.id} skipped=duplicate")
             return
 
-        temp_path = self._inbox_dir / f".{item.id}.json.tmp"
+        temp_path = self._inbox_dir / f"{_TEMP_PREFIX}{item.id}{_ENTRY_SUFFIX}.tmp"
         try:
             temp_path.write_text(item.model_dump_json())
             temp_path.replace(entry_path)
@@ -62,7 +70,7 @@ class FileInboxStore:
         # append (or another drainer) cannot clobber or double-return it (R-6).
         # Track (original_entry, claim) so a malformed sibling can be un-claimed.
         claims: list[tuple[Path, Path]] = []
-        for entry_path in sorted(self._inbox_dir.glob("*.json")):
+        for entry_path in sorted(self._inbox_dir.glob(f"*{_ENTRY_SUFFIX}")):
             claim_path = entry_path.with_name(entry_path.name + _CLAIMED_SUFFIX)
             try:
                 entry_path.rename(claim_path)

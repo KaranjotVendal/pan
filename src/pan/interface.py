@@ -2,26 +2,42 @@ from __future__ import annotations
 
 from pan.errors import TargetAmbiguousError, TargetNotFoundError
 from pan.logging import initialise_logger
-from pan.models import LiveSession
-from pan.seams import HerdrAdapter, MorcliAdapter
+from pan.models import Terminal, ThreadRecord
+from pan.seams import HcAdapter
+from pan.transcript import render_transcript
 
 logger = initialise_logger(__name__)
 
+# The Herdr app's `where` label is "<space> / <tab>"; a selector may name just the space.
+_WHERE_SEPARATOR = " / "
+FULL_HISTORY_NOTICE = "(no transcript recorded for this terminal; showing its screen history)"
+INCOMPLETE_READ_NOTICE = (
+    "(incomplete: only the visible screen; the session is busy or waiting for a person)"
+)
 
-def resolve_target(selector: str, sessions: list[LiveSession]) -> LiveSession:
+
+def _space_of(where: str | None) -> str | None:
+    return where.split(_WHERE_SEPARATOR, 1)[0] if where is not None else None
+
+
+def resolve_target(selector: str, terminals: list[Terminal]) -> Terminal:
     # Exact-match targeting with precise-id precedence, so an ambiguous label is
-    # re-targetable by a precise id (INV-3, no fuzzy judgment). A workspace_id match wins,
-    # then a pane_id match; both are precise ids and resolve to a single session. Only the
-    # label axis carries an ambiguity: zero label matches is not-found, one resolves, and
-    # more than one (duplicate labels / multiple panes under one label) is refused.
-    for session in sessions:
-        if session.workspace_id == selector:
-            return session
-    for session in sessions:
-        if session.pane_id == selector:
-            return session
+    # re-targetable by a precise one (INV-3, no fuzzy judgment). An hc address wins, then
+    # a terminal name (unique among live terminals in hc); both resolve to one terminal.
+    # Only the Herdr app label axis (`where`, or just its space) can be ambiguous: zero
+    # matches is not-found, one resolves, and more than one is refused with the candidates.
+    for terminal in terminals:
+        if terminal.address == selector:
+            return terminal
+    for terminal in terminals:
+        if terminal.name == selector:
+            return terminal
 
-    label_matches = [session for session in sessions if session.workspace_name == selector]
+    label_matches = [
+        terminal
+        for terminal in terminals
+        if selector in (terminal.where, _space_of(terminal.where))
+    ]
     if not label_matches:
         raise TargetNotFoundError(f"no live session for selector '{selector}'")
     if len(label_matches) == 1:
@@ -30,43 +46,59 @@ def resolve_target(selector: str, sessions: list[LiveSession]) -> LiveSession:
 
 
 def relay_to_session(
-    herdr: HerdrAdapter,
+    hc: HcAdapter,
     selector: str,
     message: str,
-    sessions: list[LiveSession],
-) -> LiveSession:
-    # Resolve the target, send the message into its pane, then nudge it (a content-free
-    # Enter) so the agent picks the message up. Returns the resolved session so the caller
-    # can build a precise ack. TargetNotFoundError / TargetAmbiguousError propagate before
-    # any send, so an unresolvable selector never drives a pane.
-    target = resolve_target(selector, sessions)
-    herdr.send_text(target.pane_id, message)
-    herdr.nudge(target.pane_id)
-    logger.info(f"relay pane={target.pane_id} selector={selector} len={len(message)}")
+    terminals: list[Terminal],
+) -> Terminal:
+    # Resolve the target, then paste the message and press Enter in one hc send. Returns
+    # the resolved terminal so the caller can build a precise ack. TargetNotFoundError /
+    # TargetAmbiguousError propagate before any send; a target waiting on a person raises
+    # TargetBlockedError from hc without anything being typed.
+    target = resolve_target(selector, terminals)
+    hc.send(target.address, message)
+    logger.info(f"relay terminal={target.address} selector={selector} len={len(message)}")
     return target
 
 
+def _transcript_for(target: Terminal, records: list[ThreadRecord]) -> str | None:
+    for record in records:
+        if record.terminal_address == target.address and record.transcript_path is not None:
+            try:
+                return render_transcript(record.transcript_path)
+            except OSError:
+                logger.warning(f"transcript unreadable thread={record.thread_ts}")
+                return None
+    return None
+
+
 def read_session(
-    herdr: HerdrAdapter,
-    morcli: MorcliAdapter,
+    hc: HcAdapter,
+    records: list[ThreadRecord],
     selector: str,
-    sessions: list[LiveSession],
+    terminals: list[Terminal],
     *,
     full: bool,
     lines: int,
+    full_history_lines: int,
 ) -> str:
-    # Resolve the target and return its RAW output — the recent rendered lines by default
-    # (fast, via herdr), or the full transcript via morcli when full=True. The caller (the
-    # orchestrator) summarizes; the CLI stays deterministic and returns raw content. Both
-    # seams are injected for one testable signature but only the selected one is used.
-    # TargetNotFoundError / TargetAmbiguousError propagate before either seam is touched;
-    # a HerdrError / MorcliError from the read itself surfaces at the boundary.
-    target = resolve_target(selector, sessions)
+    # Resolve the target and return its RAW output — recent terminal history by default,
+    # or with full=True the Claude transcript recorded by a pan worker's SessionStart hook
+    # (falling back to long screen history, labelled as such, for any other terminal). The
+    # caller (the orchestrator) summarizes; the CLI stays deterministic and returns raw
+    # content. Resolution errors propagate before hc is touched.
+    target = resolve_target(selector, terminals)
     if full:
-        content = morcli.transcript(target.workspace_id)
+        transcript = _transcript_for(target, records)
+        if transcript is not None:
+            content = transcript
+        else:
+            history = hc.read(target.address, full_history_lines)
+            content = f"{FULL_HISTORY_NOTICE}\n{history.text}"
     else:
-        content = herdr.read_pane(target.pane_id, lines)
+        recent = hc.read(target.address, lines)
+        content = recent.text if recent.complete else f"{INCOMPLETE_READ_NOTICE}\n{recent.text}"
     logger.info(
-        f"read pane={target.pane_id} selector={selector} full={full} out_len={len(content)}"
+        f"read terminal={target.address} selector={selector} full={full} out_len={len(content)}"
     )
     return content

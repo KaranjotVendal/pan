@@ -54,7 +54,7 @@ class FakeInbox:
 def _config(users: dict[str, dict]) -> PanConfig:
     return PanConfig.model_validate(
         {
-            "orchestrator": {"pane_id": "%3", "worktree_base": "/tmp/wt"},
+            "orchestrator": {"cwd": "/tmp/pan", "worktree_base": "/tmp/wt"},
             "defaults": {},
             "users": users,
             "paths": {

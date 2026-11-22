@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hc_fakes import FakeHc, make_terminal
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
@@ -14,14 +15,16 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HerdrError,
+    HcError,
     InboxError,
-    MorcliError,
     PanError,
     SlackPostError,
     SpawnError,
     TargetAmbiguousError,
+    TargetBlockedError,
     TargetNotFoundError,
+    TerminalGoneError,
+    TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
@@ -31,7 +34,6 @@ from pan.inbox import FileInboxStore
 from pan.models import (
     AgentStatus,
     InboxItem,
-    LiveSession,
     PanConfig,
     SessionSummary,
     SlackCredentials,
@@ -49,7 +51,11 @@ FAKE_APP_TOKEN = "xapp-fake-cli-apptoken"
 def _make_config(tmp_path: Path) -> PanConfig:
     return PanConfig.model_validate(
         {
-            "orchestrator": {"pane_id": "%3", "worktree_base": str(tmp_path / "wt")},
+            "orchestrator": {
+                "cwd": str(tmp_path / "pan"),
+                "worktree_base": str(tmp_path / "wt"),
+                "app_space": "sp42",
+            },
             "defaults": {},
             "paths": {
                 "inbox": str(tmp_path / "inbox"),
@@ -73,14 +79,15 @@ def _item(event_id: str) -> InboxItem:
     )
 
 
-def _record(thread_ts: str, worktree_path: Path = Path("/tmp/wt")) -> ThreadRecord:
+def _record(
+    thread_ts: str, worktree_path: Path = Path("/tmp/wt"), terminal_address: str = "t12"
+) -> ThreadRecord:
     now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     return ThreadRecord(
         thread_ts=thread_ts,
-        workspace_name="pan-task",
-        workspace_id="ws1",
+        terminal_name="pan-task",
+        terminal_address=terminal_address,
         channel="C1",
-        pane_ids=["p1"],
         worktree_path=worktree_path,
         created_at=now,
         updated_at=now,
@@ -115,7 +122,7 @@ def test_threads_get_prints_record_json(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert result.exit_code == 0
     record = json.loads(result.stdout)
     assert record["thread_ts"] == "t-1"
-    assert record["workspace_id"] == "ws1"
+    assert record["terminal_address"] == "t12"
 
 
 def test_threads_get_unknown_prints_null(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -166,6 +173,8 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert captured["channel"] == "C1"
     assert captured["stream"] == "backend"
     assert captured["base"] == config.orchestrator.worktree_base
+    assert captured["app_space"] == "sp42"
+    assert isinstance(captured["hc"], cli.ShellHcAdapter)
 
 
 def test_watcher_builds_from_config_and_starts(
@@ -173,13 +182,13 @@ def test_watcher_builds_from_config_and_starts(
 ) -> None:
     config = _make_config(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda: config)
-    herdr_sentinel = object()
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr_sentinel)
+    hc_sentinel = object()
+    monkeypatch.setattr(cli, "ShellHcAdapter", lambda: hc_sentinel)
     captured: dict[str, Any] = {}
 
     class FakeWatcher:
-        def __init__(self, herdr: Any, orchestrator_pane_id: str, inbox_dir: Path) -> None:
-            captured["args"] = (herdr, orchestrator_pane_id, inbox_dir)
+        def __init__(self, hc: Any, orchestrator_terminal: str, inbox_dir: Path) -> None:
+            captured["args"] = (hc, orchestrator_terminal, inbox_dir)
 
         def start(self) -> None:
             captured["started"] = True
@@ -189,8 +198,8 @@ def test_watcher_builds_from_config_and_starts(
     result = runner.invoke(cli.app, ["watcher"])
 
     assert result.exit_code == 0
-    # Built from config: the ShellHerdrAdapter, the orchestrator pane id, the inbox dir.
-    assert captured["args"] == (herdr_sentinel, config.orchestrator.pane_id, config.paths.inbox)
+    # Built from config: the hc adapter, the orchestrator terminal name, the inbox dir.
+    assert captured["args"] == (hc_sentinel, "pan-orchestrator", config.paths.inbox)
     assert captured["started"] is True
 
 
@@ -213,58 +222,74 @@ def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert "**********" in result.stdout
 
 
-def test_status_resolves_morcli_handle_from_thread(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _use_hc(monkeypatch: pytest.MonkeyPatch, hc: FakeHc) -> FakeHc:
+    monkeypatch.setattr(cli, "ShellHcAdapter", lambda: hc)
+    return hc
+
+
+def _use_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PanConfig:
     config = _make_config(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda: config)
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(_record("t-1"))
-    handles: list[str] = []
+    return config
 
-    class FakeMorcli:
-        def session_status(self, handle: str) -> Any:
-            handles.append(handle)
-            from pan.models import WorkerStatus
 
-            return WorkerStatus.RUNNING
-
-    monkeypatch.setattr(cli, "ShellMorcliAdapter", FakeMorcli)
+@pytest.mark.parametrize(
+    "terminals, terminal_address, expected",
+    [
+        ([make_terminal("t12", agent_status=AgentStatus.BLOCKED)], "t12", "blocked"),
+        ([make_terminal("t12", agent_status=AgentStatus.WORKING)], "t12", "running"),
+        ([], "t12", "failed"),
+        ([], "", "failed"),
+    ],
+    ids=["blocked", "working", "terminal-gone", "never-launched"],
+)
+def test_status_reads_the_recorded_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminals: list[Any],
+    terminal_address: str,
+    expected: str,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    record = _record("t-1", terminal_address=terminal_address)
+    record.status = WorkerStatus.RUNNING
+    FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
+    hc = FakeHc()
+    for terminal in terminals:
+        hc.add(terminal)
+    _use_hc(monkeypatch, hc)
 
     result = runner.invoke(cli.app, ["status", "--thread", "t-1"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "running"
-    # Resolved from the record's workspace_id (morcli_session is None until captured).
-    assert handles == ["ws1"]
+    assert result.stdout.strip() == expected
 
 
 def _summary(*, is_pan_owned: bool = True, drift: bool = False) -> SessionSummary:
     return SessionSummary(
-        workspace_name="pan-a",
-        workspace_id="w1",
-        pane_id="1-1",
+        address="t12",
+        name="pan-a" if is_pan_owned else None,
+        where=None if is_pan_owned else "my-app / 1",
         cwd=Path("/tmp/worktree"),
+        agent="claude-code",
         agent_status=AgentStatus.WORKING,
         thread_ts="t-1" if is_pan_owned else None,
         pan_status=WorkerStatus.RUNNING if is_pan_owned else None,
-        morcli_session="sess-1" if is_pan_owned else None,
         is_pan_owned=is_pan_owned,
         drift=drift,
     )
 
 
 def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
-    monkeypatch.setattr(
-        cli, "collect_sessions", lambda herdr, thread_map, morcli: [_summary(drift=True)]
-    )
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "collect_sessions", lambda hc, thread_map: [_summary(drift=True)])
 
     result = runner.invoke(cli.app, ["sessions", "--json"])
 
     assert result.exit_code == 0
     data = json.loads(result.stdout)
-    assert data[0]["workspace_name"] == "pan-a"
+    assert data[0]["address"] == "t12"
+    assert data[0]["name"] == "pan-a"
     assert data[0]["agent_status"] == "working"
     assert data[0]["is_pan_owned"] is True
     assert data[0]["drift"] is True
@@ -272,132 +297,122 @@ def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    _use_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda herdr, thread_map, morcli: [_summary(), _summary(is_pan_owned=False)],
+        lambda hc, thread_map: [_summary(drift=True), _summary(is_pan_owned=False)],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
 
     assert result.exit_code == 0
-    assert "pan-a" in result.stdout
-    assert "1-1" in result.stdout
+    lines = result.stdout.splitlines()
+    assert lines[0].split() == ["TERMINAL", "NAME", "AGENT", "OWNER", "PAN_STATUS", "DRIFT"]
+    assert lines[1].split() == ["t12", "pan-a", "working", "pan", "running", "DRIFT"]
+    assert "my-app / 1" in lines[2]
+    assert "external" in lines[2]
 
 
-def _live(workspace_name: str, workspace_id: str, pane_id: str) -> LiveSession:
-    return LiveSession(
-        workspace_name=workspace_name,
-        workspace_id=workspace_id,
-        pane_id=pane_id,
-        cwd=Path("/tmp/worktree"),
-        agent_status=AgentStatus.WORKING,
-    )
+def _live_hc() -> FakeHc:
+    hc = FakeHc()
+    hc.add(make_terminal("t3", where="web / codex"))
+    hc.add(make_terminal("t4", where="web / review"))
+    hc.add(make_terminal("t5", name="pan-backend"))
+    return hc
 
 
-class _FakeHerdr:
-    def __init__(self, sessions: list[LiveSession], read_pane_result: str = "recent text") -> None:
-        self._sessions = sessions
-        self._read_pane_result = read_pane_result
-        self.sent: list[tuple[str, str]] = []
-        self.nudged: list[str] = []
-        self.read_pane_calls: list[tuple[str, int]] = []
+def test_relay_echoes_resolved_name_and_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    hc = _use_hc(monkeypatch, _live_hc())
 
-    def list_workspaces(self) -> list[LiveSession]:
-        return self._sessions
-
-    def send_text(self, pane_id: str, text: str) -> None:
-        self.sent.append((pane_id, text))
-
-    def nudge(self, pane_id: str) -> None:
-        self.nudged.append(pane_id)
-
-    def read_pane(self, pane_id: str, lines: int) -> str:
-        self.read_pane_calls.append((pane_id, lines))
-        return self._read_pane_result
-
-
-class _FakeMorcli:
-    def __init__(self, transcript_result: str = "transcript text") -> None:
-        self._transcript_result = transcript_result
-        self.transcript_calls: list[str] = []
-
-    def transcript(self, handle: str) -> str:
-        self.transcript_calls.append(handle)
-        return self._transcript_result
-
-
-def test_relay_echoes_resolved_label_and_pane(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
-
-    result = runner.invoke(cli.app, ["relay", "sra-codex", "re-run the failing test"])
+    result = runner.invoke(cli.app, ["relay", "pan-backend", "re-run the failing test"])
 
     assert result.exit_code == 0
-    assert "relayed into sra-codex" in result.stdout
-    assert "wA:p1" in result.stdout
-    assert herdr.sent == [("wA:p1", "re-run the failing test")]
-    assert herdr.nudged == ["wA:p1"]
+    assert result.stdout.strip() == "relayed into pan-backend terminal t5"
+    assert hc.sent == [("t5", "re-run the failing test")]
 
 
-def test_relay_not_found_propagates_target_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
+@pytest.mark.parametrize(
+    "selector, hc_errors, expected_error",
+    [
+        ("nope", {}, TargetNotFoundError),
+        ("web", {}, TargetAmbiguousError),
+        ("t5", {"send": TargetBlockedError("blocked")}, TargetBlockedError),
+    ],
+)
+def test_relay_failures_propagate_typed_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    selector: str,
+    hc_errors: dict[str, Any],
+    expected_error: type[PanError],
+) -> None:
+    hc = _live_hc()
+    hc.errors.update(hc_errors)
+    _use_hc(monkeypatch, hc)
 
-    result = runner.invoke(cli.app, ["relay", "nope", "hello"])
+    result = runner.invoke(cli.app, ["relay", selector, "hi"])
 
-    assert isinstance(result.exception, TargetNotFoundError)
-    assert herdr.sent == []
-
-
-def test_relay_ambiguous_propagates_target_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("dup", "wA", "wA:p1"), _live("dup", "wB", "wB:p1")])
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
-
-    result = runner.invoke(cli.app, ["relay", "dup", "hello"])
-
-    assert isinstance(result.exception, TargetAmbiguousError)
-    assert herdr.sent == []
-
-
-def test_read_recent_echoes_raw_pane_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")], read_pane_result="RAW RECENT")
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
-    monkeypatch.setattr(cli, "ShellMorcliAdapter", _FakeMorcli)
-
-    result = runner.invoke(cli.app, ["read", "sra-codex"])
-
-    assert result.exit_code == 0
-    assert "RAW RECENT" in result.stdout
-    # The recent-lines count comes from the named config constant, not an inlined literal.
-    assert herdr.read_pane_calls == [("wA:p1", cli.READ_RECENT_LINES)]
+    assert isinstance(result.exception, expected_error)
+    assert hc.sent == []
 
 
-def test_read_full_echoes_transcript_by_workspace_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
-    morcli = _FakeMorcli(transcript_result="FULL TRANSCRIPT")
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
-    monkeypatch.setattr(cli, "ShellMorcliAdapter", lambda: morcli)
+def test_read_recent_echoes_raw_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_config(monkeypatch, tmp_path)
+    hc = _use_hc(monkeypatch, _live_hc())
 
-    result = runner.invoke(cli.app, ["read", "sra-codex", "--full"])
+    result = runner.invoke(cli.app, ["read", "pan-backend"])
 
     assert result.exit_code == 0
-    assert "FULL TRANSCRIPT" in result.stdout
-    assert morcli.transcript_calls == ["wA"]
-    assert herdr.read_pane_calls == []
+    assert result.stdout.strip() == "recent output"
+    assert hc.reads == [("t5", cli.READ_RECENT_LINES)]
 
 
-def test_read_not_found_propagates_target_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    herdr = _FakeHerdr([_live("sra-codex", "wA", "wA:p1")])
-    monkeypatch.setattr(cli, "ShellHerdrAdapter", lambda: herdr)
-    monkeypatch.setattr(cli, "ShellMorcliAdapter", _FakeMorcli)
+def test_read_full_echoes_the_recorded_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type": "assistant", "message": {"content": "all done"}}\n')
+    record = _record("t-1", terminal_address="t5")
+    record.transcript_path = transcript
+    FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
+    hc = _use_hc(monkeypatch, _live_hc())
+
+    result = runner.invoke(cli.app, ["read", "pan-backend", "--full"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "assistant: all done"
+    assert hc.reads == []
+
+
+def test_read_not_found_propagates_target_not_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    hc = _use_hc(monkeypatch, _live_hc())
 
     result = runner.invoke(cli.app, ["read", "nope"])
 
     assert isinstance(result.exception, TargetNotFoundError)
-    assert herdr.read_pane_calls == []
+    assert hc.reads == []
+
+
+@pytest.mark.parametrize("terminal_address", ["t12", ""], ids=["recorded", "never-launched"])
+def test_stop_removes_the_terminal_and_marks_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_address: str
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.put(_record("t-1", terminal_address=terminal_address))
+    hc = _use_hc(monkeypatch, FakeHc())
+
+    result = runner.invoke(cli.app, ["stop", "--thread", "t-1"])
+
+    assert result.exit_code == 0
+    assert hc.removed == ([terminal_address] if terminal_address else [])
+    stopped = thread_map.get("t-1")
+    assert stopped is not None
+    assert stopped.status is WorkerStatus.FAILED
 
 
 @pytest.mark.parametrize(
@@ -409,12 +424,14 @@ def test_read_not_found_propagates_target_not_found(monkeypatch: pytest.MonkeyPa
         (InboxError("x"), 13),
         (ThreadNotFoundError("x"), 14),
         (SpawnError("x"), 15),
-        (HerdrError("x"), 16),
+        (HcError("x"), 16),
         (SlackPostError("x"), 17),
         (GatedOpDeniedError("x"), 18),
-        (MorcliError("x"), 19),
         (TargetNotFoundError("x"), 20),
         (TargetAmbiguousError("x", []), 21),
+        (TerminalGoneError("x"), 22),
+        (TargetBlockedError("x"), 23),
+        (TerminalNameTakenError("x"), 24),
         (PanError("x"), 1),
     ],
 )
@@ -511,3 +528,81 @@ def test_hook_subcommands_are_registered() -> None:
     assert result.exit_code == 0
     assert "stop" in result.stdout
     assert "notification" in result.stdout
+    assert "session-start" in result.stdout
+
+
+def test_hook_session_start_records_the_session_on_the_cwd_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.put(_record("t-1", worktree_path=tmp_path / "wt" / "pan-task"))
+    payload = json.dumps(
+        {
+            "hook_event_name": "SessionStart",
+            "cwd": str(tmp_path / "wt" / "pan-task"),
+            "session_id": "s-9",
+            "transcript_path": "/home/.claude/projects/x/s-9.jsonl",
+        }
+    )
+
+    result = runner.invoke(cli.app, ["hook", "session-start"], input=payload)
+
+    assert result.exit_code == 0
+    recorded = thread_map.get("t-1")
+    assert recorded is not None
+    assert recorded.claude_session_id == "s-9"
+    assert recorded.transcript_path == Path("/home/.claude/projects/x/s-9.jsonl")
+
+
+def test_up_starts_the_orchestrator_from_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    FileThreadMap(config.paths.threads, cli.SystemClock()).put(
+        _record("t-1", terminal_address="t9")
+    )
+    hc = _use_hc(monkeypatch, FakeHc())
+
+    result = runner.invoke(cli.app, ["up"])
+
+    assert result.exit_code == 0
+    (run,) = hc.runs
+    assert run.name == "pan-orchestrator"
+    assert run.cwd == config.orchestrator.cwd
+    assert run.argv[0] == "claude"
+    assert result.stdout.splitlines() == [
+        "orchestrator pan-orchestrator started at t101",
+        "marked 1 lost worker(s) failed: t-1",
+    ]
+
+
+def test_reopen_wires_the_record_to_reopen_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    FileThreadMap(config.paths.threads, cli.SystemClock()).put(_record("t-1"))
+    monkeypatch.setattr(
+        cli,
+        "load_credentials",
+        lambda path: SlackCredentials(
+            bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
+        ),
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "reopen_worker", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(cli.app, ["reopen", "--thread", "t-1", "--task", "one more thing"])
+
+    assert result.exit_code == 0
+    assert captured["record"].thread_ts == "t-1"
+    assert captured["task"] == "one more thing"
+    assert captured["app_space"] == "sp42"
+
+
+def test_reopen_unknown_thread_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_config(monkeypatch, tmp_path)
+
+    result = runner.invoke(cli.app, ["reopen", "--thread", "nope", "--task", "x"])
+
+    assert isinstance(result.exception, ThreadNotFoundError)

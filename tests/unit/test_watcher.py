@@ -1,28 +1,121 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
+from hc_fakes import FakeHc
+from watchdog.events import (
+    DirModifiedEvent,
+    FileClosedEvent,
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+    FileSystemEvent,
+)
 
-from pan.watcher import WAKE_INSTRUCTION, WatchdogInboxWatcher, _InboxEventHandler
+from pan.config import WATCHER_DEBOUNCE_SECONDS
+from pan.errors import HcError, TargetBlockedError, TerminalGoneError
+from pan.watcher import WAKE_INSTRUCTION, WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
 
 
-def test_on_inbox_changed_sends_wake_instruction_then_nudges_in_order() -> None:
-    # A single manager mock records call order across both seams: the fixed wake
-    # instruction must be typed first, then the Enter that submits it. Without the
-    # send_text the orchestrator's Claude TUI never wakes (bare Enter is a no-op).
-    herdr = Mock()
+class FakeTimer:
+    def __init__(self, interval: float, function: Callable[[], None]) -> None:
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
 
-    watcher = WatchdogInboxWatcher(herdr, "%orchestrator", Path("/tmp/pan-inbox"))
-    watcher.on_inbox_changed()
+    def start(self) -> None:
+        self.started = True
 
-    herdr.assert_has_calls(
-        [
-            call.send_text("%orchestrator", WAKE_INSTRUCTION),
-            call.nudge("%orchestrator"),
-        ]
-    )
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.function()
+
+
+class FakeTimerFactory:
+    def __init__(self) -> None:
+        self.timers: list[FakeTimer] = []
+
+    def __call__(self, interval: float, function: Callable[[], None]) -> FakeTimer:
+        timer = FakeTimer(interval, function)
+        self.timers.append(timer)
+        return timer
+
+
+def test_on_inbox_changed_sends_only_the_fixed_wake_instruction() -> None:
+    # One hc send pastes the fixed instruction and presses Enter; no payload, no separate
+    # keypress (INV-2).
+    hc = FakeHc()
+
+    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
+
+    assert hc.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+
+
+@pytest.mark.parametrize(
+    "send_error",
+    [TargetBlockedError("blocked"), TerminalGoneError("gone"), HcError("hc missing")],
+)
+def test_on_inbox_changed_logs_and_survives_hc_failures(send_error: HcError) -> None:
+    # Under launchd a raise would crash-loop the watcher; the item stays in the inbox and
+    # the next change (or `pan up`) wakes the orchestrator instead.
+    hc = FakeHc(errors={"send": send_error})
+
+    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
+
+    assert hc.sent == []
+
+
+def test_debouncer_runs_the_action_once_for_a_burst_of_triggers() -> None:
+    # One inbox append (plus the drain it causes) fires several filesystem events within
+    # milliseconds; the trailing debounce turns the burst into a single wake.
+    actions: list[bool] = []
+    timer_factory = FakeTimerFactory()
+    debouncer = WakeDebouncer(lambda: actions.append(True), 1.0, timer_factory)
+
+    for _ in range(5):
+        debouncer.trigger()
+    for timer in timer_factory.timers:
+        timer.fire()
+
+    assert actions == [True]
+    *replaced, last = timer_factory.timers
+    assert all(timer.cancelled for timer in replaced)
+    assert last.started and last.daemon and not last.cancelled
+    assert last.interval == 1.0
+
+
+def test_debouncer_runs_again_for_a_trigger_after_the_quiet_period() -> None:
+    actions: list[bool] = []
+    timer_factory = FakeTimerFactory()
+    debouncer = WakeDebouncer(lambda: actions.append(True), 1.0, timer_factory)
+
+    debouncer.trigger()
+    timer_factory.timers[0].fire()
+    debouncer.trigger()
+    timer_factory.timers[1].fire()
+
+    assert actions == [True, True]
+
+
+def test_debouncer_cancel_drops_a_pending_action() -> None:
+    actions: list[bool] = []
+    timer_factory = FakeTimerFactory()
+    debouncer = WakeDebouncer(lambda: actions.append(True), 1.0, timer_factory)
+
+    debouncer.trigger()
+    debouncer.cancel()
+    timer_factory.timers[0].fire()
+
+    assert actions == []
 
 
 def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
@@ -34,7 +127,9 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     monkeypatch.setattr("pan.watcher.Observer", lambda: observer)
     inbox_dir = tmp_path / "inbox"
 
-    watcher = WatchdogInboxWatcher(Mock(), "%orchestrator", inbox_dir)
+    timer_factory = FakeTimerFactory()
+    hc = FakeHc()
+    watcher = WatchdogInboxWatcher(hc, "pan-orchestrator", inbox_dir, timer_factory=timer_factory)
     watcher.start()
 
     # The inbox dir is created on demand, then one handler is scheduled on it
@@ -45,12 +140,47 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     assert path == str(inbox_dir)
     assert kwargs == {"recursive": False}
     observer.start.assert_called_once_with()
+    # The handler feeds the debouncer, which wakes the orchestrator once after the quiet
+    # period; nothing is sent while the timer is still pending.
+    handler.on_any_event(
+        FileMovedEvent(str(inbox_dir / ".Ev1.json.tmp"), str(inbox_dir / "Ev1.json"))
+    )
+    assert hc.sent == []
+    (timer,) = timer_factory.timers
+    assert timer.interval == WATCHER_DEBOUNCE_SECONDS
+    timer.fire()
+    assert hc.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
 
 
-def test_inbox_event_handler_forwards_every_event_to_the_callback() -> None:
+_INBOX = "/inbox"
+
+
+@pytest.mark.parametrize(
+    "event, wakes",
+    [
+        # The atomic append: the temp file's rename onto `<id>.json` is the new entry.
+        (FileMovedEvent(f"{_INBOX}/.Ev1.json.tmp", f"{_INBOX}/Ev1.json"), True),
+        # Some backends report the entry as created rather than moved in.
+        (FileCreatedEvent(f"{_INBOX}/Ev1.json"), True),
+        # A drain un-claiming a valid entry puts it back, so it needs a drain again.
+        (FileMovedEvent(f"{_INBOX}/Ev1.json.claimed", f"{_INBOX}/Ev1.json"), True),
+        # Writing the temp file is not an entry yet.
+        (FileCreatedEvent(f"{_INBOX}/.Ev1.json.tmp"), False),
+        (FileModifiedEvent(f"{_INBOX}/.Ev1.json.tmp"), False),
+        (FileClosedEvent(f"{_INBOX}/.Ev1.json.tmp"), False),
+        # The orchestrator's own drain claims, quarantines and deletes entries.
+        (FileMovedEvent(f"{_INBOX}/Ev1.json", f"{_INBOX}/Ev1.json.claimed"), False),
+        (FileMovedEvent(f"{_INBOX}/Ev1.json.claimed", f"{_INBOX}/Ev1.json.corrupt"), False),
+        (FileDeletedEvent(f"{_INBOX}/Ev1.json.claimed"), False),
+        (FileDeletedEvent(f"{_INBOX}/Ev1.json"), False),
+        (FileModifiedEvent(f"{_INBOX}/Ev1.json"), False),
+        (DirModifiedEvent(_INBOX), False),
+    ],
+)
+def test_inbox_event_handler_forwards_only_new_entries(event: FileSystemEvent, wakes: bool) -> None:
     received: list[bool] = []
     handler = _InboxEventHandler(lambda: received.append(True))
 
-    handler.on_any_event(Mock())
+    handler.on_any_event(event)
 
-    assert received == [True]
+    assert received == ([True] if wakes else [])

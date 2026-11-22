@@ -7,7 +7,56 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Fixed
+
+- The watcher woke the orchestrator 5 times for one Slack message: every filesystem event in the
+  inbox folder sent a wake, including the append's temp-file writes and the orchestrator's own drain.
+  It now forwards only a new `<id>.json` entry, and a trailing debounce
+  (`WATCHER_DEBOUNCE_SECONDS`, 1 s) turns a burst into a single wake.
+
+### Changed
+
+- Migrated from the herdr TUI CLI and morcli to herdr-core (`hc`). herdr is no longer installed and
+  `morcli streams` depends on it, so spawn, sessions, relay, read, status, stop and the watcher wake
+  were all broken. A new `ShellHcAdapter` (`src/pan/adapters/hc.py`, seam `HcAdapter`) is the only
+  place `hc` is shelled (BR-2); it maps hc JSON to `Terminal` / `TerminalRead` (INV-8) and hc's stderr
+  error kinds to typed errors (`HcError`, exit 16; `TerminalGoneError` 22; `TargetBlockedError` 23;
+  `TerminalNameTakenError` 24). `HerdrError` and `MorcliError` (exit 19) are gone.
+- Workers start with one `hc run --bg --no-parent` per spawn: `claude <brief>` as the terminal's
+  program (the brief is an argv element, never shell text), named `pan-<stream>` normalized to hc's
+  name rules, labelled `pan.role=worker`, `pan.thread`, `pan.channel`, plus `herdr.space` when the new
+  optional `orchestrator.app_space` is set (workers are otherwise hidden from the Herdr app).
+  `--no-parent` keeps workers alive past the orchestrator and keeps hc notes out of it (INV-2). A
+  live terminal already holding the name fails the spawn before any worktree is created.
+- `ThreadRecord` now stores `terminal_name` and `terminal_address` (replacing `workspace_name`,
+  `workspace_id`, `pane_ids`, `morcli_session`) plus `claude_session_id` and `transcript_path`.
+  Herdr-era records still load, as lost: no terminal address and status `failed` unless `done`.
+- Config: `orchestrator.pane_id` and `orchestrator.workspace_name` are replaced by
+  `orchestrator.terminal` (an hc name, default `pan-orchestrator`), `orchestrator.cwd`, and optional
+  `orchestrator.command` and `orchestrator.app_space`. An old config with `pane_id` fails with a
+  message naming the replacement keys.
+- `pan status` and `pan sessions` read live status from hc (`idle`, `working`, `done`, `blocked`,
+  `error`, or `none`); a finished or missing worker terminal reads as `failed` (or `done`). `pan
+  relay` and `pan read` target an hc address, a terminal name, or a Herdr app space label; relaying
+  into a session waiting on a person exits 23 without typing anything. `pan read` flags an
+  incomplete (screen-only) read; `pan read --full` renders the Claude transcript recorded by the
+  worker's new SessionStart hook, falling back to labelled screen history for other terminals.
+- The watcher wakes the orchestrator with one `hc send` and logs, rather than raises, when the
+  orchestrator is blocked or missing, so launchd never crash-loops it. The gateway and watcher
+  LaunchAgents set `PATH` to include `~/.local/bin`.
+
 ### Added
+
+- `pan up`: idempotently starts the orchestrator in its hc terminal (stateless, so a fresh session
+  after a reboot is correct; it drains once on boot), marks workers whose terminals are gone
+  `failed`, and wakes an orchestrator that is already running. Optional `com.pan.up` LaunchAgent runs
+  it at login and is retried by launchd only on failure.
+- `pan reopen --thread --task`: reopens a finished or lost worker in its existing worktree in a new
+  terminal under the same name, continuing that worktree's last Claude conversation.
+- `pan hook session-start` and `src/pan/transcript.py` (the Stop hook's transcript parser,
+  generalized to render a whole conversation).
+- An opt-in integration test (`PAN_HC_INTEGRATION=1`) that drives the adapter against a private hc
+  core with its own `HC_SESSION` and scratch XDG folders, using only a plain program.
 
 - `@pan help` — instant, auto-generated command help in Slack (Task 32, Milestone M13). A phone user
   talking to pan had no way to discover what to say, and typing `help` fell through `parse_directive`
