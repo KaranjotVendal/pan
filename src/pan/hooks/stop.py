@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from pan.errors import ThreadNotFoundError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
-from pan.models import WorkerStatus
+from pan.models import ReplyMode, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
 from pan.transcript import last_assistant_text
 
@@ -32,16 +32,22 @@ def stop_hook(
     *,
     stdin: TextIO = sys.stdin,
 ) -> None:
+    # Runs at the end of every turn, not only at the end of the work, so it marks the
+    # session IDLE (live, waiting for a follow-up), never DONE. Replies are on demand: the
+    # turn's answer is posted only when the thread asked for replies in Slack, and then at
+    # every turn end.
     payload = StopHookPayload.model_validate_json(stdin.read())
-    if thread_map.get(thread_ts) is None:
+    record = thread_map.get(thread_ts)
+    if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
 
-    summary = _DEFAULT_SUMMARY
-    if payload.transcript_path is not None:
-        extracted = last_assistant_text(payload.transcript_path)
-        if extracted:
-            summary = extracted
+    if record.reply_mode is ReplyMode.SLACK:
+        summary = _DEFAULT_SUMMARY
+        if payload.transcript_path is not None:
+            extracted = last_assistant_text(payload.transcript_path)
+            if extracted:
+                summary = extracted
+        slack_post(slack, channel, thread_ts, summary)
 
-    slack_post(slack, channel, thread_ts, summary)
-    thread_map.update_status(thread_ts, WorkerStatus.DONE)
-    logger.info(f"stop hook thread={thread_ts} status=done")
+    thread_map.update_status(thread_ts, WorkerStatus.IDLE)
+    logger.info(f"stop hook thread={thread_ts} status=idle reply_mode={record.reply_mode}")

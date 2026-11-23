@@ -40,6 +40,15 @@ _SMART_QUOTE_MAP = {
 }
 
 
+# "reply in slack" anywhere in a request, any letter case, sets the thread's reply mode to
+# SLACK. The one phrase matched anywhere: a false match costs only an extra Slack reply.
+_REPLY_IN_SLACK = re.compile(r"\breply\s+in\s+slack\b", re.IGNORECASE)
+
+
+def wants_slack_reply(raw_text: str) -> bool:
+    return _REPLY_IN_SLACK.search(raw_text) is not None
+
+
 def _normalize_punctuation(text: str) -> str:
     text = _DASH_GLUED_TO_WORD.sub("--", text)
     return text.translate(_SMART_QUOTE_MAP)

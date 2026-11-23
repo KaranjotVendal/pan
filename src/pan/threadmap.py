@@ -57,18 +57,69 @@ class FileThreadMap:
         # map stays the single source of truth (INV-7). Compare RESOLVED paths so a
         # symlinked prefix between the stored path and the hook's cwd still matches
         # (on macOS /tmp -> /private/tmp). Resolving both sides here keeps the CLI hook
-        # boundary free of path normalization. First match wins.
+        # boundary free of path normalization. A tied record wins over an untied one (a
+        # session tied elsewhere leaves its old thread untied); otherwise first match wins.
         target = worktree_path.resolve()
-        for record in self._read_all().values():
-            if record.worktree_path.resolve() == target:
+        matches = [
+            record
+            for record in self._read_all().values()
+            if record.worktree_path.resolve() == target
+        ]
+        for record in matches:
+            if record.tied:
                 return record
-        return None
+        return matches[0] if matches else None
 
     def put(self, record: ThreadRecord) -> None:
         records = self._read_all()
         records[record.thread_ts] = record
         self._write_all(records)
         logger.info(f"threadmap put thread={record.thread_ts} status={record.status}")
+
+    def tie(self, record: ThreadRecord) -> None:
+        # Store the record as its thread's tie. One thread per session: any other thread
+        # still tied to the same session (same terminal name) is untied, and keeps its
+        # record so its history stays readable.
+        records = self._read_all()
+        now = self._clock.now()
+        for thread_ts, other in records.items():
+            if (
+                thread_ts != record.thread_ts
+                and other.tied
+                and other.terminal_name == record.terminal_name
+            ):
+                other.tied = False
+                other.updated_at = now
+                logger.info(f"threadmap untie thread={thread_ts} session moved")
+        records[record.thread_ts] = record.model_copy(update={"tied": True})
+        self._write_all(records)
+        logger.info(f"threadmap tie thread={record.thread_ts} status={record.status}")
+
+    def untie(self, thread_ts: str) -> None:
+        # The thread stops routing follow-ups to its session. The session itself is never
+        # touched.
+        records = self._read_all()
+        record = records.get(thread_ts)
+        if record is None:
+            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+
+        record.tied = False
+        record.updated_at = self._clock.now()
+        self._write_all(records)
+        logger.info(f"threadmap untie thread={thread_ts}")
+
+    def record_inbox_thread(self, thread_ts: str, inbox_thread_id: str, url: str) -> None:
+        # Written by the worker's inbox-link hook once its first Inbox send returns.
+        records = self._read_all()
+        record = records.get(thread_ts)
+        if record is None:
+            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+
+        record.inbox_thread_id = inbox_thread_id
+        record.inbox_thread_url = url
+        record.updated_at = self._clock.now()
+        self._write_all(records)
+        logger.info(f"threadmap inbox thread recorded thread={thread_ts}")
 
     def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
         records = self._read_all()
@@ -96,3 +147,14 @@ class FileThreadMap:
         records[thread_ts] = record
         self._write_all(records)
         logger.info(f"threadmap session thread={thread_ts}")
+
+
+def tie_note(record: ThreadRecord | None) -> str | None:
+    # The plain-words tie line `pan inbox drain` puts on an item, built at drain time
+    # because the tie can change between the gateway writing the item and the drain.
+    if record is None or not record.tied:
+        return None
+    return (
+        f"this thread's work belongs to {record.terminal_name} ({record.status.value}); "
+        "send follow-ups there; never start a second session for the same work"
+    )

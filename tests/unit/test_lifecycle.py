@@ -133,12 +133,13 @@ def test_reconcile_marks_only_gone_live_workers_failed() -> None:
         _record("missing-terminal", "t22", WorkerStatus.SPAWNING),
         _record("never-launched", "", WorkerStatus.RUNNING),
         _record("already-done", "t23", WorkerStatus.DONE),
+        _record("idle-gone", "t24", WorkerStatus.IDLE),
     ]
     thread_map = FakeThreadMap(records)
 
     lost = reconcile_lost_workers(terminal_host, thread_map)
 
-    assert lost == ["finished-terminal", "missing-terminal", "never-launched"]
+    assert lost == ["finished-terminal", "missing-terminal", "never-launched", "idle-gone"]
     assert thread_map.status_of("alive") is WorkerStatus.RUNNING
     assert thread_map.status_of("missing-terminal") is WorkerStatus.FAILED
     assert thread_map.status_of("already-done") is WorkerStatus.DONE

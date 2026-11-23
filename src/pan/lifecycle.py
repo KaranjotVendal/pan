@@ -24,7 +24,9 @@ ORCHESTRATOR_BOOT_BRIEF = (
 )
 
 # Records in these statuses expect a live worker terminal behind them.
-_LIVE_STATUSES = frozenset({WorkerStatus.SPAWNING, WorkerStatus.RUNNING, WorkerStatus.BLOCKED})
+_LIVE_STATUSES = frozenset(
+    {WorkerStatus.SPAWNING, WorkerStatus.RUNNING, WorkerStatus.IDLE, WorkerStatus.BLOCKED}
+)
 
 
 class UpReport(BaseModel, frozen=True):

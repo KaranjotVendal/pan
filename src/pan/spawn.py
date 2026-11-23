@@ -6,17 +6,27 @@ from pathlib import Path
 
 from pan.config import (
     HERDR_SPACE_LABEL,
+    INBOX_THREAD_TASK_MAX_LENGTH,
     PAN_CHANNEL_LABEL,
     PAN_ROLE_LABEL,
     PAN_THREAD_LABEL,
+    PLANNOTATOR_INBOX_TOOL_NAME,
     TERMINAL_NAME_MAX_LENGTH,
     WORKER_NAME_PREFIX,
     WORKER_ROLE,
 )
+from pan.directive import wants_slack_reply
 from pan.errors import SpawnError, TerminalGoneError, TerminalHostError, TerminalNameTakenError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
-from pan.models import Terminal, TerminalState, ThreadRecord, WorkerStatus
+from pan.models import (
+    ReplyMode,
+    Terminal,
+    TerminalState,
+    ThreadRecord,
+    ThreadSource,
+    WorkerStatus,
+)
 from pan.seams import (
     AgentLauncher,
     Clock,
@@ -30,17 +40,32 @@ from pan.seams import (
 logger = initialise_logger(__name__)
 
 # The Claude Code hooks settings written into each worker's worktree. Stop and Notification
-# auto-reply to the originating Slack thread; SessionStart records the Claude session id and
-# transcript path on the thread record (for `pan read --full`). Non-tool events take a list
-# of {hooks: [{type, command}]} objects (matcher omitted). The `pan hook` commands resolve
-# the thread from the worker's cwd via the thread map.
+# mark the thread idle / blocked (and post to Slack only in the reply-in-Slack mode);
+# SessionStart records the Claude session id and transcript path on the thread record (for
+# `pan read --full`); PostToolUse on the Inbox tool records the session's Inbox thread id and
+# link. Non-tool events take a list of {hooks: [{type, command}]} objects (matcher omitted).
+# The `pan hook` commands resolve the thread from the worker's cwd via the thread map.
 _WORKER_SETTINGS = {
     "hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "pan hook session-start"}]}],
         "Stop": [{"hooks": [{"type": "command", "command": "pan hook stop"}]}],
         "Notification": [{"hooks": [{"type": "command", "command": "pan hook notification"}]}],
+        "PostToolUse": [
+            {
+                "matcher": PLANNOTATOR_INBOX_TOOL_NAME,
+                "hooks": [{"type": "command", "command": "pan hook inbox-link"}],
+            }
+        ],
     }
 }
+
+# Put before every new worker's task. The session owns its Inbox thread (so the person's
+# Inbox replies wake it), which is why the session creates it, under the name pan chose.
+_WORKER_BRIEF_PREAMBLE = (
+    "pan started you from a Slack request. Use the Plannotator Inbox for questions, decisions "
+    'and progress, in a thread named exactly "{inbox_thread_name}". Send a first short message '
+    "there before you start the work. Do not post to Slack."
+)
 
 _NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
 
@@ -59,6 +84,26 @@ def worker_terminal_name(stream: str | None, id_gen: IdGen) -> str:
         slug = id_gen.new_id()[:8]
     slug = slug[: TERMINAL_NAME_MAX_LENGTH - len(WORKER_NAME_PREFIX)].rstrip("-")
     return f"{WORKER_NAME_PREFIX}{slug}"
+
+
+def inbox_thread_name(terminal_name: str, task: str) -> str:
+    # `<terminal name>: <short task>` on one line: whitespace collapsed, the task cut short.
+    short_task = " ".join(task.split())
+    if len(short_task) > INBOX_THREAD_TASK_MAX_LENGTH:
+        short_task = short_task[: INBOX_THREAD_TASK_MAX_LENGTH - 3].rstrip() + "..."
+    return f"{terminal_name}: {short_task}" if short_task else terminal_name
+
+
+def worker_brief(inbox_thread: str, task: str) -> str:
+    preamble = _WORKER_BRIEF_PREAMBLE.format(inbox_thread_name=inbox_thread)
+    return f"{preamble}\n\nTask:\n{task}"
+
+
+def start_notice(terminal_name: str, inbox_thread: str, reply_mode: ReplyMode) -> str:
+    notice = f'Started {terminal_name} in a new worktree · Inbox thread: "{inbox_thread}"'
+    if reply_mode is ReplyMode.SLACK:
+        notice = f"{notice} · answers will also be posted here"
+    return notice
 
 
 def worker_labels(thread_ts: str, channel: str, app_space: str | None) -> dict[str, str]:
@@ -120,9 +165,19 @@ def spawn_worker(
     slack: SlackAdapter,
     clock: Clock,
     id_gen: IdGen,
+    requester: str | None = None,
+    request_text: str | None = None,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
+    # `request_text` is the original message; it asks for Slack replies when it contains
+    # "reply in slack" (falls back to the task when absent). `reply_in_slack` forces it.
     name = worker_terminal_name(stream, id_gen)
     created_at = clock.now()
+    inbox_thread = inbox_thread_name(name, task)
+    asks_for_slack_reply = reply_in_slack or wants_slack_reply(
+        request_text if request_text is not None else task
+    )
+    reply_mode = ReplyMode.SLACK if asks_for_slack_reply else ReplyMode.ON_DEMAND
 
     try:
         _ensure_name_free(terminal_host, name)
@@ -131,11 +186,15 @@ def spawn_worker(
         # Notification events reach the thread (resolved by cwd).
         _write_worker_settings(worktree_path)
         terminal = launcher.launch(
-            name, worktree_path, task, worker_labels(thread_ts, channel, app_space)
+            name,
+            worktree_path,
+            worker_brief(inbox_thread, task),
+            worker_labels(thread_ts, channel, app_space),
         )
     except (SpawnError, TerminalHostError) as error:
-        # Record the failed attempt so the thread map still reflects the binding
-        # (the worktree may not exist, so record its intended path) and surface it.
+        # Record the failed attempt so the thread map still reflects it (the worktree may
+        # not exist, so record its intended path) and surface it. No session started, so the
+        # thread stays untied: a later plain request starts a new session.
         reason = "stream name in use" if isinstance(error, TerminalNameTakenError) else None
         failed_record = ThreadRecord(
             thread_ts=thread_ts,
@@ -145,6 +204,10 @@ def spawn_worker(
             status=WorkerStatus.FAILED,
             created_at=created_at,
             updated_at=clock.now(),
+            source=ThreadSource.SLACK,
+            tied=False,
+            requester=requester,
+            reply_mode=reply_mode,
         )
         thread_map.put(failed_record)
         notice = f"spawn failed for stream {name}"
@@ -163,9 +226,15 @@ def spawn_worker(
         status=WorkerStatus.SPAWNING,
         created_at=created_at,
         updated_at=created_at,
+        source=ThreadSource.SLACK,
+        tied=True,
+        started_by_pan=True,
+        requester=requester,
+        reply_mode=reply_mode,
+        inbox_thread_name=inbox_thread,
     )
-    thread_map.put(record)
-    slack_post(slack, channel, thread_ts, f"on it — stream {name}")
+    thread_map.tie(record)
+    slack_post(slack, channel, thread_ts, start_notice(name, inbox_thread, reply_mode))
     logger.info(f"spawn stream={name} terminal={terminal.address} thread={thread_ts}")
     return record
 
@@ -183,7 +252,8 @@ def reopen_worker(
 ) -> ThreadRecord:
     # Reopen a finished or lost worker in its existing worktree: a new terminal under the
     # same name continues the worktree's last Claude conversation with the follow-up task.
-    # The binding stays the same thread record (INV-7); only its terminal and status change.
+    # The binding stays the same thread record (INV-7), tied again; only its terminal and
+    # status change.
     name = record.terminal_name
     try:
         if not record.worktree_path.is_dir():
@@ -211,7 +281,7 @@ def reopen_worker(
             "updated_at": clock.now(),
         }
     )
-    thread_map.put(reopened)
+    thread_map.tie(reopened)
     slack_post(slack, record.channel, record.thread_ts, f"reopened — stream {name}")
     logger.info(f"reopen stream={name} terminal={terminal.address} thread={record.thread_ts}")
     return reopened

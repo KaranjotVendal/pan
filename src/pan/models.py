@@ -20,9 +20,25 @@ class TaskMode(StrEnum):
 class WorkerStatus(StrEnum):
     SPAWNING = "spawning"
     RUNNING = "running"
+    # Between turns: the session's turn ended and it waits for a follow-up. Set by the
+    # Stop hook; the terminal is still live, so it is not finished work.
+    IDLE = "idle"
     BLOCKED = "blocked"
     DONE = "done"
     FAILED = "failed"
+
+
+class ThreadSource(StrEnum):
+    # Where a thread lives, so a Slack thread ts and (later) an X post id never collide.
+    SLACK = "slack"
+    X = "x"
+
+
+class ReplyMode(StrEnum):
+    # ON_DEMAND: Slack gets the start notice and then a reply only when asked. SLACK: the
+    # request asked for a reply in Slack, so the answer is posted at every turn end.
+    ON_DEMAND = "on_demand"
+    SLACK = "slack"
 
 
 class AgentStatus(StrEnum):
@@ -107,6 +123,20 @@ class ThreadRecord(BaseModel):
     status: WorkerStatus = WorkerStatus.SPAWNING
     created_at: datetime
     updated_at: datetime
+    # Session control. Every field defaults, so records written before they existed load.
+    source: ThreadSource = ThreadSource.SLACK
+    # The thread is tied to this session: follow-ups go to it. One thread per session, so a
+    # new tie of the session elsewhere unties this one (FileThreadMap.tie).
+    tied: bool = True
+    started_by_pan: bool = True
+    # The sender of the request that started the session (a Slack user id).
+    requester: str | None = None
+    reply_mode: ReplyMode = ReplyMode.ON_DEMAND
+    # The Plannotator Inbox thread the session reports in: the name pan gives it at spawn,
+    # and the id and link the inbox-link hook captures from the session's first send.
+    inbox_thread_name: str | None = None
+    inbox_thread_id: str | None = None
+    inbox_thread_url: str | None = None
 
     @model_validator(mode="before")
     @classmethod

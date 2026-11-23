@@ -122,7 +122,9 @@ def test_collect_sessions_sets_drift_flag(
     "agent_status, recorded, expected",
     [
         (AgentStatus.WORKING, WorkerStatus.SPAWNING, WorkerStatus.RUNNING),
-        (AgentStatus.IDLE, WorkerStatus.RUNNING, WorkerStatus.RUNNING),
+        (AgentStatus.IDLE, WorkerStatus.RUNNING, WorkerStatus.IDLE),
+        (AgentStatus.IDLE, WorkerStatus.IDLE, WorkerStatus.IDLE),
+        (AgentStatus.WORKING, WorkerStatus.IDLE, WorkerStatus.RUNNING),
         (AgentStatus.BLOCKED, WorkerStatus.RUNNING, WorkerStatus.BLOCKED),
         (AgentStatus.DONE, WorkerStatus.RUNNING, WorkerStatus.DONE),
         (AgentStatus.ERROR, WorkerStatus.RUNNING, WorkerStatus.FAILED),
@@ -142,6 +144,7 @@ def test_worker_status_for_a_live_terminal(
     [
         (WorkerStatus.DONE, WorkerStatus.DONE),
         (WorkerStatus.RUNNING, WorkerStatus.FAILED),
+        (WorkerStatus.IDLE, WorkerStatus.FAILED),
         (WorkerStatus.SPAWNING, WorkerStatus.FAILED),
     ],
 )
@@ -158,6 +161,9 @@ def test_worker_status_for_a_gone_terminal(
     "pan_status, agent_status, expected",
     [
         (WorkerStatus.RUNNING, AgentStatus.IDLE, False),
+        (WorkerStatus.IDLE, AgentStatus.WORKING, False),
+        (WorkerStatus.IDLE, AgentStatus.IDLE, False),
+        (WorkerStatus.IDLE, AgentStatus.BLOCKED, True),
         (WorkerStatus.DONE, AgentStatus.DONE, False),
         (WorkerStatus.RUNNING, AgentStatus.DONE, True),
         (WorkerStatus.SPAWNING, AgentStatus.ERROR, False),

@@ -3,9 +3,12 @@
 `pan` is a Slack-driven laptop coding-agent orchestrator. You `@pan` a task from Slack (or your
 phone); a thin always-on gateway authenticates you, adds a fast `:eyes:` reaction, and appends the
 request to an on-disk inbox. A filesystem watcher nudges a persistent orchestrator Claude session,
-which drains the inbox, parses deterministic directive flags, decides reuse-vs-spawn, and runs each
-task as its own Claude session in an isolated git worktree and its own herdr-core (`hc`) terminal. Workers post
-progress and results back to the originating Slack thread.
+which drains the inbox, parses deterministic directive flags, and runs each new task as its own
+Claude session in an isolated git worktree and its own herdr-core (`hc`) terminal. Each Slack thread
+is tied to the session it started, so follow-ups in that thread go to the same session. When a
+session starts, Slack gets one notice naming it and its Plannotator Inbox thread; the session then
+asks questions and reports progress in the Inbox. Slack hears more only when the request said
+"reply in slack" (its answer is then posted at every turn end).
 
 The gateway and watcher are the two always-on processes; everything else runs on demand.
 
@@ -149,9 +152,9 @@ runs once the actuation lands.
 | `pan watcher` | Run the inbox watcher that nudges the orchestrator (blocking). |
 | `pan config set-token` | Write `~/.pan/credentials.json` at mode 0600 (prompts). |
 | `pan config show` | Print the resolved config, credentials masked. |
-| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its parsed directive. |
+| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its parsed directive and its thread's tie. |
 | `pan up` | Start the orchestrator if needed, mark lost workers failed, wake it (idempotent). |
-| `pan spawn --thread … --task … --channel …` | Create worktree + hc terminal + worker; record the thread; post the ack. |
+| `pan spawn --thread … --task … --channel …` | Create worktree + hc terminal + worker; tie the thread to it; post the start notice naming its Inbox thread. |
 | `pan reopen --thread … --task …` | Reopen a finished or lost worker in its worktree, continuing its conversation. |
 | `pan threads get --thread …` | Print a thread's `ThreadRecord` as JSON. |
 | `pan slack-post --thread … --channel … --text …` | Post to a thread through the single Slack egress. |
@@ -161,7 +164,8 @@ runs once the actuation lands.
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal and mark the thread FAILED. |
 | `pan pause` | Toggle the pause flag. |
-| `pan hook stop` / `pan hook notification` | Claude Code worker completion-hook entrypoints (post the result / question, transition status). |
+| `pan hook stop` / `pan hook notification` | Claude Code worker hooks: mark the thread idle / blocked; post the answer / question only when the request said "reply in slack". |
+| `pan hook inbox-link` | Claude Code worker PostToolUse hook on the Inbox tool (records the session's Inbox thread id and link). |
 | `pan hook session-start` | Claude Code worker SessionStart hook (records the session id and transcript path). |
 
 ## Directive flags
@@ -169,7 +173,9 @@ runs once the actuation lands.
 The task text after `@pan` is parsed deterministically (never by model judgment):
 
 - no flag → **delegate** (ack now, post the result later);
-- `--sync` or a leading `!` → **sync** (block the item until the worker's Stop hook);
+- `--sync` or a leading `!` → **sync** (the worker's answers are posted in the thread);
+- `reply in slack` anywhere in the message → the new worker's answers are posted in the thread at
+  every turn end;
 - `--status` → **status** (answer from the worker's hc terminal; touches no worker);
 - `--new` → force a fresh worker even if the thread already has one;
 - `--stream <name>` → target/name the worker stream;
@@ -183,6 +189,7 @@ From Slack (or your phone), in a channel where the app is present:
 @pan create /tmp/pan-hello.txt containing today's date, then tell me the contents
 ```
 
-You should see the `:eyes:` ack within about a second, a worker spawn in its own git worktree and
-hc terminal, the file created, and its contents posted back in the thread. A follow-up reply in
-the same thread routes to the same worker; `@pan --status` reports its live state.
+You should see the `:eyes:` ack within about a second, then a start notice naming the worker and
+its Plannotator Inbox thread. The worker runs in its own git worktree and hc terminal and reports in
+that Inbox thread; add "reply in slack" to the message to also get its answer in the Slack thread. A
+follow-up reply in the same thread goes to the same worker; `@pan --status` reports its live state.

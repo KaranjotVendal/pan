@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from pan.errors import ThreadNotFoundError
-from pan.models import Agent, ThreadRecord, WorkerStatus
-from pan.threadmap import FileThreadMap
+from pan.models import Agent, ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
+from pan.threadmap import FileThreadMap, tie_note
 
 
 class FakeClock:
@@ -26,11 +26,12 @@ class FakeClock:
 def _record(
     thread_ts: str = "1718000000.000100",
     worktree_path: Path = Path("/Users/me/dev/pan-worktrees/task-3"),
+    terminal_name: str = "pan-task-3",
 ) -> ThreadRecord:
     created = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     return ThreadRecord(
         thread_ts=thread_ts,
-        terminal_name="pan-task-3",
+        terminal_name=terminal_name,
         terminal_address="t12",
         channel="C0001",
         worktree_path=worktree_path,
@@ -228,3 +229,145 @@ def test_record_session_unknown_thread_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ThreadNotFoundError):
         thread_map.record_session("nope", "session", None)
+
+
+def test_a_record_written_before_session_control_loads_with_defaults(tmp_path: Path) -> None:
+    session_control_keys = {
+        "source",
+        "tied",
+        "started_by_pan",
+        "requester",
+        "reply_mode",
+        "inbox_thread_name",
+        "inbox_thread_id",
+        "inbox_thread_url",
+    }
+    older_payload = {
+        key: value
+        for key, value in _record("t1").model_dump(mode="json").items()
+        if key not in session_control_keys
+    }
+    threads_path = tmp_path / "threads.json"
+    threads_path.write_text(json.dumps({"t1": older_payload}))
+
+    loaded = FileThreadMap(threads_path, FakeClock(datetime(2026, 7, 16, tzinfo=UTC))).get("t1")
+
+    assert loaded is not None
+    assert loaded.source is ThreadSource.SLACK
+    assert loaded.tied is True
+    assert loaded.started_by_pan is True
+    assert loaded.requester is None
+    assert loaded.reply_mode is ReplyMode.ON_DEMAND
+    assert loaded.inbox_thread_name is None
+    assert loaded.inbox_thread_id is None
+    assert loaded.inbox_thread_url is None
+
+
+def test_tie_moves_a_session_from_its_old_thread(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t-old", terminal_name="pan-7"))
+    thread_map.tie(_record("t-other", terminal_name="pan-8"))
+    later = datetime(2026, 7, 16, 11, 0, 0, tzinfo=UTC)
+    clock.set(later)
+
+    thread_map.tie(_record("t-new", terminal_name="pan-7"))
+
+    old = thread_map.get("t-old")
+    assert old is not None
+    assert old.tied is False
+    assert old.updated_at == later
+    assert [record.thread_ts for record in thread_map.records() if record.tied] == [
+        "t-other",
+        "t-new",
+    ]
+
+
+def test_tie_marks_the_stored_record_tied(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+    untied = _record("t1").model_copy(update={"tied": False})
+
+    thread_map.tie(untied)
+
+    loaded = thread_map.get("t1")
+    assert loaded is not None
+    assert loaded.tied is True
+
+
+def test_untie_keeps_the_record_and_never_touches_the_session(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t1"))
+
+    thread_map.untie("t1")
+
+    loaded = thread_map.get("t1")
+    assert loaded is not None
+    assert loaded.tied is False
+    assert loaded.status is WorkerStatus.SPAWNING
+    assert loaded.terminal_address == "t12"
+
+
+def test_get_by_worktree_prefers_the_tied_record(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+    thread_map.tie(_record("t-old", worktree_path=Path("/wt/pan-a")))
+    thread_map.untie("t-old")
+    thread_map.tie(_record("t-new", worktree_path=Path("/wt/pan-a"), terminal_name="pan-b"))
+
+    found = thread_map.get_by_worktree(Path("/wt/pan-a"))
+
+    assert found is not None
+    assert found.thread_ts == "t-new"
+
+
+def test_record_inbox_thread_stores_the_id_and_link(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t1"))
+    later = datetime(2026, 7, 16, 10, 1, 0, tzinfo=UTC)
+    clock.set(later)
+
+    thread_map.record_inbox_thread("t1", "thr_1", "https://inbox.example/t/thr_1")
+
+    loaded = thread_map.get("t1")
+    assert loaded is not None
+    assert loaded.inbox_thread_id == "thr_1"
+    assert loaded.inbox_thread_url == "https://inbox.example/t/thr_1"
+    assert loaded.updated_at == later
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda thread_map: thread_map.untie("nope"),
+        lambda thread_map: thread_map.record_inbox_thread("nope", "thr_1", "https://inbox.example"),
+    ],
+    ids=["untie", "record-inbox-thread"],
+)
+def test_thread_operations_on_an_unknown_thread_raise(tmp_path: Path, operation: object) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+
+    with pytest.raises(ThreadNotFoundError):
+        operation(thread_map)  # type: ignore[operator]
+
+
+def test_tie_note_names_the_session_and_its_state() -> None:
+    record = _record("t1", terminal_name="pan-7").model_copy(update={"status": WorkerStatus.IDLE})
+
+    assert tie_note(record) == (
+        "this thread's work belongs to pan-7 (idle); send follow-ups there; "
+        "never start a second session for the same work"
+    )
+
+
+@pytest.mark.parametrize("tied", [False, None], ids=["untied", "no-record"])
+def test_tie_note_is_none_for_an_untied_thread(tied: bool | None) -> None:
+    record = None if tied is None else _record("t1").model_copy(update={"tied": tied})
+
+    assert tie_note(record) is None

@@ -37,6 +37,7 @@ from pan.errors import (
 )
 from pan.gateway.app import BoltSlackAdapter
 from pan.gateway.slack_post import slack_post
+from pan.hooks.inbox_link import inbox_link_hook
 from pan.hooks.notification import notification_hook
 from pan.hooks.session_start import session_start_hook
 from pan.hooks.stop import stop_hook
@@ -48,7 +49,7 @@ from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
 from pan.sessions import collect_sessions, worker_status_for
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
-from pan.threadmap import FileThreadMap
+from pan.threadmap import FileThreadMap, tie_note
 from pan.watcher import WatchdogInboxWatcher
 
 logger = initialise_logger(__name__)
@@ -152,22 +153,39 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
     config = _config()
     items = FileInboxStore(config.paths.inbox).drain()
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     # Attach the deterministically-parsed directive to each item so the orchestrator
     # reads the mode/cleaned_text from here (parse_directive runs in code) rather than
-    # re-deriving it by judgment — enforcing INV-3.
+    # re-deriving it by judgment — enforcing INV-3. The thread's tie is attached as a
+    # plain-words fact, read now because it can change after the gateway wrote the item.
     if as_json:
-        payload = [
-            {
-                "item": item.model_dump(mode="json"),
-                "directive": parse_directive(item.raw_text).model_dump(mode="json"),
-            }
-            for item in items
-        ]
+        payload = []
+        for item in items:
+            record = thread_map.get(item.thread_ts)
+            note = tie_note(record)
+            tie = None
+            if record is not None and note is not None:
+                tie = {
+                    "session": record.terminal_name,
+                    "terminal_address": record.terminal_address,
+                    "status": record.status.value,
+                    "note": note,
+                }
+            payload.append(
+                {
+                    "item": item.model_dump(mode="json"),
+                    "directive": parse_directive(item.raw_text).model_dump(mode="json"),
+                    "tie": tie,
+                }
+            )
         typer.echo(json.dumps(payload))
         return
     for item in items:
         directive = parse_directive(item.raw_text)
         typer.echo(f"{item.id} {item.channel} {item.thread_ts} {directive.mode.value}")
+        note = tie_note(thread_map.get(item.thread_ts))
+        if note is not None:
+            typer.echo(f"  {note}")
 
 
 @app.command()
@@ -177,8 +195,16 @@ def spawn(
     channel: str = typer.Option(..., "--channel"),
     stream: str | None = typer.Option(None, "--stream"),
     repo: Path | None = typer.Option(None, "--repo"),
+    requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
+    request_text: str | None = typer.Option(
+        None, "--request-text", help="the original message; 'reply in slack' in it sets the mode"
+    ),
+    reply_in_slack: bool = typer.Option(
+        False, "--reply-in-slack", help="post the answer in Slack at every turn end"
+    ),
 ) -> None:
-    """Create worktree + hc terminal + worker session; record a ThreadRecord; post the ack."""
+    """Create worktree + hc terminal + worker session; tie the thread to it; post the start
+    notice naming its Inbox thread."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
@@ -200,6 +226,9 @@ def spawn(
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
         id_gen=UuidGen(),
+        requester=requester,
+        request_text=request_text,
+        reply_in_slack=reply_in_slack,
     )
 
 
@@ -323,14 +352,36 @@ def hook_session_start() -> None:
 
 @hook_app.command("stop")
 def hook_stop() -> None:
-    """Claude Code Stop hook: post the worker's final summary and mark the thread DONE."""
+    """Claude Code Stop hook: mark the thread IDLE; post the answer only in reply-in-Slack mode."""
     _run_completion_hook(stop_hook)
 
 
 @hook_app.command("notification")
 def hook_notification() -> None:
-    """Claude Code Notification hook: post the worker's question and mark the thread BLOCKED."""
+    """Claude Code Notification hook: mark the thread BLOCKED; post only in reply-in-Slack mode."""
     _run_completion_hook(notification_hook)
+
+
+def _dispatch_inbox_link_hook(raw_stdin: str, thread_map: ThreadMap) -> None:
+    cwd = _extract_cwd(raw_stdin)
+    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if record is None:
+        logger.warning("inbox-link hook: no thread record for cwd")
+        return
+    inbox_link_hook(record.thread_ts, thread_map, stdin=io.StringIO(raw_stdin))
+
+
+@hook_app.command("inbox-link")
+def hook_inbox_link() -> None:
+    """Claude Code PostToolUse hook on the Inbox tool: record the worker's Inbox thread link."""
+    # This hook must never fail the Inbox tool call it follows, so every error is logged
+    # and swallowed here (exit 0), defects included. It never posts to Slack.
+    try:
+        raw_stdin = sys.stdin.read()
+        config = _config()
+        _dispatch_inbox_link_hook(raw_stdin, FileThreadMap(config.paths.threads, SystemClock()))
+    except Exception as e:
+        logger.warning(f"inbox-link hook failed: {type(e).__name__}")
 
 
 @app.command()

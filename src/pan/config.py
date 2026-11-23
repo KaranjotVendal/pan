@@ -44,6 +44,14 @@ CLAUDE_AGENT_NAMES: frozenset[str] = frozenset({"claude-code", "claude"})
 WORKER_NAME_PREFIX = "pan-"
 TERMINAL_NAME_MAX_LENGTH = 32
 
+# A worker's Plannotator Inbox thread is named `<terminal name>: <short task>`; the task part
+# is cut to this many characters so the name stays one short line.
+INBOX_THREAD_TASK_MAX_LENGTH = 60
+
+# The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
+# PostToolUse inbox-link hook.
+PLANNOTATOR_INBOX_TOOL_NAME = "mcp__plannotator__plannotator_inbox"
+
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
 # every later regex pass, then is restored verbatim (adapted from Hermes' `\x00SL<n>\x00`).
@@ -83,10 +91,10 @@ CODE_FENCE = "```"
 # be updated whenever a directive flag changes.
 SLACK_DIRECTIVE_FLAGS_FOOTER = """
 The commands above are terminal commands (pan <command>). From Slack, say these:
-  <task>                     start a worker; it acks now, asks here if it gets
-                             stuck, and posts the result when it is done
-  !<task>  or  --sync        same worker, but pan waits for it to finish before
-                             handling anything else in this thread
+  <task>                     start a worker, or in its thread send it a follow-up;
+                             it reports in its Plannotator Inbox thread
+  ... reply in slack ...     also post its answers here at every turn end
+  !<task>  or  --sync        start a worker that posts its answers here
   --status                   the live state of this thread's worker
   --sessions                 list every live session (a bare "sessions" works too)
   --new                      force a new worker instead of reusing this thread's

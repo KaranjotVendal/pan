@@ -7,6 +7,42 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Added
+
+- Thread records carry session-control fields: `source` (`slack`; room for `x`), `tied`,
+  `started_by_pan`, `requester`, `reply_mode` (`on_demand` by default, or `slack`), and the
+  session's Plannotator Inbox thread (`inbox_thread_name`, `inbox_thread_id`, `inbox_thread_url`).
+  Records written before them load with defaults. `FileThreadMap` gains `tie` (one thread per
+  session: tying a session to a new thread unties its old one), `untie` and `record_inbox_thread`.
+- `pan hook inbox-link`, a PostToolUse hook on `mcp__plannotator__plannotator_inbox` in the worker
+  settings. It reads the Inbox thread id and link from the tool result and stores them on the
+  worker's thread record. It never posts to Slack and always exits 0. The payload shape needs a live
+  check.
+- `wants_slack_reply` (`src/pan/directive.py`): "reply in slack" anywhere in a request, any letter
+  case, sets the new thread's reply mode to `slack`. `pan spawn` takes `--requester`,
+  `--request-text` and `--reply-in-slack`.
+- An `idle` worker status: the session's turn ended and it waits for a follow-up.
+
+### Changed
+
+- Replies to Slack are on demand. The Stop hook marks the thread `idle` (not `done`) and posts the
+  last answer only in reply mode `slack`, where it posts at every turn end as before. The
+  Notification hook only marks the thread `blocked`, posting the prompt only in reply mode `slack`.
+- `pan spawn` posts one start notice naming the session and its Inbox thread (`Started pan-7 in a
+  new worktree · Inbox thread: "pan-7: <short task>"`) instead of "on it — stream ...". The worker's
+  brief opens with a fixed preamble: use the Plannotator Inbox in a thread with exactly that name,
+  send a first short message there before starting, and do not post to Slack. A failed spawn leaves
+  the thread untied.
+- `pan inbox drain` puts the thread's tie on each item (`tie` in `--json`, an indented line in text
+  output): "this thread's work belongs to <session> (<status>); send follow-ups there; never start a
+  second session for the same work".
+- The orchestrating skill no longer guesses between reopening and spawning fresh. In a tied thread,
+  follow-ups go to the tied session (relayed, or reopened when it ended); a plain `@pan` in an untied
+  thread starts a new session; `--new` moves the tie to a new session. SYNC now spawns with
+  `--reply-in-slack` instead of blocking.
+- `pan status` and `pan sessions` report an idle hc agent as `idle`; `running` and `idle` never count
+  as drift. `pan up` treats `idle` workers as live when looking for lost ones.
+
 ### Fixed
 
 - The watcher woke the orchestrator 5 times for one Slack message: every filesystem event in the

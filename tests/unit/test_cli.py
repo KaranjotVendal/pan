@@ -36,6 +36,7 @@ from pan.models import (
     AgentStatus,
     InboxItem,
     PanConfig,
+    ReplyMode,
     SessionSummary,
     SlackCredentials,
     ThreadRecord,
@@ -109,8 +110,55 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
     # The deterministically-parsed directive travels with each item (INV-3).
     assert emitted[0]["directive"]["mode"] == "delegate"
     assert emitted[0]["directive"]["cleaned_text"] == "do it"
+    # No record for the thread, so it is not tied.
+    assert emitted[0]["tie"] is None
     # Drain emptied the store.
     assert FileInboxStore(config.paths.inbox).drain() == []
+
+
+def test_inbox_drain_names_the_tied_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    FileInboxStore(config.paths.inbox).append(_item("Ev1"))
+    FileThreadMap(config.paths.threads, cli.SystemClock()).tie(
+        _record("1718000000.000200").model_copy(update={"status": WorkerStatus.IDLE})
+    )
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    (entry,) = json.loads(result.stdout)
+    assert entry["tie"] == {
+        "session": "pan-task",
+        "terminal_address": "t12",
+        "status": "idle",
+        "note": (
+            "this thread's work belongs to pan-task (idle); send follow-ups there; "
+            "never start a second session for the same work"
+        ),
+    }
+
+
+@pytest.mark.parametrize("tied", [True, False], ids=["tied", "untied"])
+def test_inbox_drain_text_adds_the_tie_line_only_for_a_tied_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tied: bool
+) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    FileInboxStore(config.paths.inbox).append(_item("Ev1"))
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.tie(_record("1718000000.000200"))
+    if not tied:
+        thread_map.untie("1718000000.000200")
+
+    result = runner.invoke(cli.app, ["inbox", "drain"])
+
+    lines = result.stdout.splitlines()
+    assert lines[0] == "Ev1 C1 1718000000.000200 delegate"
+    assert ("belongs to pan-task (spawning)" in result.stdout) is tied
+    assert len(lines) == (2 if tied else 1)
 
 
 def test_threads_get_prints_record_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -165,10 +213,17 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             "C1",
             "--stream",
             "backend",
+            "--requester",
+            "U0TEST",
+            "--request-text",
+            "build it, reply in slack",
         ],
     )
 
     assert result.exit_code == 0
+    assert captured["requester"] == "U0TEST"
+    assert captured["request_text"] == "build it, reply in slack"
+    assert captured["reply_in_slack"] is False
     assert captured["thread_ts"] == "t-1"
     assert captured["task"] == "build it"
     assert captured["channel"] == "C1"
@@ -495,18 +550,22 @@ def _hook_payload(cwd: str, event: str) -> str:
     return json.dumps({"hook_event_name": event, "cwd": cwd, "transcript_path": None})
 
 
-def test_hook_stop_resolves_by_cwd_posts_and_marks_done() -> None:
-    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
+def test_hook_stop_resolves_by_cwd_posts_and_marks_idle() -> None:
+    record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
+        update={"reply_mode": ReplyMode.SLACK}
+    )
     thread_map, slack = _HookThreadMap(record), _HookSlack()
 
     cli._dispatch_completion_hook(stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, slack)
 
     assert slack.posts[0][0:2] == ("C1", "t-1")
-    assert thread_map.status_updates == [("t-1", WorkerStatus.DONE)]
+    assert thread_map.status_updates == [("t-1", WorkerStatus.IDLE)]
 
 
 def test_hook_notification_resolves_by_cwd_posts_and_marks_blocked() -> None:
-    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
+    record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
+        update={"reply_mode": ReplyMode.SLACK}
+    )
     thread_map, slack = _HookThreadMap(record), _HookSlack()
     payload = json.dumps(
         {"hook_event_name": "Notification", "cwd": "/wt/pan-a", "message": "need input"}
@@ -540,6 +599,59 @@ def test_hook_subcommands_are_registered() -> None:
     assert "stop" in result.stdout
     assert "notification" in result.stdout
     assert "session-start" in result.stdout
+    assert "inbox-link" in result.stdout
+
+
+def _inbox_link_payload(cwd: Path) -> str:
+    result = {"thread_id": "thr_1", "url": "https://inbox.example/t/thr_1"}
+    return json.dumps(
+        {
+            "hook_event_name": "PostToolUse",
+            "cwd": str(cwd),
+            "tool_name": "mcp__plannotator__plannotator_inbox",
+            "tool_input": {"action": "send_message", "body": "starting"},
+            "tool_response": [{"type": "text", "text": json.dumps(result)}],
+        }
+    )
+
+
+def test_hook_inbox_link_records_the_link_on_the_cwd_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    worktree = tmp_path / "wt" / "pan-task"
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.tie(_record("t-1", worktree_path=worktree))
+
+    result = runner.invoke(cli.app, ["hook", "inbox-link"], input=_inbox_link_payload(worktree))
+
+    assert result.exit_code == 0
+    recorded = thread_map.get("t-1")
+    assert recorded is not None
+    assert recorded.inbox_thread_id == "thr_1"
+    assert recorded.inbox_thread_url == "https://inbox.example/t/thr_1"
+
+
+@pytest.mark.parametrize(
+    "raw_stdin, config_fails",
+    [("not json", False), ('{"cwd": "/wt/unknown"}', False), ("{}", True)],
+    ids=["unparseable", "no-record", "config-error"],
+)
+def test_hook_inbox_link_never_fails_the_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw_stdin: str, config_fails: bool
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    if config_fails:
+
+        def missing_config() -> PanConfig:
+            raise ConfigMissingError("no config")
+
+        monkeypatch.setattr(cli, "load_config", missing_config)
+
+    result = runner.invoke(cli.app, ["hook", "inbox-link"], input=raw_stdin)
+
+    assert result.exit_code == 0
+    assert result.exception is None
 
 
 def test_hook_session_start_records_the_session_on_the_cwd_record(

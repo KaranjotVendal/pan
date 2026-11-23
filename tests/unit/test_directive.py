@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import parse_directive
+from pan.directive import parse_directive, wants_slack_reply
 from pan.models import Agent, TaskMode
 
 
@@ -444,3 +444,20 @@ def test_curly_quotes_are_straightened(raw_text: str, expected_cleaned: str) -> 
 
     assert directive.mode is TaskMode.DELEGATE
     assert directive.cleaned_text == expected_cleaned
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected",
+    [
+        ("<@U0TEST> fix the login page, reply in slack", True),
+        ("Reply In Slack when you are done", True),
+        ("fix it and REPLY IN SLACK", True),
+        ("fix it, reply  in\nslack please", True),
+        ("fix the login page", False),
+        ("reply in slackware docs", False),
+        ("reply on slack", False),
+        ("", False),
+    ],
+)
+def test_wants_slack_reply_matches_the_phrase_anywhere(raw_text: str, expected: bool) -> None:
+    assert wants_slack_reply(raw_text) is expected

@@ -9,8 +9,15 @@ from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.adapters.hc import HcError
 from pan.errors import SpawnError, TerminalHostError, TerminalNameTakenError
-from pan.models import TerminalState, ThreadRecord, WorkerStatus
-from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker, worker_terminal_name
+from pan.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
+from pan.spawn import (
+    ClaudeLauncher,
+    inbox_thread_name,
+    reopen_worker,
+    spawn_worker,
+    worker_brief,
+    worker_terminal_name,
+)
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1718000000.000200"
@@ -34,11 +41,16 @@ class FakeGit:
 class FakeThreadMap:
     def __init__(self) -> None:
         self.records: dict[str, ThreadRecord] = {}
+        self.ties: list[str] = []
 
     def get(self, thread_ts: str) -> ThreadRecord | None:
         return self.records.get(thread_ts)
 
     def put(self, record: ThreadRecord) -> None:
+        self.records[record.thread_ts] = record
+
+    def tie(self, record: ThreadRecord) -> None:
+        self.ties.append(record.thread_ts)
         self.records[record.thread_ts] = record
 
 
@@ -75,11 +87,14 @@ def _spawn(
     slack: FakeSlack | None = None,
     stream: str | None = "backend",
     app_space: str | None = None,
+    task: str = "do the thing",
+    request_text: str | None = None,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
     return spawn_worker(
         thread_ts=_THREAD,
         channel="C1",
-        task="do the thing",
+        task=task,
         repo=Path("/repo"),
         base=base,
         stream=stream,
@@ -91,6 +106,9 @@ def _spawn(
         slack=slack if slack is not None else FakeSlack(),
         clock=FakeClock(),
         id_gen=FakeIdGen(),
+        requester="U0TEST",
+        request_text=request_text,
+        reply_in_slack=reply_in_slack,
     )
 
 
@@ -107,8 +125,12 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     (run,) = terminal_host.runs
     assert run.name == "pan-backend"
     assert run.cwd == tmp_path / "pan-backend"
-    # The brief is one argv element after `claude`: never parsed as shell text.
-    assert run.argv == ["claude", "do the thing"]
+    # The brief is one argv element after `claude`: never parsed as shell text. It opens
+    # with the fixed Inbox preamble naming the session's Inbox thread.
+    assert run.argv == ["claude", worker_brief("pan-backend: do the thing", "do the thing")]
+    assert run.argv[1].endswith("\n\nTask:\ndo the thing")
+    assert 'in a thread named exactly "pan-backend: do the thing"' in run.argv[1]
+    assert "Do not post to Slack." in run.argv[1]
     assert run.labels == {"pan.role": "worker", "pan.thread": _THREAD, "pan.channel": "C1"}
     assert record.status is WorkerStatus.SPAWNING
     assert record.terminal_name == "pan-backend"
@@ -116,9 +138,79 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert record.channel == "C1"
     assert record.worktree_path == tmp_path / "pan-backend"
     assert record.created_at == _FIXED_NOW
-    # The record is the sole thread->worker binding (INV-7) and the ack goes via egress.
+    assert record.source is ThreadSource.SLACK
+    assert record.tied is True
+    assert record.started_by_pan is True
+    assert record.requester == "U0TEST"
+    assert record.reply_mode is ReplyMode.ON_DEMAND
+    assert record.inbox_thread_name == "pan-backend: do the thing"
+    assert record.inbox_thread_id is None
+    # The record ties the thread to the session (INV-7) and the one start notice goes via
+    # egress, naming the session's Inbox thread.
     assert thread_map.records[_THREAD] is record
-    assert slack.posts == [("C1", _THREAD, "on it — stream pan-backend")]
+    assert thread_map.ties == [_THREAD]
+    assert slack.posts == [
+        (
+            "C1",
+            _THREAD,
+            'Started pan-backend in a new worktree · Inbox thread: "pan-backend: do the thing"',
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "request_text, task, reply_in_slack, expected_mode",
+    [
+        (
+            "<@U0TEST> fix the login page, Reply in Slack",
+            "fix the login page",
+            False,
+            ReplyMode.SLACK,
+        ),
+        ("<@U0TEST> fix the login page", "fix the login page", False, ReplyMode.ON_DEMAND),
+        (None, "fix the login page and reply in slack", False, ReplyMode.SLACK),
+        (None, "fix the login page", True, ReplyMode.SLACK),
+    ],
+    ids=["phrase-in-request", "no-phrase", "phrase-in-task-fallback", "forced"],
+)
+def test_spawn_sets_the_reply_mode_from_the_request(
+    tmp_path: Path,
+    request_text: str | None,
+    task: str,
+    reply_in_slack: bool,
+    expected_mode: ReplyMode,
+) -> None:
+    terminal_host = FakeTerminalHost()
+    slack = FakeSlack()
+
+    record = _spawn(
+        base=tmp_path,
+        terminal_host=terminal_host,
+        git=FakeGit(terminal_host.timeline),
+        slack=slack,
+        task=task,
+        request_text=request_text,
+        reply_in_slack=reply_in_slack,
+    )
+
+    assert record.reply_mode is expected_mode
+    assert slack.posts[0][2].endswith("answers will also be posted here") is (
+        expected_mode is ReplyMode.SLACK
+    )
+
+
+@pytest.mark.parametrize(
+    "task, expected_name",
+    [
+        ("do the thing", "pan-7: do the thing"),
+        ("  fix\n the   login\tpage ", "pan-7: fix the login page"),
+        ("x" * 80, "pan-7: " + "x" * 57 + "..."),
+        ("", "pan-7"),
+    ],
+    ids=["short", "whitespace-collapsed", "long-cut", "empty"],
+)
+def test_inbox_thread_name_is_one_short_line(task: str, expected_name: str) -> None:
+    assert inbox_thread_name("pan-7", task) == expected_name
 
 
 def test_spawn_worker_labels_into_the_app_space_only_when_configured(tmp_path: Path) -> None:
@@ -160,13 +252,15 @@ def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) 
     settings = json.loads((record.worktree_path / ".claude" / "settings.json").read_text())
     commands = {
         event: settings["hooks"][event][0]["hooks"][0]["command"]
-        for event in ("SessionStart", "Stop", "Notification")
+        for event in ("SessionStart", "Stop", "Notification", "PostToolUse")
     }
     assert commands == {
         "SessionStart": "pan hook session-start",
         "Stop": "pan hook stop",
         "Notification": "pan hook notification",
+        "PostToolUse": "pan hook inbox-link",
     }
+    assert settings["hooks"]["PostToolUse"][0]["matcher"] == "mcp__plannotator__plannotator_inbox"
 
 
 def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Path) -> None:
@@ -185,6 +279,9 @@ def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Pa
 
     assert terminal_host.timeline == []
     assert thread_map.records[_THREAD].status is WorkerStatus.FAILED
+    # No session started, so the thread is left untied.
+    assert thread_map.records[_THREAD].tied is False
+    assert thread_map.ties == []
     assert slack.posts == [
         ("C1", _THREAD, "spawn failed for stream pan-backend: stream name in use")
     ]
@@ -300,6 +397,7 @@ def test_reopen_continues_the_conversation_in_the_same_worktree(
     assert reopened.claude_session_id == "s-1"
     assert reopened.created_at == _FIXED_NOW
     assert thread_map.records[_THREAD] is reopened
+    assert thread_map.ties == [_THREAD]
     assert slack.posts == [("C1", _THREAD, "reopened — stream pan-backend")]
 
 

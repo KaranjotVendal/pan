@@ -14,10 +14,10 @@ from pan.seams import TerminalHost, ThreadMap
 logger = initialise_logger(__name__)
 
 # The host's live agent status normalized to the pan WorkerStatus it implies. Between turns an
-# agent is idle but still a live worker, so idle and working both mean RUNNING. NONE and
+# agent is idle but still a live worker (IDLE, as the Stop hook records it). NONE and
 # UNKNOWN are resolved in worker_status_for, since they depend on the recorded status.
 _AGENT_TO_WORKER: dict[AgentStatus, WorkerStatus] = {
-    AgentStatus.IDLE: WorkerStatus.RUNNING,
+    AgentStatus.IDLE: WorkerStatus.IDLE,
     AgentStatus.WORKING: WorkerStatus.RUNNING,
     AgentStatus.BLOCKED: WorkerStatus.BLOCKED,
     AgentStatus.DONE: WorkerStatus.DONE,
@@ -38,12 +38,20 @@ def worker_status_for(terminal: Terminal | None, recorded: WorkerStatus) -> Work
     return _AGENT_TO_WORKER.get(terminal.agent_status, recorded)
 
 
+# A live session moves between working and idle on every turn, and pan records only the
+# turn ends (a relayed follow-up does not mark it RUNNING), so the two never count as drift.
+_LIVE_TURN_STATUSES = frozenset({WorkerStatus.RUNNING, WorkerStatus.IDLE})
+
+
 def session_drift(recorded: WorkerStatus, terminal: Terminal) -> bool:
     # True when pan's recorded status disagrees with the status the live terminal implies.
     # SPAWNING is excluded (a worker still coming up legitimately has no status yet).
     if recorded is WorkerStatus.SPAWNING:
         return False
-    return worker_status_for(terminal, recorded) is not recorded
+    implied = worker_status_for(terminal, recorded)
+    if recorded in _LIVE_TURN_STATUSES and implied in _LIVE_TURN_STATUSES:
+        return False
+    return implied is not recorded
 
 
 def _match_pan_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:

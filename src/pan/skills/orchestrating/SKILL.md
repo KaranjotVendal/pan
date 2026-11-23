@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's deterministically-parsed directive, and route it (answer a status query, relay to a live worker, or spawn a new worker). Every mechanical step is a `pan` subcommand; the model makes only the fuzzy reuse-vs-spawn / repo / task-comprehension calls.
+description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's deterministically-parsed directive and thread tie, and route it (answer a status query, send a follow-up to the tied session, or spawn a new worker). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls.
 ---
 
 # Orchestrating loop
@@ -9,8 +9,9 @@ You are the persistent `pan-orchestrator` Claude session. A filesystem watcher w
 fixed, content-free nudge whenever the inbox changes (INV-2) — the actual request never arrives
 through your pane, only through the durable inbox. On each nudge, run this loop once.
 
-You own **only** the fuzzy judgments: whether a finished thread should be reopened or spawned fresh,
-which repo a task belongs to, and comprehending the task well enough to write the worker's brief.
+You own **only** the fuzzy judgments: which repo a new task belongs to, and comprehending the task
+well enough to write the worker's brief. Whether a message starts a new session or goes to an
+existing one is **not** yours to judge: it follows from the thread's tie (below).
 **Every other step is a deterministic `pan` subcommand** — never reimplement parsing, spawning,
 state, or posting by hand, and never decide a task's *mode* yourself.
 
@@ -21,7 +22,7 @@ Shell:
     pan inbox drain --json
 
 This atomically drains and clears the inbox (exactly-once, INV-6) and prints a JSON list. Each entry
-has two objects:
+has three fields:
 
 - `item` — the inbox event (`id`, `slack_user`, `channel`, `thread_ts`, `is_thread_reply`,
   `raw_text`, `received_at`).
@@ -30,6 +31,11 @@ has two objects:
   `target` (the relay/read selector), `message` (the relay text), `full` (read the full transcript),
   and `cleaned_text` (the raw text with every recognized flag stripped — this is the worker brief /
   relay text).
+- `tie` — `null` when the thread is not tied to a session; otherwise the session the thread's work
+  belongs to: `session` (its terminal name), `terminal_address`, `status` (pan's recorded status:
+  `spawning`, `running`, `idle`, `blocked`, `done` or `failed`) and `note`, a plain-words rule such as
+  "this thread's work belongs to pan-7 (idle); send follow-ups there; never start a second session for
+  the same work". Read when the inbox is drained, so it is current. Follow it.
 
 If the list is empty, stop — there is nothing to do. Process the entries in the order returned.
 
@@ -41,22 +47,23 @@ re-read `raw_text` and re-derive the mode, and never upgrade a `delegate` to a `
 versa) because the wording "feels" urgent. That is exactly the judgment INV-3 forbids; the
 `directive` block is authoritative.
 
-## 3. Look up the thread binding
+## 3. The thread's tie
 
-The thread map is the single source of truth for the thread→worker binding (INV-7). For an item's
-`thread_ts`, shell:
+The thread map is the single source of truth for the thread→session tie (INV-7), and the drain
+already put it on each entry as `tie`. One thread is tied to one session, and one session to one
+thread. For the whole record (`worktree_path`, `claude_session_id`, `transcript_path`, the Inbox
+thread name and link, the reply mode), shell:
 
     pan threads get --thread <thread_ts>
 
-It prints the `ThreadRecord` JSON (with `status`, `terminal_name`, `terminal_address` (the worker's
-hc terminal, empty if it never launched), `worktree_path`, `claude_session_id`, `transcript_path`) or
-`null` if no worker is bound to that thread yet. Never rediscover a worker by scraping terminals — the
-thread map is authoritative.
+Never rediscover a worker by scraping terminals — the thread map is authoritative.
 
 ## 4. Route the item
 
 Apply this precedence ladder, top to bottom, using `directive.mode`, `directive.force_new`, and the
-binding from step 3:
+`tie` from step 3. The rule behind (b) and (c): in a tied thread, follow-ups go to the tied session;
+a plain `@pan` in an untied thread starts a new session; never start a second session for the same
+work. (Explicit route words, such as naming a session to send to, come in a later version.)
 
 ### (a) Status query — `directive.mode == "status"` (checked FIRST, regardless of binding)
 
@@ -156,51 +163,53 @@ single egress: exit 20 (`TargetNotFoundError`) → post "no live session named `
 (`TargetAmbiguousError`) → post the stderr candidate list (address, name, Herdr app label) and ask
 the user to re-target by a precise address or name. Do not spawn or relay — a read only observes.
 
-### (b) Follow-up to a live worker — a record exists with `status` spawning/running/blocked
+### (b) Tied thread — `tie` is not null and `directive.force_new` is false
 
-Relay `cleaned_text` into that worker's terminal. Read `terminal_address` from the record and send
-it through pan (never shell hc yourself):
+The thread's work belongs to `tie.session`. Send the follow-up there; never spawn a second session
+for it.
 
-    pan relay '<terminal_address>' '<cleaned_text>'
+- `tie.status` is `spawning`, `running`, `idle` or `blocked`: relay `cleaned_text` into the tied
+  session through pan (never shell hc yourself):
 
-If it exits 23 (`TargetBlockedError`), handle it as in (a3). If it exits 20 (`TargetNotFoundError`),
-the worker's terminal is gone (it was stopped, crashed, or lost to a reboot): mark the thread failed
-with `pan threads set --thread <thread_ts> --status failed` and treat the item as rung (c).
+      pan relay '<tie.terminal_address>' '<cleaned_text>'
 
-A live relay takes precedence over `force_new`: a follow-up to a still-live worker is relayed here,
-not spawned — spawning would overwrite the single thread→worker binding (INV-7) and orphan the live
-terminal. `force_new` only forces the spawn path for a finished or absent thread (rung (c)).
+  No new Slack notice is needed: the `:eyes:` reaction already acknowledged the message. If it exits
+  23 (`TargetBlockedError`), handle it as in (a3). If it exits 20 (`TargetNotFoundError`), the
+  session's terminal is gone (stopped, crashed, or lost to a reboot): mark the thread failed with
+  `pan threads set --thread <thread_ts> --status failed` and reopen it as below.
+- `tie.status` is `done` or `failed`: the session ended but its worktree is still there, so reopen
+  it. That is the same session, not a new one:
 
-### (c) A finished/absent thread — a new task, or `directive.force_new` is true
+      pan reopen --thread <thread_ts> --task '<cleaned_text>'
 
-Spawn a fresh worker. If `directive.force_new` is true, always take this path (skip the reuse
-judgment). Otherwise, if a record exists but is `done`/`failed`, this is **your fuzzy call**: reopen
-the finished worker (relay as in (b)) or spawn fresh. Decide from the task and how long ago it
-finished; when in doubt, spawn fresh — worktree isolation makes a new worker cheap and safe.
+  It starts a new terminal under the same name in the same worktree, continues that worktree's last
+  Claude conversation with the follow-up, sets the record back to `spawning`, and posts the
+  "reopened — stream pan-…" ack. Only if it fails (worktree gone, name in use; it posts the failure
+  itself) is the session truly gone: then spawn a new one as in (c).
 
-To reopen (a `done` worker, or a `failed` one whose terminal was lost to a reboot or crash — its
-worktree is still intact), shell:
+### (c) Untied thread, or `directive.force_new` is true — start a new session
 
-    pan reopen --thread <thread_ts> --task '<cleaned_text>'
+`tie` is `null` (a new thread, or one whose session was untied or never started), so the message
+starts a new session in a new worktree. `directive.force_new` means the person asked for a new
+session explicitly: take this path even in a tied thread; the tie moves to the new session and the
+old session keeps running, untied.
 
-It starts a new terminal under the same name in the same worktree, continues that worktree's last
-Claude conversation with the follow-up, sets the record back to `spawning`, and posts the
-"reopened — stream pan-…" ack. If it fails (worktree gone, name in use) it posts the failure itself;
-then spawn fresh instead.
+Comprehend the task and pick the repo (**your fuzzy calls**), then:
 
-To spawn, comprehend the task and pick the repo (**your fuzzy calls**), then:
+    pan spawn --thread <thread_ts> --task '<cleaned_text>' --channel <channel> --requester <item.slack_user> --request-text '<item.raw_text>' [--stream <target_stream>] [--repo <path>] [--reply-in-slack]
 
-    pan spawn --thread <thread_ts> --task '<cleaned_text>' --channel <channel> [--stream <target_stream>] [--repo <path>]
+`pan spawn` creates the git worktree, starts the worker Claude session in its own hc terminal, ties
+the thread to it, and posts one start notice through the single Slack egress path (INV-4), naming the
+session and its Plannotator Inbox thread (`Started pan-7 in a new worktree · Inbox thread: "pan-7:
+<short task>"`). The worker's brief tells it to report in that Inbox thread and never post to Slack.
+You do not post the notice yourself. `--request-text` is the original message: when it says "reply in
+slack", the thread's answers are posted to Slack at every turn end; otherwise Slack hears nothing
+more until someone asks.
 
-`pan spawn` creates the git worktree, starts the worker Claude session in its own hc terminal, records
-the `SPAWNING` `ThreadRecord`, and posts the "on it — stream pan-…" ack through the single Slack
-egress path (INV-4) — all mechanically. You do not post the ack yourself.
-
-- **DELEGATE** (`directive.mode == "delegate"`): spawn and move on. The worker posts progress and its
-  final result back to the thread later via its Stop/Notification hooks.
-- **SYNC** (`directive.mode == "sync"`): spawn, then **block this item** until the worker's Stop hook
-  fires (which posts the final summary and marks the thread `done`). Do not pick up unrelated new
-  work for this thread until it completes; a SYNC request wants one substantive reply.
+- **DELEGATE** (`directive.mode == "delegate"`): spawn and move on. The worker asks questions and
+  reports progress in its Inbox thread.
+- **SYNC** (`directive.mode == "sync"`): spawn with `--reply-in-slack`, so the worker's answer is
+  posted back to the thread at the end of each turn, then move on.
 
 ## What is mechanical vs. what you decide
 
@@ -210,6 +219,6 @@ gateway already authenticated the sender and added the `:eyes:` ack before the i
 inbox — you never re-authenticate. Relaying into a live worker is `pan relay` too; never shell
 `hc` directly.
 
-Yours to judge (and the only place model reasoning belongs): reuse-vs-spawn for a finished thread
-(when `force_new` is not set), which repo a task targets, and writing a clear worker brief from the
-task prose. Keep every other step deterministic.
+Yours to judge (and the only place model reasoning belongs): which repo a new task targets, and
+writing a clear worker brief from the task prose. Whether to send to the tied session or start a new
+one is never a judgment: follow the `tie`. Keep every other step deterministic.
