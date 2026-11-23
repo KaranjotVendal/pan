@@ -71,6 +71,21 @@ class NotPanSessionError(PanError): ...
 class SessionBusyError(PanError): ...
 
 
+# `done` found work that closing the session would lose (uncommitted files, or commits not
+# pushed or merged), so it kept the session, its worktree and its branch.
+class UnsavedWorkError(PanError): ...
+
+
+# A git command reading or cleaning up a worker's worktree or branch failed. Retrying may
+# work (the cleanup picks up where it stopped).
+class GitWorktreeError(PanError): ...
+
+
+# `done` will never remove this folder: it is outside pan's worktree folder, or it is a
+# repository's main worktree. Retrying cannot change that.
+class UnsafeWorktreeError(PanError): ...
+
+
 # Installing, loading, unloading or reading pan's launchd agents failed (`pan service`).
 class ServiceError(PanError): ...
 

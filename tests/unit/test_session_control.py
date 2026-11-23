@@ -5,30 +5,38 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from git_worktree_fakes import FakeGitWorktree
 from inbox_fakes import FakeInboxDirectory
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import (
+    GitWorktreeError,
     NoExactMatchError,
     PanError,
     SessionBusyError,
     TargetBlockedError,
     TerminalGoneError,
     ThreadNotFoundError,
+    UnsafeWorktreeError,
+    UnsavedWorkError,
 )
 from pan.interface import INCOMPLETE_READ_NOTICE
 from pan.models import (
     AgentStatus,
+    BranchStatus,
     InboxThread,
     ReplyMode,
     TerminalRead,
     ThreadRecord,
     WorkerStatus,
+    WorktreeStatus,
 )
 from pan.session_control import (
+    NO_SESSION_REPLY,
     UNTIED_THREAD_REPLY,
     check_thread,
     clean_screen_text,
+    done_thread,
     follow_up_to_session,
     forget_thread,
     from_slack_text,
@@ -1013,3 +1021,491 @@ def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
     )
 
     assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]
+
+
+_MAIN_REPO = Path("/repos/app")
+_PAN_SETTINGS = ".claude/settings.json"
+_KEPT_HINT = "Push or commit them, or send `@pan done --discard`."
+
+
+def _worktree_status(**updates: object) -> WorktreeStatus:
+    # A fresh pan worktree: on its own branch, only pan's untracked settings file.
+    status = WorktreeStatus(
+        main_repo=_MAIN_REPO,
+        is_main_worktree=False,
+        branch="pan-7",
+        untracked_paths=[_PAN_SETTINGS],
+    )
+    return status.model_copy(update=updates)
+
+
+def _pan_worktree(tmp_path: Path) -> Path:
+    worktree_path = tmp_path / "wt" / "pan-7"
+    worktree_path.mkdir(parents=True)
+    return worktree_path
+
+
+def _git_with(
+    status: WorktreeStatus | None = None,
+    branch: BranchStatus | None = None,
+    repo: Path = _MAIN_REPO,
+) -> FakeGitWorktree:
+    return FakeGitWorktree(
+        status=status if status is not None else _worktree_status(),
+        branches={repo: branch if branch is not None else BranchStatus()},
+    )
+
+
+def _done(
+    tmp_path: Path,
+    thread_map: FileThreadMap,
+    terminal_host: FakeTerminalHost,
+    git: FakeGitWorktree,
+    slack: RecordingSlack,
+    *,
+    discard: bool = False,
+) -> None:
+    done_thread(
+        thread_ts=_OLD_THREAD,
+        channel="C0TEST",
+        discard=discard,
+        worktree_base=tmp_path / "wt",
+        fallback_repo=tmp_path / "orchestrator",
+        thread_map=thread_map,
+        terminal_host=terminal_host,
+        git=git,
+        slack=slack,
+    )
+
+
+def _tied_record(thread_map: FileThreadMap) -> ThreadRecord:
+    record = thread_map.get(_OLD_THREAD)
+    assert record is not None
+    return record
+
+
+@pytest.mark.parametrize("records", [[], [_record(tied=False)]], ids=["no-record", "untied"])
+def test_done_in_a_thread_with_no_session_does_nothing(
+    tmp_path: Path, records: list[ThreadRecord]
+) -> None:
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    git = _git_with()
+    slack = RecordingSlack()
+
+    _done(tmp_path, _thread_map(tmp_path, *records), terminal_host, git, slack)
+
+    assert slack.texts() == [NO_SESSION_REPLY]
+    assert terminal_host.removed == []
+    assert git.calls == []
+
+
+def test_done_only_unties_a_session_pan_did_not_start(tmp_path: Path) -> None:
+    desk_folder = _pan_worktree(tmp_path)
+    thread_map = _thread_map(
+        tmp_path,
+        _record(terminal_name="desk-x", started_by_pan=False, worktree_path=desk_folder),
+    )
+    terminal_host = _host(make_terminal("t7", name="desk-x"))
+    git = _git_with()
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, terminal_host, git, slack, discard=True)
+
+    assert slack.texts() == [
+        "Untied this thread from desk-x; pan never closes sessions it didn't start."
+    ]
+    record = _tied_record(thread_map)
+    assert record.tied is False
+    assert record.status is WorkerStatus.IDLE
+    assert terminal_host.removed == []
+    assert git.calls == []
+
+
+@pytest.mark.parametrize(
+    "agent_status, expected_error, expected_reply",
+    [
+        (
+            AgentStatus.WORKING,
+            SessionBusyError,
+            "pan-7 is still working; send `@pan done` when it finishes, "
+            "or `@pan done --discard` to stop it now.",
+        ),
+        (
+            AgentStatus.BLOCKED,
+            TargetBlockedError,
+            "pan-7 is waiting on a prompt; answer it at the terminal and send `@pan done` "
+            "again, or `@pan done --discard` to stop it now.",
+        ),
+    ],
+    ids=["working", "waiting-on-a-prompt"],
+)
+def test_done_refuses_a_session_that_is_not_finished(
+    tmp_path: Path,
+    agent_status: AgentStatus,
+    expected_error: type[Exception],
+    expected_reply: str,
+) -> None:
+    thread_map = _thread_map(tmp_path, _record(worktree_path=_pan_worktree(tmp_path)))
+    terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
+    git = _git_with()
+    slack = RecordingSlack()
+
+    with pytest.raises(expected_error):
+        _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    assert slack.texts() == [expected_reply]
+    assert _tied_record(thread_map).tied is True
+    assert terminal_host.removed == []
+    assert git.calls == []
+
+
+@pytest.mark.parametrize(
+    "status, branch, expected_counts",
+    [
+        (_worktree_status(modified_paths=["README.md"]), BranchStatus(), "1 uncommitted file"),
+        (
+            _worktree_status(untracked_paths=[], modified_paths=[_PAN_SETTINGS]),
+            BranchStatus(),
+            "1 uncommitted file",
+        ),
+        (
+            _worktree_status(untracked_paths=[_PAN_SETTINGS, "notes.txt"], modified_paths=["a"]),
+            BranchStatus(commits_not_in_base=1),
+            "2 uncommitted files and 1 unpushed commit",
+        ),
+        (
+            _worktree_status(),
+            BranchStatus(upstream="origin/pan-7", commits_not_on_upstream=2, commits_not_in_base=3),
+            "2 unpushed commits",
+        ),
+        (_worktree_status(branch=None, detached_commits=1), BranchStatus(), "1 unpushed commit"),
+    ],
+    ids=[
+        "modified-file",
+        "tracked-settings-file-changed",
+        "files-and-unmerged-commit",
+        "commits-ahead-of-upstream",
+        "detached-head-commit",
+    ],
+)
+def test_done_keeps_a_session_whose_work_would_be_lost(
+    tmp_path: Path, status: WorktreeStatus, branch: BranchStatus, expected_counts: str
+) -> None:
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    git = _git_with(status, branch)
+    slack = RecordingSlack()
+
+    with pytest.raises(UnsavedWorkError):
+        _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    assert slack.texts() == [f"pan-7 has {expected_counts}; kept it. {_KEPT_HINT}"]
+    assert git.calls == [("status", worktree_path), ("branch_status", _MAIN_REPO, "pan-7")]
+    assert terminal_host.removed == []
+    record = _tied_record(thread_map)
+    assert record.tied is True
+    assert record.status is WorkerStatus.IDLE
+
+
+@pytest.mark.parametrize(
+    "status, branch, agent_status, discard, expected_remove_force, expected_delete_force",
+    [
+        (_worktree_status(), BranchStatus(), AgentStatus.IDLE, False, True, True),
+        (
+            _worktree_status(untracked_paths=[]),
+            BranchStatus(),
+            AgentStatus.IDLE,
+            False,
+            False,
+            True,
+        ),
+        (
+            _worktree_status(),
+            BranchStatus(upstream="origin/pan-7", commits_not_in_base=2),
+            AgentStatus.IDLE,
+            False,
+            True,
+            False,
+        ),
+        (
+            _worktree_status(),
+            BranchStatus(upstream="origin/pan-7", upstream_gone=True, commits_not_in_base=2),
+            AgentStatus.IDLE,
+            False,
+            True,
+            True,
+        ),
+        (
+            _worktree_status(modified_paths=["app.py"]),
+            BranchStatus(commits_not_in_base=4),
+            AgentStatus.IDLE,
+            True,
+            True,
+            True,
+        ),
+        (_worktree_status(), BranchStatus(), AgentStatus.WORKING, True, True, True),
+        (_worktree_status(), BranchStatus(), AgentStatus.BLOCKED, True, True, True),
+    ],
+    ids=[
+        "only-pan-settings",
+        "clean",
+        "pushed-not-merged",
+        "upstream-gone-after-merge",
+        "discard-unsaved-work",
+        "discard-working-session",
+        "discard-blocked-session",
+    ],
+)
+def test_done_closes_the_session_and_removes_its_worktree_and_branch(
+    tmp_path: Path,
+    status: WorktreeStatus,
+    branch: BranchStatus,
+    agent_status: AgentStatus,
+    discard: bool,
+    expected_remove_force: bool,
+    expected_delete_force: bool,
+) -> None:
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
+    terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
+    git = _git_with(status, branch)
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, terminal_host, git, slack, discard=discard)
+
+    assert terminal_host.removed == ["t7"]
+    assert git.calls == [
+        ("status", worktree_path),
+        ("branch_status", _MAIN_REPO, "pan-7"),
+        ("remove", worktree_path, expected_remove_force),
+        ("delete_branch", _MAIN_REPO, "pan-7", expected_delete_force),
+    ]
+    assert slack.texts() == ["Closed pan-7 and removed its worktree and branch."]
+    record = _tied_record(thread_map)
+    assert record.status is WorkerStatus.DONE
+    assert record.tied is False
+
+
+@pytest.mark.parametrize(
+    "terminals",
+    [[], [make_terminal("t7", name="desk-other")]],
+    ids=["terminal-gone", "address-reused-by-another-session"],
+)
+def test_done_cleans_the_worktree_when_the_terminal_is_gone(
+    tmp_path: Path, terminals: list[object]
+) -> None:
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
+    terminal_host = _host(*terminals)
+    git = _git_with()
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    assert terminal_host.removed == []
+    assert ("remove", worktree_path, True) in git.calls
+    assert slack.texts() == ["Closed pan-7 and removed its worktree and branch."]
+
+
+def test_done_removes_the_worktree_when_its_branch_is_already_gone(tmp_path: Path) -> None:
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
+    git = FakeGitWorktree(status=_worktree_status(branch=None))
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, _host(), git, slack)
+
+    assert git.calls == [
+        ("status", worktree_path),
+        ("branch_status", _MAIN_REPO, "pan-7"),
+        ("remove", worktree_path, True),
+    ]
+    assert slack.texts() == ["Closed pan-7 and removed its worktree."]
+
+
+@pytest.mark.parametrize(
+    "recorded_repo, repo_with_branch, expected_repo, expected_reply",
+    [
+        (
+            "repos/app",
+            "repos/app",
+            "repos/app",
+            "Closed pan-7 and removed its branch; its worktree was already gone.",
+        ),
+        (
+            None,
+            "orchestrator",
+            "orchestrator",
+            "Closed pan-7 and removed its branch; its worktree was already gone.",
+        ),
+        (
+            "repos/app",
+            None,
+            "repos/app",
+            "Closed pan-7; its worktree and branch were already gone.",
+        ),
+        (None, None, None, "Closed pan-7; its worktree was already gone."),
+    ],
+    ids=[
+        "recorded-repo",
+        "old-record-orchestrator-repo-has-branch",
+        "branch-already-gone",
+        "old-record-orchestrator-repo-lacks-branch",
+    ],
+)
+def test_done_with_the_worktree_folder_gone_cleans_up_from_the_repo(
+    tmp_path: Path,
+    recorded_repo: str | None,
+    repo_with_branch: str | None,
+    expected_repo: str | None,
+    expected_reply: str,
+) -> None:
+    for folder in ("repos/app", "orchestrator"):
+        (tmp_path / folder).mkdir(parents=True)
+    record = _record(
+        worktree_path=tmp_path / "wt" / "pan-7",
+        repo_path=tmp_path / recorded_repo if recorded_repo is not None else None,
+    )
+    thread_map = _thread_map(tmp_path, record)
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    branches = {tmp_path / repo_with_branch: BranchStatus()} if repo_with_branch else {}
+    git = FakeGitWorktree(branches=branches)
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    writes = [call for call in git.calls if call[0] in ("prune", "delete_branch")]
+    if expected_repo is None:
+        assert writes == []
+    else:
+        expected_writes: list[tuple[object, ...]] = [("prune", tmp_path / expected_repo)]
+        if repo_with_branch is not None:
+            expected_writes.append(("delete_branch", tmp_path / expected_repo, "pan-7", True))
+        assert writes == expected_writes
+    assert terminal_host.removed == ["t7"]
+    assert slack.texts() == [expected_reply]
+    record = _tied_record(thread_map)
+    assert record.status is WorkerStatus.DONE
+    assert record.tied is False
+
+
+def test_done_with_the_worktree_folder_gone_judges_the_branch_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repos" / "app"
+    repo.mkdir(parents=True)
+    thread_map = _thread_map(
+        tmp_path, _record(worktree_path=tmp_path / "wt" / "pan-7", repo_path=repo)
+    )
+    git = FakeGitWorktree(branches={repo: BranchStatus(commits_not_in_base=1)})
+    slack = RecordingSlack()
+
+    with pytest.raises(UnsavedWorkError):
+        _done(tmp_path, thread_map, _host(), git, slack)
+
+    assert slack.texts() == [f"pan-7 has 1 unpushed commit; kept it. {_KEPT_HINT}"]
+    assert git.calls == [("branch_status", repo, "pan-7")]
+
+
+@pytest.mark.parametrize(
+    "folder_name, status, git_errors, expected_error, expected_reply",
+    [
+        (
+            "outside",
+            _worktree_status(),
+            {},
+            UnsafeWorktreeError,
+            "pan-7's folder is not in pan's worktree folder; pan never removes it.",
+        ),
+        (
+            "wt/pan-7",
+            _worktree_status(is_main_worktree=True),
+            {},
+            UnsafeWorktreeError,
+            "pan-7's folder is a main repository; pan never removes it.",
+        ),
+        (
+            "wt/pan-7",
+            None,
+            {"status": GitWorktreeError("not a git repository")},
+            GitWorktreeError,
+            "Could not read pan-7's worktree; kept it.",
+        ),
+    ],
+    ids=["outside-worktree-base", "main-worktree", "unreadable"],
+)
+def test_done_keeps_a_worktree_it_cannot_safely_remove(
+    tmp_path: Path,
+    folder_name: str,
+    status: WorktreeStatus | None,
+    git_errors: dict[str, PanError],
+    expected_error: type[PanError],
+    expected_reply: str,
+) -> None:
+    folder = tmp_path / folder_name
+    folder.mkdir(parents=True)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=folder))
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    git = FakeGitWorktree(status=status, errors=git_errors)
+    slack = RecordingSlack()
+
+    with pytest.raises(expected_error):
+        _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    assert slack.texts() == [expected_reply]
+    assert terminal_host.removed == []
+    assert not any(call[0] in ("remove", "prune", "delete_branch") for call in git.calls)
+    assert _tied_record(thread_map).tied is True
+
+
+@pytest.mark.parametrize("failing_operation", ["remove", "delete_branch"])
+def test_done_reports_a_failed_cleanup_and_keeps_the_thread_tied(
+    tmp_path: Path, failing_operation: str
+) -> None:
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    git = _git_with()
+    git.errors[failing_operation] = GitWorktreeError("git failed")
+    slack = RecordingSlack()
+
+    with pytest.raises(GitWorktreeError):
+        _done(tmp_path, thread_map, terminal_host, git, slack)
+
+    assert terminal_host.removed == ["t7"]
+    assert slack.texts() == [
+        "Closed pan-7, but could not remove its worktree or branch; "
+        f"send `@pan done` to try again, or remove {worktree_path} by hand."
+    ]
+    record = _tied_record(thread_map)
+    assert record.status is WorkerStatus.IDLE
+    assert record.tied is True
+    assert record.terminal_address == ""
+
+
+def test_done_retry_after_a_failed_branch_delete_reports_only_the_branch(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repos" / "app"
+    repo.mkdir(parents=True)
+    worktree_path = _pan_worktree(tmp_path)
+    thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path, repo_path=repo))
+    git = _git_with(_worktree_status(main_repo=repo), repo=repo)
+    git.errors["delete_branch"] = GitWorktreeError("git failed")
+    with pytest.raises(GitWorktreeError):
+        _done(tmp_path, thread_map, _host(make_terminal("t7", name="pan-7")), git, RecordingSlack())
+    worktree_path.rmdir()
+    git.errors.clear()
+    git.calls.clear()
+    slack = RecordingSlack()
+
+    _done(tmp_path, thread_map, _host(), git, slack)
+
+    assert git.calls == [
+        ("branch_status", repo, "pan-7"),
+        ("prune", repo),
+        ("delete_branch", repo, "pan-7", True),
+    ]
+    assert slack.texts() == ["Closed pan-7 and removed its branch; its worktree was already gone."]
+    record = _tied_record(thread_map)
+    assert record.status is WorkerStatus.DONE
+    assert record.tied is False

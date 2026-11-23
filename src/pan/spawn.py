@@ -16,6 +16,7 @@ from pan.config import (
     WORKER_BRIEF_TASK_MARKER,
     WORKER_NAME_PREFIX,
     WORKER_ROLE,
+    WORKER_SETTINGS_RELATIVE_PATH,
 )
 from pan.directive import wants_slack_reply
 from pan.errors import (
@@ -93,9 +94,9 @@ _NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
 
 
 def _write_worker_settings(worktree_path: Path) -> None:
-    settings_dir = worktree_path / ".claude"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    (settings_dir / "settings.json").write_text(json.dumps(_WORKER_SETTINGS, indent=2))
+    settings_path = worktree_path / WORKER_SETTINGS_RELATIVE_PATH
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(_WORKER_SETTINGS, indent=2))
 
 
 def worker_terminal_name(stream: str | None, id_gen: IdGen) -> str:
@@ -236,6 +237,7 @@ def spawn_worker(
             terminal_name=name,
             channel=channel,
             worktree_path=base / name,
+            repo_path=repo,
             status=WorkerStatus.FAILED,
             created_at=created_at,
             updated_at=clock.now(),
@@ -258,6 +260,7 @@ def spawn_worker(
         terminal_address=terminal.address,
         channel=channel,
         worktree_path=worktree_path,
+        repo_path=repo,
         status=WorkerStatus.SPAWNING,
         created_at=created_at,
         updated_at=created_at,
