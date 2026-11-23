@@ -163,13 +163,13 @@ runs once the actuation lands.
 | `pan status --thread …` | Report a worker's live status (from its hc terminal). |
 | `pan sessions [--json] [--thread … --channel …]` | List every live hc terminal with the last thing each was asked, marking pan-owned ones and status drift; with `--thread` and `--channel`, post the table to that thread. |
 | `pan check --thread … --channel …` | Post the tied session's latest answer to the thread as is (its transcript's last answer, or its screen lines), with its Inbox thread and whether it is still working or waiting on a prompt. |
-| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. Without `--to`, send a follow-up to the thread's tied session. A busy session (or one whose state pan cannot read) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
+| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. Without `--to`, send a follow-up to the thread's tied session. A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
 | `pan relay <target> <message>` | Send a message into a live terminal (address, name, or Herdr app label). |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal and mark the thread FAILED. Refuses for a session pan did not start: it only unties the thread. |
 | `pan pause` | Toggle the pause flag. |
-| `pan hook stop` / `pan hook notification` | Claude Code worker hooks: mark the thread idle / blocked; post the answer / question only when the request said "reply in slack". |
+| `pan hook stop` / `pan hook notification` | Claude Code worker hooks: mark the thread idle / blocked; post the answer / question only when the request said "reply in slack". Only a prompt waiting on the person (a permission prompt) marks blocked; the idle reminder Claude Code sends after a minute changes nothing. |
 | `pan hook inbox-link` | Claude Code worker PostToolUse hook on the Inbox tool (records the session's Inbox thread id and link). |
 | `pan hook session-start` | Claude Code worker SessionStart hook (records the session id and transcript path). |
 

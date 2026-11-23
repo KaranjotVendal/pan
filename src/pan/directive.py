@@ -40,6 +40,22 @@ _SMART_QUOTE_MAP = {
 }
 
 
+# Some Slack clients and connectors end a message with a signature such as
+# "\n*Sent using* <@U0EXAMPLE|Claude>" (sometimes quoted with `>`). Left in, it stops a whole-message
+# route word (`check`) from matching and leaks into task text, briefs and Inbox thread names.
+# Only a signature at the very end is removed: "sent using" (any case, optional `*`/`_`
+# emphasis) and one user mention with an optional `|label`.
+_TRAILING_SIGNATURE = re.compile(
+    r"(?:^|\s+)(?:(?:>|&gt;)\s*)?[*_]{0,2}sent\s+using[*_]{0,2}\s*"
+    r"<@[A-Z0-9]+(?:\|[^>]*)?>[*_]{0,2}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_signature(text: str) -> str:
+    return _TRAILING_SIGNATURE.sub("", text, count=1)
+
+
 # "reply in slack" anywhere in a request, any letter case, sets the thread's reply mode to
 # SLACK. The one phrase matched anywhere: a false match costs only an extra Slack reply.
 _REPLY_IN_SLACK = re.compile(r"\breply\s+in\s+slack\b", re.IGNORECASE)
@@ -55,9 +71,10 @@ def _normalize_punctuation(text: str) -> str:
 
 
 def _clean_message(raw_text: str) -> str:
-    # Phone punctuation repaired first, then a single leading Slack mention removed, so the
-    # first word is the one the person typed after `@pan`.
-    text = _normalize_punctuation(raw_text.strip())
+    # Phone punctuation repaired first, then a trailing client signature and a single leading
+    # Slack mention removed, so the first word is the one the person typed after `@pan` and
+    # the last word is theirs too.
+    text = _strip_signature(_normalize_punctuation(raw_text.strip()))
     return _LEADING_MENTION.sub("", text, count=1).strip()
 
 

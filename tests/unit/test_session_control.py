@@ -222,7 +222,25 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
         ),
         (
             "desk-api",
-            [make_terminal("t9", name="desk-api", agent_status=AgentStatus.NONE)],
+            [make_terminal("t9", name="desk-api", agent_status=AgentStatus.NONE, turn=4)],
+            [],
+            SessionBusyError,
+            "desk-api is busy; try again, or @pan check",
+        ),
+        (
+            "desk-api",
+            [
+                make_terminal(
+                    "t9", name="desk-api", agent="zsh", agent_status=AgentStatus.NONE, turn=0
+                )
+            ],
+            [],
+            SessionBusyError,
+            "desk-api is busy; try again, or @pan check",
+        ),
+        (
+            "desk-api",
+            [make_terminal("t9", name="desk-api", agent=None, agent_status=AgentStatus.NONE)],
             [],
             SessionBusyError,
             "desk-api is busy; try again, or @pan check",
@@ -249,7 +267,9 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
         "desk-session-close-match",
         "busy-pan-session",
         "busy-desk-session",
-        "no-status-counts-as-busy",
+        "no-status-after-a-turn-counts-as-busy",
+        "shell-with-no-status-counts-as-busy",
+        "unknown-program-with-no-status-counts-as-busy",
         "unknown-status-counts-as-busy",
         "blocked-desk-session",
     ],
@@ -272,6 +292,25 @@ def test_send_to_session_refuses_and_sends_nothing(
     assert terminal_host.sent == []
     assert thread_map.get(_NEW_THREAD) is None
     assert slack.texts() == [expected_reply]
+
+
+@pytest.mark.parametrize(
+    "agent, turn",
+    [("claude", 0), ("claude-code", 0), ("claude", None)],
+    ids=["claude-turn-0", "claude-code-turn-0", "claude-no-turn-count"],
+)
+def test_send_to_a_brand_new_claude_session_with_no_status_types_the_task(
+    tmp_path: Path, agent: str, turn: int | None
+) -> None:
+    thread_map = _thread_map(tmp_path)
+    terminal_host = _host(
+        make_terminal("t9", name="desk-api", agent=agent, agent_status=AgentStatus.NONE, turn=turn)
+    )
+    slack = RecordingSlack()
+
+    _send(terminal_host, thread_map, slack, "desk-api")
+
+    assert [address for address, _ in terminal_host.sent] == ["t9"]
 
 
 def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -> None:
@@ -528,6 +567,37 @@ def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
     stored = thread_map.get(_OLD_THREAD)
     assert stored is not None
     assert stored.inbox_thread_id == (found.thread_id if found is not None else None)
+
+
+def test_check_looks_again_once_the_session_has_created_its_inbox_thread(
+    tmp_path: Path,
+) -> None:
+    # The session creates its Inbox thread only on its first send, so an early lookup misses;
+    # a later check looks again and stores what it finds.
+    desk_folder = Path("/tmp/desk/test")
+    thread_name = "desk-test: reply with the word hello"
+    record = _record(
+        terminal_name="desk-test",
+        terminal_address="t9",
+        started_by_pan=False,
+        worktree_path=desk_folder,
+        inbox_thread_name=thread_name,
+    )
+    thread_map = _thread_map(tmp_path, record)
+    terminal_host = _host(make_terminal("t9", name="desk-test"))
+
+    _check(thread_map, terminal_host, RecordingSlack(), FakeInboxDirectory())
+    created = InboxThread(thread_id="msg_1", name=thread_name)
+    _check(
+        thread_map,
+        terminal_host,
+        RecordingSlack(),
+        FakeInboxDirectory({(desk_folder, thread_name): created}),
+    )
+
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.inbox_thread_id == "msg_1"
 
 
 def test_check_does_not_look_up_a_session_whose_inbox_thread_is_known(tmp_path: Path) -> None:

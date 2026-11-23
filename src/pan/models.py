@@ -183,7 +183,8 @@ class Terminal(BaseModel, frozen=True):
     # The confined projection of one terminal; the only terminal type a terminal host
     # adapter lets escape (INV-8). `address` is the host's id (for hc: t7, machine/t7);
     # `name` is unique among live terminals; `where` is the Herdr app's "space / tab" label
-    # when it shows one (hc only; other hosts leave it empty).
+    # when it shows one (hc only; other hosts leave it empty). `turn` counts the agent's
+    # finished turns when the host reports it (0 for a session that has not answered yet).
     address: str
     name: str | None = None
     where: str | None = None
@@ -191,6 +192,7 @@ class Terminal(BaseModel, frozen=True):
     state: TerminalState
     agent: str | None = None
     agent_status: AgentStatus
+    turn: int | None = None
 
 
 class InboxThread(BaseModel, frozen=True):

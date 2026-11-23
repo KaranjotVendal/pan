@@ -10,6 +10,16 @@ LOG_FILE = LOG_DIR / "pan.log"
 LOG_FORMAT = "%(levelname)s | %(message)s | %(asctime)s | %(name)s | %(funcName)s"
 CONSOLE_LEVEL_ENV = "PAN_LOG_LEVEL"
 DEFAULT_CONSOLE_LEVEL = "WARNING"
+# Points the log file at another folder; the test suite sets it so tests never write to the
+# real log.
+LOG_DIR_ENV = "PAN_LOG_DIR"
+
+
+def _log_file() -> Path:
+    override = os.environ.get(LOG_DIR_ENV)
+    log_dir = Path(override) if override else LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / LOG_FILE.name
 
 
 def _resolve_console_level() -> int:
@@ -23,8 +33,8 @@ def _resolve_console_level() -> int:
 def initialise_logger(name: str, overwrite_level: int | None = None) -> logging.Logger:
     """Return a configured logger for `name`.
 
-    The file handler always captures DEBUG to ``~/.pan/logs/pan.log`` so a full
-    trace is available after the fact. The console handler writes to **stderr**
+    The file handler always captures DEBUG to ``~/.pan/logs/pan.log`` (or ``pan.log`` in
+    ``PAN_LOG_DIR`` when set) so a full trace is available after the fact. The console handler writes to **stderr**
     (never stdout, so it can't corrupt command output / ``--json``) and defaults
     to **WARNING** — quiet on a normal run. Raise console verbosity with the
     ``PAN_LOG_LEVEL`` env var (e.g. ``PAN_LOG_LEVEL=DEBUG``); an unrecognized
@@ -43,8 +53,7 @@ def initialise_logger(name: str, overwrite_level: int | None = None) -> logging.
 
     formatter = logging.Formatter(LOG_FORMAT)
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(LOG_FILE)
+    file_handler = logging.FileHandler(_log_file())
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)

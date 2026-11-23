@@ -673,7 +673,12 @@ def test_hook_notification_resolves_by_cwd_posts_and_marks_blocked() -> None:
     )
     thread_map, slack = _HookThreadMap(record), _HookSlack()
     payload = json.dumps(
-        {"hook_event_name": "Notification", "cwd": "/wt/pan-a", "message": "need input"}
+        {
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "cwd": "/wt/pan-a",
+            "message": "need input",
+        }
     )
 
     cli._dispatch_completion_hook(notification_hook, payload, thread_map, slack)
@@ -757,6 +762,59 @@ def test_hook_inbox_link_never_fails_the_tool(
 
     assert result.exit_code == 0
     assert result.exception is None
+
+
+def test_hook_inbox_link_records_the_link_from_the_real_inbox_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    worktree = tmp_path / "wt" / "pan-task"
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.tie(_record("t-1", worktree_path=worktree))
+    result_json = json.dumps({"thread_id": "thr_1", "url": "https://inbox.example/t/thr_1"})
+    text = f"Sent to the Plannotator Inbox (thread thr_1, https://inbox.example/t/thr_1).\n\n{result_json}"
+    payload = json.dumps(
+        {
+            "hook_event_name": "PostToolUse",
+            "cwd": f"{worktree}/",
+            "tool_name": "mcp__plannotator__plannotator_inbox",
+            "tool_input": {"action": "send_message", "body": "starting"},
+            "tool_response": [{"type": "text", "text": text}],
+        }
+    )
+
+    result = runner.invoke(cli.app, ["hook", "inbox-link"], input=payload)
+
+    assert result.exit_code == 0
+    recorded = thread_map.get("t-1")
+    assert recorded is not None
+    assert recorded.inbox_thread_id == "thr_1"
+
+
+@pytest.mark.parametrize(
+    "raw_stdin, expected_line",
+    [
+        ("not json", "inbox-link hook: the payload carries no cwd"),
+        ('{"cwd": "/wt/unknown"}', "inbox-link hook: no thread record for cwd=/wt/unknown"),
+    ],
+    ids=["no-cwd", "no-record"],
+)
+def test_hook_inbox_link_logs_why_it_recorded_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    raw_stdin: str,
+    expected_line: str,
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    cli.logger.addHandler(caplog.handler)
+    try:
+        result = runner.invoke(cli.app, ["hook", "inbox-link"], input=raw_stdin)
+    finally:
+        cli.logger.removeHandler(caplog.handler)
+
+    assert result.exit_code == 0
+    assert expected_line in caplog.messages
 
 
 def test_hook_session_start_records_the_session_on_the_cwd_record(

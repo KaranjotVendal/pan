@@ -338,9 +338,12 @@ def _dispatch_completion_hook(
     # the already-read stdin to the existing hook function. If no record matches the
     # cwd (or stdin is unparseable), exit cleanly — a hook must never crash the worker.
     cwd = _extract_cwd(raw_stdin)
-    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if cwd is None:
+        logger.warning("completion hook: the payload carries no cwd")
+        return
+    record = thread_map.get_by_worktree(Path(cwd).expanduser())
     if record is None:
-        logger.warning("completion hook: no thread record for cwd")
+        logger.warning(f"completion hook: no thread record for cwd={cwd}")
         return
     hook_fn(
         record.thread_ts,
@@ -368,9 +371,12 @@ def hook_session_start() -> None:
     config = _config()
     thread_map = FileThreadMap(config.paths.threads, SystemClock())
     cwd = _extract_cwd(raw_stdin)
-    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if cwd is None:
+        logger.warning("session-start hook: the payload carries no cwd")
+        return
+    record = thread_map.get_by_worktree(Path(cwd).expanduser())
     if record is None:
-        logger.warning("session-start hook: no thread record for cwd")
+        logger.warning(f"session-start hook: no thread record for cwd={cwd}")
         return
     session_start_hook(
         record.thread_ts,
@@ -388,15 +394,18 @@ def hook_stop() -> None:
 
 @hook_app.command("notification")
 def hook_notification() -> None:
-    """Claude Code Notification hook: mark the thread BLOCKED; post only in reply-in-Slack mode."""
+    """Claude Code Notification hook: mark a prompt waiting on the person BLOCKED; idle is ignored."""
     _run_completion_hook(notification_hook)
 
 
 def _dispatch_inbox_link_hook(raw_stdin: str, thread_map: ThreadMap) -> None:
     cwd = _extract_cwd(raw_stdin)
-    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if cwd is None:
+        logger.warning("inbox-link hook: the payload carries no cwd")
+        return
+    record = thread_map.get_by_worktree(Path(cwd).expanduser())
     if record is None:
-        logger.warning("inbox-link hook: no thread record for cwd")
+        logger.warning(f"inbox-link hook: no thread record for cwd={cwd}")
         return
     inbox_link_hook(
         record.thread_ts,

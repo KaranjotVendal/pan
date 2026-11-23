@@ -55,8 +55,13 @@ def find_thread_in_listing(listing: Any, thread_name: str) -> InboxThread | None
 class ShellPlannotatorInboxAdapter:
     # The InboxDirectory seam over `plannotator inbox call read_thread`: with no thread id it
     # lists a project's open threads (`asked_by: "anyone"`, so threads other sessions wrote
-    # count too). Read only: this adapter never sends. Best effort: any failure (no Inbox,
-    # a refusal, a timeout, unexpected output) is logged and returns None.
+    # count too). `project_path` picks the project: a git worktree maps to its main
+    # repository's project, any other folder to the project rooted at it (checked live), so
+    # the session's own folder finds the threads it wrote. A session's thread exists only
+    # after its first Inbox send, so a lookup right after typing a task into it usually finds
+    # nothing; callers look again later (check). Read only: this adapter never sends. Best
+    # effort: any failure (no Inbox, a refusal, a timeout, unexpected output) is logged and
+    # returns None.
     def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None:
         arguments = {
             "asked_by": "anyone",
@@ -84,5 +89,7 @@ class ShellPlannotatorInboxAdapter:
             logger.warning("inbox lookup produced non-JSON output")
             return None
         found = find_thread_in_listing(listing, thread_name)
-        logger.info(f"inbox lookup found={found is not None}")
+        logger.info(
+            f"inbox lookup found={found is not None} threads_listed={len(_thread_rows(listing))}"
+        )
         return found

@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
-from pan.logging import initialise_logger
+from pan.logging import LOG_DIR_ENV, initialise_logger
 
 
 def _unique_name() -> str:
@@ -93,3 +94,13 @@ def test_propagate_is_false(monkeypatch: pytest.MonkeyPatch) -> None:
     logger = initialise_logger(_unique_name())
 
     assert logger.propagate is False
+
+
+def test_file_handler_writes_into_the_log_dir_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(LOG_DIR_ENV, str(tmp_path / "logs"))
+    logger = initialise_logger(_unique_name())
+
+    file_handler = next(h for h in logger.handlers if isinstance(h, logging.FileHandler))
+    assert Path(file_handler.baseFilename) == tmp_path / "logs" / "pan.log"

@@ -153,6 +153,8 @@ def test_list_terminals_parses_every_entry(monkeypatch: pytest.MonkeyPatch) -> N
     assert first.agent_status is AgentStatus.IDLE
     assert second.name == "my-agent"
     assert second.cwd == Path("/repo/b")
+    assert first.turn == 23
+    assert second.turn == 0
     assert shell.agent_status is AgentStatus.NONE
 
 
@@ -184,6 +186,21 @@ def test_get_of_a_finished_shell_has_no_agent_status(monkeypatch: pytest.MonkeyP
     assert terminal.state is TerminalState.FINISHED
     assert terminal.agent == "zsh"
     assert terminal.agent_status is AgentStatus.NONE
+
+
+def test_get_of_a_fresh_claude_session_names_the_launched_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Before its first turn ends Claude Code reports no status, and its foreground name is
+    # its version number, so the launched program names the agent.
+    fresh_output = {**GET_OUTPUT, "status": None, "argv": ["/usr/local/bin/claude"], "turn": 0}
+    _install_runner(monkeypatch, [_ok(fresh_output)])
+
+    terminal = ShellHcAdapter().get("my-agent")
+
+    assert terminal.agent == "claude"
+    assert terminal.agent_status is AgentStatus.NONE
+    assert terminal.turn == 0
 
 
 @pytest.mark.parametrize(

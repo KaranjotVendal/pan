@@ -56,7 +56,9 @@ def _optional_string(value: object) -> str | None:
 
 def _agent_name(entry: dict) -> str | None:
     # `ls` names the foreground program in `agent`; `get` carries it as the status app,
-    # falling back to the foreground program's name for a program that reports no status.
+    # falling back to the launched program (argv[0]) and then the foreground program's name
+    # for a program that reports no status yet. Claude Code's foreground name is its version
+    # number, so a fresh session is only recognisable by what was launched.
     agent = _optional_string(entry.get("agent"))
     if agent is not None:
         return agent
@@ -65,10 +67,20 @@ def _agent_name(entry: dict) -> str | None:
         agent = _optional_string(status.get("app"))
         if agent is not None:
             return agent
+    argv = entry.get("argv")
+    if isinstance(argv, list) and argv:
+        launched = _optional_string(argv[0])
+        if launched is not None:
+            return Path(launched).name
     foreground = entry.get("foreground")
     if isinstance(foreground, dict):
         return _optional_string(foreground.get("name"))
     return None
+
+
+def _turn(entry: dict) -> int | None:
+    turn = entry.get("turn")
+    return turn if isinstance(turn, int) and not isinstance(turn, bool) else None
 
 
 def _where(entry: dict) -> str | None:
@@ -100,6 +112,7 @@ def _to_terminal(entry: object) -> Terminal | None:
         state=state,
         agent=_agent_name(entry),
         agent_status=_map_agent_status(entry.get("status")),
+        turn=_turn(entry),
     )
 
 
