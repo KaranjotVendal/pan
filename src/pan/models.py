@@ -79,7 +79,9 @@ class Agent(StrEnum):
 class RouteKind(StrEnum):
     # The route words at the start of a message (see directive.parse_route). TASK means no
     # route word: the thread's tie decides. NOTICE means pan only replies with Route.notice
-    # (a retired flag, or a route word with no task) and does nothing else.
+    # (a retired flag, or a route word with no task) and does nothing else. CONFIRM is a reply
+    # (`yes`, `y` or 1-3) to pan's open question in the thread asking which session to send a
+    # task to; only `pan inbox drain` sets it, because only it knows whether a question is open.
     TASK = "task"
     NEW = "new"
     TO = "to"
@@ -87,6 +89,7 @@ class RouteKind(StrEnum):
     FORGET = "forget"
     CHECK = "check"
     NOTICE = "notice"
+    CONFIRM = "confirm"
 
 
 class Route(BaseModel, frozen=True):
@@ -98,6 +101,8 @@ class Route(BaseModel, frozen=True):
     # "reply in slack" appears in the message.
     reply_in_slack: bool = False
     notice: str | None = None
+    # For CONFIRM: the reply, `yes` or a number from 1 to 3.
+    choice: str | None = None
 
 
 class Directive(BaseModel, frozen=True):
@@ -179,6 +184,29 @@ class ThreadRecord(BaseModel):
         return upgraded
 
 
+class ConfirmationCandidate(BaseModel, frozen=True):
+    # One session pan proposes: its terminal address (checked again at send time), its name
+    # when it has one, and the label shown in Slack.
+    address: str
+    name: str | None = None
+    label: str
+
+
+class PendingConfirmation(BaseModel, frozen=True):
+    # pan's open question in a Slack thread: which session should get `task`. Stored per
+    # thread until the person replies or it expires (CONFIRMATION_TIMEOUT). It is not kept on
+    # the thread's ThreadRecord because a `to <name>:` in a new thread has no record yet.
+    thread_ts: str
+    channel: str
+    source: ThreadSource = ThreadSource.SLACK
+    selector: str
+    task: str
+    requester: str | None = None
+    reply_in_slack: bool = False
+    candidates: list[ConfirmationCandidate]
+    created_at: datetime
+
+
 class Terminal(BaseModel, frozen=True):
     # The confined projection of one terminal; the only terminal type a terminal host
     # adapter lets escape (INV-8). `address` is the host's id (for hc: t7, machine/t7);
@@ -193,10 +221,6 @@ class Terminal(BaseModel, frozen=True):
     agent: str | None = None
     agent_status: AgentStatus
     turn: int | None = None
-    # When the agent status last changed and when the terminal was created (Unix ms), when the
-    # host reports them (hc's `get` does, its `ls` does not).
-    status_changed_ms: int | None = None
-    created_ms: int | None = None
 
 
 class InboxThread(BaseModel, frozen=True):

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import X_TO_ROUTE_NOTICE, parse_directive, parse_route, wants_slack_reply
+from pan.directive import (
+    X_TO_ROUTE_NOTICE,
+    parse_confirm_reply,
+    parse_directive,
+    parse_route,
+    wants_slack_reply,
+)
 from pan.models import Agent, Route, RouteKind, TaskMode, ThreadSource
 
 
@@ -576,3 +582,23 @@ def test_parse_route_from_x_never_reaches_an_existing_session(
     raw_text: str, expected_route: Route
 ) -> None:
     assert parse_route(raw_text, ThreadSource.X) == expected_route
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_choice",
+    [
+        ("yes", "yes"),
+        ("YES", "yes"),
+        ("y", "yes"),
+        ("<@U0TEST> Yes.", "yes"),
+        ("1", "1"),
+        ("<@U0TEST> 3!", "3"),
+        ("4", None),
+        ("no", None),
+        ("yes please", None),
+        ("yes, send it to the other one", None),
+        ("", None),
+    ],
+)
+def test_parse_confirm_reply(raw_text: str, expected_choice: str | None) -> None:
+    assert parse_confirm_reply(raw_text) == expected_choice

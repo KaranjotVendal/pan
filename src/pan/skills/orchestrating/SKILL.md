@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget, send to a named session, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls.
+description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget, send to a named session or propose one for the person to confirm, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls and the proposal of a session for an inexact `to <name>:`.
 ---
 
 # Orchestrating loop
@@ -9,8 +9,9 @@ You are the persistent `pan-orchestrator` Claude session. A filesystem watcher w
 fixed, content-free nudge whenever the inbox changes (INV-2) — the actual request never arrives
 through your pane, only through the durable inbox. On each nudge, run this loop once.
 
-You own **only** the fuzzy judgments: which repo a new task belongs to, and comprehending the task
-well enough to write the worker's brief. Whether a message starts a new session or goes to an
+You own **only** the fuzzy judgments: which repo a new task belongs to, comprehending the task
+well enough to write the worker's brief, and proposing which live session a `to <name>:` meant when
+`<name>` matches none exactly (r5; the person confirms before anything is sent). Whether a message starts a new session or goes to an
 existing one is **not** yours to judge: it follows from the route words and the thread's tie (below).
 **Every other step is a deterministic `pan` subcommand** — never reimplement parsing, spawning,
 state, or posting by hand, and never decide a task's *mode* yourself.
@@ -22,15 +23,17 @@ Shell:
     pan inbox drain --json
 
 This atomically drains and clears the inbox (exactly-once, INV-6) and prints a JSON list. Each entry
-has four fields:
+has five fields:
 
 - `item` — the inbox event (`id`, `slack_user`, `channel`, `thread_ts`, `is_thread_reply`,
   `raw_text`, `received_at`, `source`).
 - `route` — the route words, parsed in code by `parse_route` (the gateway parses them when the
-  message arrives): `kind` (`task`, `new`, `to`, `sessions`, `forget`, `check` or `notice`),
-  `session` (the name after `to`), `text` (the message without the mention and the route word: the
-  task, or the text to send), `reply_in_slack` (the message says "reply in slack") and `notice`
-  (for `kind == "notice"`, the exact reply to post).
+  message arrives): `kind` (`task`, `new`, `to`, `sessions`, `forget`, `check`, `notice` or
+  `confirm`), `session` (the name after `to`), `text` (the message without the mention and the route
+  word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack"),
+  `notice` (for `kind == "notice"`, the exact reply to post) and `choice` (for `kind == "confirm"`:
+  `yes` or a number). The drain sets `confirm` itself: a `yes`, `y` or 1-3 reply in a thread where
+  pan asked "Send this to ...?" or "Which session?" less than 30 minutes ago.
 - `directive` — the result of the deterministic `parse_directive`, run on `route.text`: `mode`
   (`delegate`/`sessions`/`relay`/`read`), `target_stream` (from `--stream <name>`), `agent`,
   `target` (the relay/read selector), `message` (the relay text), `full` (read the full transcript),
@@ -41,6 +44,8 @@ has four fields:
   `spawning`, `running`, `idle`, `blocked`, `done` or `failed`) and `note`, a plain-words rule such as
   "this thread's work belongs to pan-7 (idle); send follow-ups there; never start a second session for
   the same work". Read when the inbox is drained, so it is current. Follow it.
+- `cancels_confirmation` — true when pan has an open "Send this to ...?" question in the thread and
+  this message is not a `yes`/number reply to it. Handle it before the route (step 4).
 
 If the list is empty, stop — there is nothing to do. Process the entries in the order returned.
 
@@ -52,6 +57,12 @@ route (or a route into a task) because the wording "feels" like one. The route w
 only the first word after the mention counts, spelled exactly, so "new login page" is a plain task
 and `new: login page` is a route. That is exactly the judgment INV-3 forbids; `route` and
 `directive` are authoritative.
+
+INV-3 has one bounded exception, the target of a `to <name>:` that `pan send` cannot match exactly
+(exit 28). There you read the message and the live sessions and propose up to 3 of them with
+`pan propose`; you never send. `pan propose` keeps only live terminal addresses, the person must
+reply `yes` or a number in the thread, and on that reply `pan confirm` checks the chosen session is
+still the same live terminal before sending. Nothing else about routing is yours to judge.
 
 ## 3. The thread's tie
 
@@ -66,7 +77,12 @@ Never rediscover a worker by scraping terminals — the thread map is authoritat
 
 ## 4. Route the item
 
-Act on `route.kind` first. In (r2) to (r5) the `pan` command posts its own reply through the single
+If `cancels_confirmation` is true, first drop pan's open question in the thread (it posts
+`Not sent.`), then carry on with the route below as usual:
+
+    pan confirm --thread <thread_ts> --channel <channel> --cancel
+
+Act on `route.kind` first. In (r2) to (r6) the `pan` command posts its own reply through the single
 Slack egress (INV-4), as is — never summarize, reword or repost its output.
 
 ### (r1) `route.kind == "notice"` — post the notice, do nothing else
@@ -105,30 +121,52 @@ It unties the thread and posts one line. It never stops the session.
 
 Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.session` may be several words
 (`to pan with slack:`); pass it whole and quoted. `route.text` is sent verbatim — do not rewrite it.
-The session may be one pan started or one of the person's own desk sessions. `pan send` resolves the
-selector against the live sessions, first match wins: exact address, exact name, exact Herdr label
-or space, the Plannotator Inbox thread the session writes (exact name, else every word), then every
-word in the session's name, label and folder (also tried when the thread is found but its session
-can't be reached). It types the text only if the session is idle
-(with one line on top saying it came from Slack and naming its Inbox thread, or, for a desk session
-whose thread pan does not know, saying to use its existing thread or start one), ties this thread
-to that session (its previous thread is untied) and posts "Sent to desk-api · Inbox: ...". When it
-refuses — an unknown selector (it lists close matches; for several words it also says to start new
-work with `@pan new: <your text>`), an ambiguous one (it posts a pick list), an Inbox thread whose
-session is not running, a busy session ("<name> is busy; try again, or @pan
-check"), or a session waiting on a prompt — it posts the short reply itself, types nothing and exits
-non-zero (20, 21, 26 or 23). Do nothing more: never retry, never fall back to spawning or to the
-tie.
+The session may be one pan started or one of the person's own desk sessions. `pan send` sends only
+to an exact match: the session's address, name, or Herdr label or space. It types the text only if
+the session is idle (with one line on top saying it came from Slack and naming its Inbox thread, or,
+for a desk session whose thread pan does not know, saying to use its existing thread or start one),
+ties this thread to that session (its previous thread is untied) and posts "Sent to desk-api ·
+Inbox: ...". A busy session ("<name> is busy; try again, or @pan check") or one waiting on a prompt
+gets the short reply from `pan send` itself, nothing typed, exit 26 or 23: do nothing more.
+
+**Exit 28: no exact match** (or a label several sessions share). Nothing was sent or posted. Propose
+the session the person most likely meant:
+
+1. Run `pan sessions --json` and read each live session's `address`, `name`, `where`, `cwd`,
+   `last_ask` and `inbox_thread_name`.
+2. Compare them with `route.session` and `route.text`: a name, label, folder or Inbox thread that
+   holds those words, or recent work on that topic. Pick the one most likely session; if two or
+   three fit about equally, pick those, most likely first; if none plausibly fits, pick none. Never
+   pick more than 3.
+3. Post the question (same flags as `pan send`, plus one `--candidate <address>` per pick):
+
+       pan propose --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack] [--candidate <address> ...]
+
+   With one candidate it asks "Send this to stream-pan (work / 1, folder pan)? Reply yes."; with
+   several, "Which session? Reply 1, 2 or 3:" and a numbered list; with none, it says no session
+   matches and how to start new work. Do nothing more: the person's reply arrives as a new item.
+
+Never spawn, retry `pan send`, or fall back to the tie for a `to` route.
 
 `to <name>:` from X is refused before it reaches you (the route is a notice): X may only start new
 sessions.
 
-### (r6) `route.kind == "new"` — start a new session even in a tied thread
+### (r6) `route.kind == "confirm"` — the person answered pan's question
+
+    pan confirm --thread <thread_ts> --channel <channel> --choice <route.choice>
+
+It sends the task stored by `pan propose` to the chosen session through the same path as `pan send`
+(busy and prompt refusals apply), ties the thread and posts "Sent to ...". A reply that picks
+nothing (`yes` to several, a number out of range) gets "Reply 1 or 2 to choose ..." and the
+question stays open; a chosen session that has ended gets a one-line reply (exit 20). Do nothing
+more in every case.
+
+### (r7) `route.kind == "new"` — start a new session even in a tied thread
 
 Go to (c) below with `directive.cleaned_text` as the task. In a tied thread the tie moves to the
 new session; the old session keeps running, untied.
 
-### (r7) `route.kind == "task"` — no route words
+### (r8) `route.kind == "task"` — no route words
 
 Use `directive.mode`, then the tie:
 
@@ -246,12 +284,13 @@ every turn end; otherwise Slack hears nothing more until someone writes `@pan ch
 
 Mechanical (always a `pan` subcommand — never hand-rolled): draining the inbox, reading the parsed
 route and directive, reading/writing the thread map, spawning, sending to a named session
-(`pan send`), checking (`pan check`), listing (`pan sessions`), untying (`pan forget`), posting to
-Slack. The
+(`pan send`), asking and acting on a confirmation (`pan propose`, `pan confirm`), checking
+(`pan check`), listing (`pan sessions`), untying (`pan forget`), posting to Slack. The
 gateway already authenticated the sender and added the `:eyes:` ack before the item reached the
 inbox — you never re-authenticate. Relaying into a live worker is `pan relay` too; never shell
 `hc` directly.
 
-Yours to judge (and the only place model reasoning belongs): which repo a new task targets, and
-writing a clear worker brief from the task prose. Whether to send to the tied session, a named
-session or a new one is never a judgment: follow the `route`, then the `tie`. Keep every other step deterministic.
+Yours to judge (and the only place model reasoning belongs): which repo a new task targets,
+writing a clear worker brief from the task prose, and which sessions to propose after `pan send`
+exits 28. Whether to send to the tied session, a named session or a new one is never a judgment:
+follow the `route`, then the `tie`; a proposed session gets the task only after the person replies. Keep every other step deterministic.

@@ -66,44 +66,39 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
-- `to <selector>:` routes by more than an exact id. The selector may be up to
-  `TO_ROUTE_SELECTOR_MAX_WORDS` (6) words, and `pan send --to` (`routing.route_session`) tries, first
-  match wins: exact address, exact terminal name, exact Herdr label or space (as before), then the
-  Plannotator Inbox thread the session writes (exact name, else every selector word starts a word of
-  the name, ignoring case; resolved threads are not listed), then every selector word in the live
-  session's name, Herdr label and folder name. Thread routing lists the open threads of the projects
-  of the distinct folders of live Claude sessions (at most `INBOX_ROUTE_MAX_PROJECTS`, 40), most
-  recently active folder first (a session's last status change, else its creation time, from hc's
-  `get`, fetched only for this step within `SESSION_ACTIVITY_BUDGET_SECONDS`, 2 s; new
-  `Terminal.status_changed_ms` and `Terminal.created_ms`), `INBOX_ROUTE_WORKERS` (8) at a time
-  within one overall budget of `INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8 s; a project that has not
-  answered is skipped with a log line, so a budget that runs out skips the stalest). Worktrees of one
-  repository are not merged before listing (a thread listed twice is kept once); reads the matching thread in full for the `author.session` of
-  its newest agent message (a message with no `created_at` counts as newer than every earlier one);
-  finds that session's folder from the first `cwd` in its transcript
-  (`~/.claude/projects/*/<id>.jsonl`, the most recently modified when there are several, at most
-  `SESSION_TRANSCRIPT_CWD_MAX_LINES` lines); and sends to the live Claude session in that folder.
-  When the thread step cannot reach one live session (several threads match, several sessions or
-  none run in the folder, or the session or its folder cannot be read), the words are still tried:
-  one match wins, several get their pick list, and only with none is the thread step's refusal
-  posted. New seams: `InboxDirectory.list_threads` and `InboxDirectory.latest_agent_session`
-  (ShellPlannotatorInboxAdapter) and `SessionFolders` (adapters/claude_transcripts.py,
-  `ClaudeTranscriptFolders`).
-- Routing replies: several sessions get a pick list, one line each with the exact name to use, its
-  Herdr label and folder; several Inbox threads are listed by name; a thread whose session is not
-  running gets "the session writing "<thread>" is not running; @pan sessions lists them". A selector
-  of several words that matches nothing gets 'no session matches "<selector>"; to start new work send
-  `@pan new: <your text>`' (with close matches when there are any); pan never starts a session from
-  `to`. A one-word selector's not-found reply is unchanged. `InboxThreadAmbiguousError` exits 21,
-  `ThreadSessionNotRunningError` (a `TargetNotFoundError`) 20.
+- `to <selector>:` with no exact match asks before sending. The selector may be up to
+  `TO_ROUTE_SELECTOR_MAX_WORDS` (6) words. `pan send --to` still sends at once to an exact match
+  (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits
+  28 (`NoExactMatchError`; a label several sessions share counts as no exact match and no longer
+  posts a pick list, and the close-matches not-found reply is gone). The orchestrator then reads the
+  message and `pan sessions --json` and proposes the likely session, up to 3, or none, with the new
+  `pan propose --thread --channel --to --task [--requester] [--reply-in-slack] --candidate <address>
+  ...`. It keeps only live terminal addresses (unknown or repeated ones are dropped, at most
+  `CONFIRMATION_MAX_CANDIDATES`, 3), stores the question per thread in `confirmations.json` next to
+  the thread map (`PendingConfirmation`, seam `PendingConfirmations`; not on `ThreadRecord`, because
+  a `to` in a new thread has no record) and posts "Send this to stream-pan (work / 1, folder pan)?
+  Reply yes.", or "Which session? Reply 1, 2 or 3:" with a numbered list; with no candidate it posts
+  'no session matches "<selector>"; to start new work send `@pan new: <your text>`' and stores
+  nothing. Nothing is typed into a session until the person replies.
+- Replies to that question are decided in code. `pan inbox drain` turns a `yes`, `y` or 1-3 reply
+  (`directive.parse_confirm_reply`, any case, optional mention) in a thread with a question younger
+  than `CONFIRMATION_TIMEOUT` (30 minutes) into the new route kind `confirm` (`Route.choice`), and
+  marks any other message there `cancels_confirmation`. A plain `yes` with no open question is
+  unchanged (it still goes to the tied session). The new `pan confirm --choice <yes|n>` sends the
+  stored task to the chosen session through the `to` send path (busy and prompt refusals apply; the
+  thread is tied), after checking it is still the same live terminal (same address and name);
+  `yes` to several or an out-of-range number asks again and keeps the question; a question that
+  expired is cleared with "Not sent: that question expired.". `pan confirm --cancel` clears the
+  question and posts "Not sent.", and the message is then handled as usual. The orchestrating skill
+  states this as the one bounded exception to INV-3.
 - A session pan did not start is told to use its existing Plannotator Inbox thread for the work if it
-  has one, otherwise to start one named `<session>: <task>`, unless pan knows its thread (routed by
-  the thread's name, or found earlier, including by a lookup of the suggested name just before
-  typing; that lookup is not repeated after the tie). A thread found by routing is recorded on the
-  thread record (name and id) so `check` uses it. pan's own workers are unchanged. Whether pan knows
-  a session's thread is one rule, `sessions.inbox_thread_known`, shared with `pan sessions`.
+  has one, otherwise to start one named `<session>: <task>`, unless pan knows its thread (found
+  earlier, including by a lookup of the suggested name just before typing; that lookup is not
+  repeated after the tie). A thread found that way is recorded on the thread record (name and id) so
+  `check` uses it. pan's own workers are unchanged. Whether pan knows a session's thread is one rule,
+  `sessions.inbox_thread_known`, shared with `pan sessions`.
 - `pan sessions` shows each session's Inbox thread under its row when pan knows it
-  (`SessionSummary.inbox_thread_name`), so the person sees what to type after `to`.
+  (`SessionSummary.inbox_thread_name`), which also helps the orchestrator propose a session.
 - `pan service install|uninstall|status`: pan starts by itself after a login or reboot on macOS.
   `install` renders the gateway, watcher and up LaunchAgents into
   `~/Library/LaunchAgents/com.pan.<name>.plist` (home directory and the absolute path of the

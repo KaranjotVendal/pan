@@ -5,16 +5,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from inbox_fakes import FakeInboxDirectory, FakeSessionFolders
+from inbox_fakes import FakeInboxDirectory
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import (
-    InboxThreadAmbiguousError,
+    NoExactMatchError,
     PanError,
     SessionBusyError,
-    TargetAmbiguousError,
     TargetBlockedError,
-    TargetNotFoundError,
     TerminalGoneError,
     ThreadNotFoundError,
 )
@@ -112,7 +110,6 @@ def _send(
     *,
     reply_in_slack: bool = False,
     inbox_directory: FakeInboxDirectory | None = None,
-    session_folders: FakeSessionFolders | None = None,
 ) -> ThreadRecord:
     return send_to_session(
         thread_ts=_NEW_THREAD,
@@ -124,7 +121,6 @@ def _send(
         terminal_host=terminal_host,
         thread_map=thread_map,
         inbox_directory=inbox_directory if inbox_directory is not None else FakeInboxDirectory(),
-        session_folders=session_folders if session_folders is not None else FakeSessionFolders(),
         slack=slack,
         clock=FixedClock(),
     )
@@ -177,39 +173,6 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
 @pytest.mark.parametrize(
     "selector, terminals, records, expected_error, expected_reply",
     [
-        (
-            "pan-8",
-            [make_terminal("t7", name="pan-7"), make_terminal("t9", name="desk-api")],
-            [_record()],
-            TargetNotFoundError,
-            "no live session named pan-8; close matches: pan-7",
-        ),
-        (
-            "nothing-like-it",
-            [make_terminal("t7", name="pan-7")],
-            [_record()],
-            TargetNotFoundError,
-            "no live session named nothing-like-it; @pan sessions lists them",
-        ),
-        (
-            "web",
-            [
-                make_terminal("t3", where="web / one"),
-                make_terminal("t4", where="web / two"),
-            ],
-            [],
-            TargetAmbiguousError,
-            "web matches more than one session; use one of these names:\n"
-            "- `t3` · web / one · folder x\n"
-            "- `t4` · web / two · folder x",
-        ),
-        (
-            "desk-apu",
-            [make_terminal("t9", name="desk-api")],
-            [],
-            TargetNotFoundError,
-            "no live session named desk-apu; close matches: desk-api",
-        ),
         (
             "pan-7",
             [make_terminal("t7", name="pan-7", agent_status=AgentStatus.WORKING)],
@@ -265,10 +228,6 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
         ),
     ],
     ids=[
-        "unknown-close-match",
-        "unknown-no-match",
-        "ambiguous",
-        "desk-session-close-match",
         "busy-pan-session",
         "busy-desk-session",
         "no-status-after-a-turn-counts-as-busy",
@@ -943,102 +902,6 @@ def test_check_without_a_transcript_posts_cleaned_screen_text(tmp_path: Path) ->
     ]
 
 
-_REPO = Path("/tmp/repo").resolve()
-_SLACK_THREAD = InboxThread(thread_id="thr_1", name="pan with Slack and X")
-
-
-def test_send_by_inbox_thread_name_names_that_thread_and_records_it(tmp_path: Path) -> None:
-    thread_map = _thread_map(tmp_path)
-    terminal_host = _host(make_terminal("t3", where="work / pan", cwd=_REPO))
-    slack = RecordingSlack()
-
-    _send(
-        terminal_host,
-        thread_map,
-        slack,
-        "pan with slack",
-        inbox_directory=FakeInboxDirectory(
-            listings={_REPO: [_SLACK_THREAD]}, sessions={"thr_1": "session-1"}
-        ),
-        session_folders=FakeSessionFolders({"session-1": _REPO}),
-    )
-
-    assert terminal_host.sent == [
-        ("t3", from_slack_text("pan with Slack and X", "add the tests", ReplyMode.ON_DEMAND))
-    ]
-    tied = thread_map.get(_NEW_THREAD)
-    assert tied is not None
-    assert tied.started_by_pan is False
-    assert tied.inbox_thread_name == "pan with Slack and X"
-    assert tied.inbox_thread_id == "thr_1"
-    assert slack.texts() == ['Sent to t3 · Inbox thread: "pan with Slack and X"']
-
-
-@pytest.mark.parametrize(
-    "selector, terminals, inbox_directory, expected_error, expected_reply",
-    [
-        (
-            "pan with slack",
-            [make_terminal("t4", cwd=Path("/tmp/other"))],
-            FakeInboxDirectory(
-                listings={Path("/tmp/other").resolve(): [_SLACK_THREAD]},
-                sessions={"thr_1": "session-1"},
-            ),
-            TargetNotFoundError,
-            'the session writing "pan with Slack and X" is not running; @pan sessions lists them',
-        ),
-        (
-            "pan",
-            [make_terminal("t3", cwd=_REPO)],
-            FakeInboxDirectory(
-                listings={_REPO: [_SLACK_THREAD, InboxThread(thread_id="thr_2", name="pan docs")]}
-            ),
-            InboxThreadAmbiguousError,
-            'pan matches more than one Inbox thread: "pan with Slack and X", "pan docs"; '
-            "use more of its words",
-        ),
-        (
-            "api",
-            [
-                make_terminal("t8", name="desk-api", where="work / api", cwd=Path("/tmp/api")),
-                make_terminal("t9", where="work / docs", cwd=Path("/tmp/api-docs")),
-            ],
-            FakeInboxDirectory(),
-            TargetAmbiguousError,
-            "api matches more than one session; use one of these names:\n"
-            "- `desk-api` · work / api · folder api\n"
-            "- `t9` · work / docs · folder api-docs",
-        ),
-    ],
-    ids=["thread-writer-not-running", "several-threads", "pick-list-by-words"],
-)
-def test_send_routing_refusals_reply_and_send_nothing(
-    tmp_path: Path,
-    selector: str,
-    terminals: list[object],
-    inbox_directory: FakeInboxDirectory,
-    expected_error: type[PanError],
-    expected_reply: str,
-) -> None:
-    thread_map = _thread_map(tmp_path)
-    terminal_host = _host(*terminals)
-    slack = RecordingSlack()
-
-    with pytest.raises(expected_error):
-        _send(
-            terminal_host,
-            thread_map,
-            slack,
-            selector,
-            inbox_directory=inbox_directory,
-            session_folders=FakeSessionFolders({"session-1": _REPO}),
-        )
-
-    assert terminal_host.sent == []
-    assert thread_map.get(_NEW_THREAD) is None
-    assert slack.texts() == [expected_reply]
-
-
 def test_send_to_a_desk_session_whose_suggested_thread_exists_names_it(tmp_path: Path) -> None:
     desk_folder = Path("/tmp/desk/api")
     earlier = _record(
@@ -1069,42 +932,28 @@ def test_send_to_a_desk_session_whose_suggested_thread_exists_names_it(tmp_path:
 
 
 @pytest.mark.parametrize(
-    "selector, terminals, expected_reply",
+    "selector, terminals",
     [
-        (
-            "fix the login bug",
-            [make_terminal("t7", name="pan-7")],
-            'no session matches "fix the login bug"; to start new work send '
-            "`@pan new: <your text>`",
-        ),
-        (
-            "pan 7b",
-            [make_terminal("t7", name="pan-7a")],
-            'no session matches "pan 7b"; close matches: pan-7a; to start new work send '
-            "`@pan new: <your text>`",
-        ),
-        (
-            "pan-8",
-            [make_terminal("t7", name="pan-7")],
-            "no live session named pan-8; close matches: pan-7",
-        ),
+        ("pan-8", [make_terminal("t7", name="pan-7")]),
+        ("fix the login bug", [make_terminal("t7", name="pan-7")]),
+        ("web", [make_terminal("t3", where="web / one"), make_terminal("t4", where="web / two")]),
     ],
-    ids=["sentence-no-match", "several-words-with-a-close-match", "one-word-unchanged"],
+    ids=["unknown-name", "sentence", "label-several-sessions-share"],
 )
-def test_send_to_a_selector_matching_nothing_starts_nothing(
-    tmp_path: Path, selector: str, terminals: list[object], expected_reply: str
+def test_send_without_an_exact_match_sends_and_posts_nothing(
+    tmp_path: Path, selector: str, terminals: list[object]
 ) -> None:
     thread_map = _thread_map(tmp_path)
     terminal_host = _host(*terminals)
     slack = RecordingSlack()
 
-    with pytest.raises(TargetNotFoundError):
+    with pytest.raises(NoExactMatchError):
         _send(terminal_host, thread_map, slack, selector)
 
     assert terminal_host.sent == []
     assert terminal_host.runs == []
     assert thread_map.get(_NEW_THREAD) is None
-    assert slack.texts() == [expected_reply]
+    assert slack.texts() == []
 
 
 def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:

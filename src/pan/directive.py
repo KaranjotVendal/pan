@@ -255,3 +255,20 @@ def _parse_route_words(raw_text: str) -> Route:
             return Route(kind=RouteKind.NOTICE, text=text, notice=notice)
 
     return Route(kind=RouteKind.TASK, text=text, reply_in_slack=reply_in_slack)
+
+
+# A reply to pan's open question asking which session should get a task (`pan propose`):
+# the whole message is `yes` or `y` (any case) or a number from 1 to 3, optionally after the
+# mention and with a closing `.` or `!`. Whether a question is open is not known here;
+# `pan inbox drain` checks that before turning the reply into a CONFIRM route.
+_CONFIRM_REPLY = re.compile(r"^(yes|y|[1-3])[.!]?$", re.IGNORECASE)
+CONFIRM_YES = "yes"
+
+
+def parse_confirm_reply(raw_text: str) -> str | None:
+    # `yes` for yes or y, the digit for a number, else None.
+    reply_match = _CONFIRM_REPLY.match(_clean_message(raw_text))
+    if reply_match is None:
+        return None
+    reply = reply_match.group(1).lower()
+    return CONFIRM_YES if reply in {"yes", "y"} else reply

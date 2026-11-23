@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +15,13 @@ from typer.testing import CliRunner
 
 import pan.cli as cli
 from pan.adapters.hc import HcError, ShellHcAdapter
+from pan.confirmations import FilePendingConfirmations, confirmations_path
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
     InboxError,
+    NoExactMatchError,
     NotPanSessionError,
     PanError,
     ServiceError,
@@ -40,9 +42,11 @@ from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
 from pan.models import (
     AgentStatus,
+    ConfirmationCandidate,
     InboxItem,
     LaunchdJobState,
     PanConfig,
+    PendingConfirmation,
     ReplyMode,
     Route,
     RouteKind,
@@ -138,6 +142,7 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "text": "fix the login page --stream login",
                 "reply_in_slack": False,
                 "notice": None,
+                "choice": None,
             },
             "fix the login page",
         ),
@@ -150,6 +155,7 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "text": "fix it, reply in slack",
                 "reply_in_slack": True,
                 "notice": None,
+                "choice": None,
             },
             "fix it, reply in slack",
         ),
@@ -631,6 +637,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (NotPanSessionError("x"), 25),
         (SessionBusyError("x"), 26),
         (ServiceError("x"), 27),
+        (NoExactMatchError("x"), 28),
         (PanError("x"), 1),
     ],
 )
@@ -1080,6 +1087,149 @@ def test_inbox_drain_refuses_a_to_route_from_x(
     assert entry["route"]["notice"] == (
         "messages from X cannot use to <name>: yet; they can only start new sessions"
     )
+
+
+def _store_question(config: PanConfig, asked_minutes_ago: int) -> None:
+    FilePendingConfirmations(confirmations_path(config.paths.threads)).put(
+        PendingConfirmation(
+            thread_ts="1718000000.000200",
+            channel="C1",
+            selector="pan docs",
+            task="add the tests",
+            candidates=[ConfirmationCandidate(address="t3", label="t3 (folder pan)")],
+            created_at=datetime.now(tz=UTC) - timedelta(minutes=asked_minutes_ago),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_text, asked_minutes_ago, expected_kind, expected_choice, expected_cancels",
+    [
+        ("<@U0TEST> Yes", 1, "confirm", "yes", False),
+        ("2", 1, "confirm", "2", False),
+        ("no", 1, "task", None, True),
+        ("to desk-api: add the docs", 1, "to", None, True),
+        ("yes", 31, "task", None, False),
+    ],
+    ids=["yes-with-mention", "number", "no-cancels", "new-route-cancels", "expired-question"],
+)
+def test_inbox_drain_turns_a_reply_to_an_open_question_into_a_confirm_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_text: str,
+    asked_minutes_ago: int,
+    expected_kind: str,
+    expected_choice: str | None,
+    expected_cancels: bool,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _store_question(config, asked_minutes_ago)
+    item = _item("Ev1").model_copy(
+        update={"raw_text": raw_text, "route": cli.parse_route(raw_text)}
+    )
+    FileInboxStore(config.paths.inbox).append(item)
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    (entry,) = json.loads(result.stdout)
+    assert entry["route"]["kind"] == expected_kind
+    assert entry["route"]["choice"] == expected_choice
+    assert entry["cancels_confirmation"] is expected_cancels
+
+
+def test_inbox_drain_leaves_a_yes_alone_without_an_open_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    FileInboxStore(config.paths.inbox).append(_item("Ev1").model_copy(update={"raw_text": "yes"}))
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    (entry,) = json.loads(result.stdout)
+    assert entry["route"]["kind"] == "task"
+    assert entry["cancels_confirmation"] is False
+
+
+def test_propose_command_wires_to_propose_sessions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "propose_sessions", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "propose",
+            "--thread",
+            "t-1",
+            "--channel",
+            "C0TEST",
+            "--to",
+            "pan docs",
+            "--task",
+            "add the tests",
+            "--candidate",
+            "t3",
+            "--candidate",
+            "t4",
+            "--requester",
+            "U0TEST",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["selector"] == "pan docs"
+    assert captured["task"] == "add the tests"
+    assert captured["candidate_addresses"] == ["t3", "t4"]
+    assert captured["requester"] == "U0TEST"
+    assert captured["reply_in_slack"] is False
+    assert captured["terminal_host"] is terminal_host
+    assert captured["slack"] is slack
+
+
+@pytest.mark.parametrize(
+    "arguments, expected_call",
+    [
+        (["--choice", "2"], "confirm_session"),
+        (["--cancel"], "cancel_confirmation"),
+    ],
+    ids=["choice", "cancel"],
+)
+def test_confirm_command_wires_the_reply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str], expected_call: str
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    _use_slack(monkeypatch)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for name in ("confirm_session", "cancel_confirmation"):
+        monkeypatch.setattr(cli, name, lambda name=name, **kwargs: calls.append((name, kwargs)))
+
+    result = runner.invoke(
+        cli.app, ["confirm", "--thread", "t-1", "--channel", "C0TEST", *arguments]
+    )
+
+    assert result.exit_code == 0
+    ((called, kwargs),) = calls
+    assert called == expected_call
+    assert kwargs["thread_ts"] == "t-1"
+
+
+@pytest.mark.parametrize("arguments", [[], ["--choice", "1", "--cancel"]], ids=["neither", "both"])
+def test_confirm_command_needs_exactly_one_of_choice_or_cancel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str]
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+
+    result = runner.invoke(
+        cli.app, ["confirm", "--thread", "t-1", "--channel", "C0TEST", *arguments]
+    )
+
+    assert result.exit_code != 0
 
 
 @pytest.fixture

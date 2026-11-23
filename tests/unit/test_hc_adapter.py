@@ -54,8 +54,6 @@ GET_OUTPUT = {
     "parent": None,
     "state": "live",
     "status": {"app": "claude-code", "msg": "Reading files", "state": "blocked"},
-    "status_ms": 1700000500000,
-    "created_ms": 1700000000000,
     "turn": 0,
 }
 GET_SHELL_OUTPUT = {
@@ -178,8 +176,6 @@ def test_get_parses_the_status_object_and_where_label(monkeypatch: pytest.Monkey
     assert terminal.agent_status is AgentStatus.BLOCKED
     assert terminal.where == "repo-b / 1"
     assert terminal.cwd == Path("/repo/b")
-    assert terminal.status_changed_ms == 1700000500000
-    assert terminal.created_ms == 1700000000000
 
 
 def test_get_of_a_finished_shell_has_no_agent_status(monkeypatch: pytest.MonkeyPatch) -> None:

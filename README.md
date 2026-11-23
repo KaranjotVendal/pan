@@ -167,7 +167,7 @@ runs once the actuation lands.
 | `pan service install\|uninstall\|status` | Install and load, remove, or inspect the gateway, watcher and up LaunchAgents (macOS). |
 | `pan config set-token` | Write `~/.pan/credentials.json` at mode 0600 (prompts). |
 | `pan config show` | Print the resolved config, credentials masked. |
-| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its route, its parsed directive and its thread's tie. |
+| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its route, its parsed directive and its thread's tie; a `yes`/1-3 reply to an open `pan propose` question becomes a `confirm` route, and any other message there is marked `cancels_confirmation`. |
 | `pan up` | Start the orchestrator if needed, mark lost workers failed, wake it (idempotent). |
 | `pan spawn --thread … --task … --channel …` | Create worktree + hc terminal + worker; tie the thread to it; post the start notice naming its Inbox thread. |
 | `pan reopen --thread … --task …` | Reopen a finished or lost worker in its worktree, continuing its conversation. |
@@ -176,7 +176,9 @@ runs once the actuation lands.
 | `pan status --thread …` | Report a worker's live status (from its hc terminal). |
 | `pan sessions [--json] [--thread … --channel …]` | List every live hc terminal with the last thing each was asked, marking pan-owned ones and status drift; with `--thread` and `--channel`, post the table to that thread. |
 | `pan check --thread … --channel …` | Post the tied session's latest answer to the thread as is (its transcript's last answer, or its screen lines), with its Inbox thread and whether it is still working or waiting on a prompt. |
-| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. Without `--to`, send a follow-up to the thread's tied session. A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
+| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. `--to` must match exactly (address, name, or Herdr label or space); otherwise nothing is sent or posted and it exits 28. Without `--to`, send a follow-up to the thread's tied session. A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
+| `pan propose --thread … --channel … --to … --task … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
+| `pan confirm --thread … --channel … --choice <yes\|n>` / `--cancel` | Act on the reply to that question: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
 | `pan relay <target> <message>` | Send a message into a live terminal (address, name, or Herdr app label). |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
@@ -195,7 +197,7 @@ first word after the mention, spelled exactly, in any letter case; anything else
 | --- | --- |
 | `<task>` | In a new or untied thread, start a new session in a new worktree. In a tied thread, send it to the tied session. |
 | `new: <task>` | Start a new session even in a tied thread; the tie moves to it, the old session keeps running. The colon is required ("new login page" is a plain task). |
-| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (up to six words) is tried in order: exact address, exact terminal name, exact Herdr label or space, the Plannotator Inbox thread the session writes (exact name, else every word: `to pan with slack:`), then every word in the session's name, label and folder. If the Inbox thread is found but its session can't be reached, the words are still tried. Several matches get a pick list of exact names; an unknown name gets a reply listing close matches (for a selector of several words, also how to start new work with `new:`; pan never starts a session from `to`); a busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
+| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (up to six words) that exactly matches a session's address, terminal name, or Herdr label or space sends at once. Otherwise pan sends nothing: it proposes the session you most likely meant ("Send this to stream-pan (work / 1, folder pan)? Reply yes.") or up to three ("Which session? Reply 1, 2 or 3:"), and sends only when you reply `yes` or a number in the thread within 30 minutes; any other reply cancels ("Not sent."). With no likely session it says how to start new work with `new:`; pan never starts a session from `to`. A busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
 | `check` | Post the tied session's latest answer here. The whole message must be just this word. |
 | `sessions` | List live sessions: name, idle or busy, last ask, and the Inbox thread when pan knows it. Also `--sessions`. |
 | `forget` | Untie the thread; the session keeps running. |
@@ -209,19 +211,16 @@ first word after the mention, spelled exactly, in any letter case; anything else
 `to <name>:` reaches any live session, including desk sessions pan did not start. pan types the task
 only when the session is idle (busy, or a state pan cannot read, is refused; waiting on a prompt is
 refused too), with one line on top saying it came from Slack via pan and naming the Plannotator Inbox
-thread to use. When pan knows the session's thread (you routed by its name, or pan found it
-earlier) the line names it; otherwise it says to keep using the session's existing thread for this
-work, or to start one named `<name>: <short task>`.
+thread to use. When pan knows the session's thread (pan found it earlier) the line names it;
+otherwise it says to keep using the session's existing thread for this work, or to start one named
+`<name>: <short task>`.
 
-To reach a session by its Inbox thread, pan lists the open threads of the projects of the live
-Claude sessions (`plannotator inbox call read_thread`, read only, at most `INBOX_ROUTE_MAX_PROJECTS`
-(40) projects, most recently active first, `INBOX_ROUTE_WORKERS` (8) at a time), reads the matching thread's newest agent message for its Claude session id, finds that
-session's folder from the first lines of its transcript under `~/.claude/projects`, and sends to the
-live Claude session in that folder. pan waits at most
-`INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8) for them in total; a project that has not answered is
-skipped, so the stalest go first. When no live session runs in that folder and no session matches the words either, pan
-replies that the session writing the thread is not running. Follow-ups in the thread go to
-the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
+The proposal is the one place the orchestrator Claude judges a target. It only proposes: `pan
+propose` keeps only live terminal addresses, the question is stored per thread in
+`~/.pan/confirmations.json` (next to the thread map), and on your `yes` or number `pan confirm`
+checks the session is still the same live terminal before typing.
+
+Follow-ups in the thread go to the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
 only unties it, and when it has ended pan says so and suggests `new:` or `to <name>:`. Desk sessions
 have no pan hooks, so `check` looks their Inbox thread up by name (`plannotator inbox call
 read_thread`, read only); when it is not found, only the name is shown.

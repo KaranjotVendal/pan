@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pan.models import InboxThread, Terminal
+    from pan.models import Terminal
 
 
 class PanError(Exception): ...
@@ -55,21 +55,10 @@ class GatedOpDeniedError(PanError): ...
 class TargetNotFoundError(PanError): ...
 
 
-# `to <selector>:` matched an Inbox thread, but no live Claude session runs in the folder of
-# the session that writes it.
-class ThreadSessionNotRunningError(TargetNotFoundError):
-    def __init__(self, thread_name: str) -> None:
-        self.thread_name = thread_name
-        super().__init__(f"the session writing the Inbox thread '{thread_name}' is not running")
-
-
-# `to <selector>:` matched more than one open Inbox thread by its words.
-class InboxThreadAmbiguousError(PanError):
-    def __init__(self, selector: str, threads: list[InboxThread]) -> None:
-        self.selector = selector
-        self.threads = threads
-        names = "; ".join(thread.name for thread in threads)
-        super().__init__(f"selector '{selector}' matches more than one Inbox thread: {names}")
+# `pan send --to <selector>` found no exact match (or several sessions share the label), so
+# nothing was sent and nothing was posted: the orchestrator proposes a session with
+# `pan propose` and the person confirms it in the thread.
+class NoExactMatchError(PanError): ...
 
 
 # The session was not started by pan (a desk session): pan never stops, removes or reopens
