@@ -310,6 +310,42 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     ]
 
 
+@pytest.mark.parametrize(
+    "started_by_pan, inbox_thread_id, expected_thread_known",
+    [(True, None, True), (False, "thr_9", True), (False, None, False)],
+    ids=["pan-worker", "desk-session-with-a-found-thread", "desk-session-thread-unknown"],
+)
+def test_send_to_a_session_whose_record_has_no_thread_name_uses_the_shared_known_rule(
+    tmp_path: Path,
+    started_by_pan: bool,
+    inbox_thread_id: str | None,
+    expected_thread_known: bool,
+) -> None:
+    earlier = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=started_by_pan,
+        inbox_thread_name=None,
+        inbox_thread_id=inbox_thread_id,
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    terminal_host = _host(make_terminal("t9", name="desk-api"))
+
+    _send(terminal_host, thread_map, RecordingSlack(), "desk-api")
+
+    assert terminal_host.sent == [
+        (
+            "t9",
+            from_slack_text(
+                "desk-api: add the tests",
+                "add the tests",
+                ReplyMode.ON_DEMAND,
+                thread_known=expected_thread_known,
+            ),
+        )
+    ]
+
+
 def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found_link(
     tmp_path: Path,
 ) -> None:

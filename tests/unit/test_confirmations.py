@@ -11,6 +11,7 @@ from pan.confirmations import (
     EXPIRED_REPLY,
     NOT_SENT_REPLY,
     FilePendingConfirmations,
+    OpenQuestions,
     cancel_confirmation,
     candidate_label,
     confirm_session,
@@ -18,7 +19,7 @@ from pan.confirmations import (
     question_text,
     route_with_pending,
 )
-from pan.errors import SessionBusyError, TargetNotFoundError
+from pan.errors import SessionBusyError, TargetBlockedError, TargetNotFoundError
 from pan.models import (
     AgentStatus,
     ConfirmationCandidate,
@@ -98,9 +99,15 @@ def _question(
 
 
 _PAN_CANDIDATE = ConfirmationCandidate(
-    address="t3", name="stream-pan", label="stream-pan (work / 1, folder pan)"
+    address="t3",
+    name="stream-pan",
+    cwd=_PAN_FOLDER,
+    where="work / 1",
+    label="stream-pan (work / 1, folder pan)",
 )
-_DOCS_CANDIDATE = ConfirmationCandidate(address="t4", label="t4 (work / 2, folder docs)")
+_DOCS_CANDIDATE = ConfirmationCandidate(
+    address="t4", cwd=_DOCS_FOLDER, where="work / 2", label="t4 (work / 2, folder docs)"
+)
 
 
 def _propose(
@@ -140,6 +147,64 @@ def _confirm(
         slack=slack,
         clock=clock if clock is not None else SettableClock(),
     )
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [b"{not json", b"[1, 2]", b"\xff\xfe", b'{"slack:1": {"thread_ts": 5}}'],
+    ids=["not-json", "not-an-object", "not-text", "malformed-entry"],
+)
+def test_store_reads_a_damaged_file_as_no_questions(tmp_path: Path, contents: bytes) -> None:
+    (tmp_path / "confirmations.json").write_bytes(contents)
+    store = _store(tmp_path)
+
+    assert store.all_pending() == []
+    assert store.get(ThreadSource.SLACK, _THREAD) is None
+    store.put(_question(_PAN_CANDIDATE))
+    assert store.all_pending() == [_question(_PAN_CANDIDATE)]
+
+
+def test_store_reads_a_folder_in_its_place_as_no_questions(tmp_path: Path) -> None:
+    (tmp_path / "confirmations.json").mkdir()
+
+    assert _store(tmp_path).all_pending() == []
+
+
+@pytest.mark.parametrize(
+    "replies, expected",
+    [
+        (["yes", "yes"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
+        (["no", "2"], [(RouteKind.TASK, True), (RouteKind.TASK, False)]),
+        (["2", "no"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
+    ],
+    ids=["answered-once", "cancelled-then-number", "answered-then-other"],
+)
+def test_open_questions_close_once_answered_in_a_batch(
+    replies: list[str], expected: list[tuple[RouteKind, bool]]
+) -> None:
+    open_questions = OpenQuestions([_question(_PAN_CANDIDATE)])
+    now = _ASKED_AT + timedelta(minutes=1)
+
+    routed = [
+        open_questions.route(Route(text=reply), ThreadSource.SLACK, _THREAD, reply, now)
+        for reply in replies
+    ]
+
+    assert [(route.kind, cancels) for route, cancels in routed] == expected
+
+
+def test_open_questions_keep_other_threads_open() -> None:
+    open_questions = OpenQuestions(
+        [_question(_PAN_CANDIDATE), _question(_PAN_CANDIDATE, thread_ts="other")]
+    )
+    now = _ASKED_AT + timedelta(minutes=1)
+
+    open_questions.route(Route(text="yes"), ThreadSource.SLACK, _THREAD, "yes", now)
+    route, _cancels = open_questions.route(
+        Route(text="yes"), ThreadSource.SLACK, "other", "yes", now
+    )
+
+    assert route.kind is RouteKind.CONFIRM
 
 
 def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Path) -> None:
@@ -321,6 +386,16 @@ def test_confirm_with_a_reply_that_picks_nothing_asks_again(
     assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
 
 
+def test_confirm_with_no_question_posts_nothing(tmp_path: Path) -> None:
+    terminal_host = _host(_pan_session())
+    slack = RecordingSlack()
+
+    assert _confirm(tmp_path, terminal_host, slack, "yes") is None
+
+    assert terminal_host.sent == []
+    assert slack.texts() == []
+
+
 def test_confirm_after_the_question_expired_sends_nothing(tmp_path: Path) -> None:
     _store(tmp_path).put(_question(_PAN_CANDIDATE))
     terminal_host = _host(_pan_session())
@@ -335,14 +410,26 @@ def test_confirm_after_the_question_expired_sends_nothing(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "terminals",
-    [[], [_pan_session(name="other-session")], [_pan_session(state=TerminalState.FINISHED)]],
-    ids=["gone", "address-reused-by-another-session", "finished"],
+    "candidate, terminals",
+    [
+        (_PAN_CANDIDATE, []),
+        (_PAN_CANDIDATE, [_pan_session(name="other-session")]),
+        (_PAN_CANDIDATE, [_pan_session(state=TerminalState.FINISHED)]),
+        (_DOCS_CANDIDATE, [make_terminal("t4", where="work / 2", cwd=Path("/tmp/elsewhere"))]),
+        (_DOCS_CANDIDATE, [make_terminal("t4", where="work / 9", cwd=_DOCS_FOLDER)]),
+    ],
+    ids=[
+        "gone",
+        "address-reused-by-another-session",
+        "finished",
+        "unnamed-in-another-folder",
+        "unnamed-with-another-label",
+    ],
 )
 def test_confirm_to_a_session_no_longer_running_sends_nothing(
-    tmp_path: Path, terminals: list[Terminal]
+    tmp_path: Path, candidate: ConfirmationCandidate, terminals: list[Terminal]
 ) -> None:
-    _store(tmp_path).put(_question(_PAN_CANDIDATE))
+    _store(tmp_path).put(_question(candidate))
     terminal_host = _host(*terminals)
     slack = RecordingSlack()
 
@@ -350,21 +437,49 @@ def test_confirm_to_a_session_no_longer_running_sends_nothing(
         _confirm(tmp_path, terminal_host, slack, "yes")
 
     assert terminal_host.sent == []
-    assert slack.texts() == ["stream-pan (work / 1, folder pan) is no longer running; not sent"]
+    assert slack.texts() == [f"{candidate.label} is no longer running; not sent"]
     assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
 
 
-def test_confirm_to_a_busy_session_is_refused_and_the_question_cleared(tmp_path: Path) -> None:
-    _store(tmp_path).put(_question(_PAN_CANDIDATE))
-    terminal_host = _host(_pan_session(agent_status=AgentStatus.WORKING))
+@pytest.mark.parametrize(
+    "candidates, choice, session, expected_error, expected_reply",
+    [
+        (
+            [_PAN_CANDIDATE],
+            "yes",
+            _pan_session(agent_status=AgentStatus.WORKING),
+            SessionBusyError,
+            "stream-pan is busy; reply yes again later, or anything else to cancel.",
+        ),
+        (
+            [_DOCS_CANDIDATE, _PAN_CANDIDATE],
+            "2",
+            _pan_session(agent_status=AgentStatus.BLOCKED),
+            TargetBlockedError,
+            "stream-pan is waiting on a prompt at the terminal; nothing was sent; "
+            "reply 2 again later, or anything else to cancel.",
+        ),
+    ],
+    ids=["busy", "waiting-on-a-prompt"],
+)
+def test_confirm_to_a_session_not_ready_keeps_the_question_open(
+    tmp_path: Path,
+    candidates: list[ConfirmationCandidate],
+    choice: str,
+    session: Terminal,
+    expected_error: type[Exception],
+    expected_reply: str,
+) -> None:
+    _store(tmp_path).put(_question(*candidates))
+    terminal_host = _host(session, _docs_session())
     slack = RecordingSlack()
 
-    with pytest.raises(SessionBusyError):
-        _confirm(tmp_path, terminal_host, slack, "yes")
+    with pytest.raises(expected_error):
+        _confirm(tmp_path, terminal_host, slack, choice)
 
     assert terminal_host.sent == []
-    assert slack.texts() == ["stream-pan is busy; try again, or @pan check"]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert slack.texts() == [expected_reply]
+    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(*candidates)
 
 
 @pytest.mark.parametrize(

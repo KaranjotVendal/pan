@@ -123,12 +123,13 @@ def from_slack_text(
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
 
 
-def _busy_reply(name: str) -> str:
-    return f"{name} is busy; try again, or @pan check"
+def _busy_reply(name: str, retry_hint: str | None = None) -> str:
+    return f"{name} is busy; {retry_hint or 'try again, or @pan check'}"
 
 
-def _blocked_reply(name: str) -> str:
-    return f"{name} is waiting on a prompt at the terminal; nothing was sent"
+def _blocked_reply(name: str, retry_hint: str | None = None) -> str:
+    reply = f"{name} is waiting on a prompt at the terminal; nothing was sent"
+    return f"{reply}; {retry_hint}" if retry_hint else reply
 
 
 def _is_ready(terminal: Terminal) -> bool:
@@ -153,22 +154,24 @@ def _deliver(
     slack: SlackAdapter,
     channel: str,
     thread_ts: str,
+    retry_hint: str | None = None,
 ) -> None:
     # Type the text only into a session that is ready for it. Busy, or a state pan cannot
     # read, is refused (typing could land in the middle of someone's work there); waiting on
     # a person is refused too, by pan here or by the host at the send. A refusal posts a
-    # short reply and raises, with nothing typed.
+    # short reply and raises, with nothing typed; `retry_hint`, when given, is what that reply
+    # tells the person to do next.
     name = _session_name(terminal)
     if terminal.agent_status is AgentStatus.BLOCKED:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name))
+        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
         raise TargetBlockedError(f"{terminal.address} is waiting on a person")
     if not _is_ready(terminal):
-        slack_post(slack, channel, thread_ts, _busy_reply(name))
+        slack_post(slack, channel, thread_ts, _busy_reply(name, retry_hint))
         raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
     try:
         terminal_host.send(terminal.address, text)
     except TargetBlockedError:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name))
+        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
         raise
 
 
@@ -223,6 +226,7 @@ def send_to_session(
     inbox_directory: InboxDirectory,
     slack: SlackAdapter,
     clock: Clock,
+    retry_hint: str | None = None,
 ) -> ThreadRecord:
     # `to <selector>: <task>`: send the task to the live session the selector names exactly
     # (address, name, or Herdr label or space; see resolve_target), pan's own or a desk
@@ -257,7 +261,7 @@ def send_to_session(
         thread_known = inbox_thread_known(session_record)
     else:
         inbox_thread = inbox_thread_name(name, text)
-        thread_known = session_record is not None and session_record.started_by_pan
+        thread_known = session_record is not None and inbox_thread_known(session_record)
     reply_mode = ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND
     _deliver(
         terminal_host,
@@ -266,6 +270,7 @@ def send_to_session(
         slack=slack,
         channel=channel,
         thread_ts=thread_ts,
+        retry_hint=retry_hint,
     )
 
     now = clock.now()

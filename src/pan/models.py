@@ -185,10 +185,13 @@ class ThreadRecord(BaseModel):
 
 
 class ConfirmationCandidate(BaseModel, frozen=True):
-    # One session pan proposes: its terminal address (checked again at send time), its name
-    # when it has one, and the label shown in Slack.
+    # One session pan proposes: its terminal address, name, folder and Herdr label (checked
+    # again at send time, so a terminal now at that address is the same session), and the
+    # label shown in Slack.
     address: str
     name: str | None = None
+    cwd: Path
+    where: str | None = None
     label: str
 
 

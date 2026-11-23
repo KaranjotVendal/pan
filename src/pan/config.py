@@ -88,9 +88,6 @@ PLANNOTATOR_INBOX_TOOL_MARKER = "plannotator_inbox"
 # `send` never hang on the Inbox.
 INBOX_LOOKUP_THREAD_LIMIT = 50
 INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
-# A `to` selector is at most this many words (`to pan with slack: <task>`), so a long sentence
-# that happens to start with "to" and hold a colon stays a plain task.
-TO_ROUTE_SELECTOR_MAX_WORDS = 6
 # `to <selector>:` with no exact match asks the person to confirm a proposed session in the
 # Slack thread (`pan propose`); a question left unanswered this long is dropped, and the next
 # reply in the thread is handled as usual.

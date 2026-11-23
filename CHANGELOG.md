@@ -66,9 +66,9 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
-- `to <selector>:` with no exact match asks before sending. The selector may be up to
-  `TO_ROUTE_SELECTOR_MAX_WORDS` (6) words. `pan send --to` still sends at once to an exact match
-  (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits
+- `to <name>:` with no exact match asks before sending. The name stays one token, so a sentence
+  such as "to be clear: ..." is still a plain task. `pan send --to` still sends at once to an exact
+  match (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits
   28 (`NoExactMatchError`; a label several sessions share counts as no exact match and no longer
   posts a pick list, and the close-matches not-found reply is gone). The orchestrator then reads the
   message and `pan sessions --json` and proposes the likely session, up to 3, or none, with the new
@@ -83,12 +83,19 @@ as it works (see `AGENT_LOOP.md` step 9).
 - Replies to that question are decided in code. `pan inbox drain` turns a `yes`, `y` or 1-3 reply
   (`directive.parse_confirm_reply`, any case, optional mention) in a thread with a question younger
   than `CONFIRMATION_TIMEOUT` (30 minutes) into the new route kind `confirm` (`Route.choice`), and
-  marks any other message there `cancels_confirmation`. A plain `yes` with no open question is
-  unchanged (it still goes to the tied session). The new `pan confirm --choice <yes|n>` sends the
-  stored task to the chosen session through the `to` send path (busy and prompt refusals apply; the
-  thread is tied), after checking it is still the same live terminal (same address and name);
-  `yes` to several or an out-of-range number asks again and keeps the question; a question that
-  expired is cleared with "Not sent: that question expired.". `pan confirm --cancel` clears the
+  marks any other message there `cancels_confirmation`; the questions are read before the inbox is
+  drained, an unreadable `confirmations.json` counts as none (no item is ever lost to it), and once
+  an item answers or cancels a thread's question, later items in the same batch see none. A plain
+  `yes` with no open question is unchanged (it still goes to the tied session). The new
+  `pan confirm --choice <yes|y|n>` (read like a reply: any case, spaces trimmed) sends the stored
+  task to the chosen session through the `to` send path and ties the thread, after checking it is
+  still the same live terminal (same address and name, or for an unnamed session the same folder
+  and Herdr label, kept on `ConfirmationCandidate`); the question is cleared only once the send
+  succeeds. A busy session or one waiting on a prompt keeps the question open ("stream-pan is busy;
+  reply yes again later, or anything else to cancel."); a chosen session no longer running clears
+  it. `yes` to several or an out-of-range number asks again and keeps the question; a question that
+  expired is cleared with "Not sent: that question expired."; with no question at all nothing is
+  posted. `pan confirm --cancel` clears the
   question and posts "Not sent.", and the message is then handled as usual. The orchestrating skill
   states this as the one bounded exception to INV-3.
 - A session pan did not start is told to use its existing Plannotator Inbox thread for the work if it

@@ -443,16 +443,13 @@ _BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instea
         ("to pan-7 add the tests", Route(text="to pan-7 add the tests")),
         ("to pan-7 : add the tests", Route(text="to pan-7 : add the tests")),
         ("to pan-7:add the tests", Route(text="to pan-7:add the tests")),
+        ("to pan with slack: add the tests", Route(text="to pan with slack: add the tests")),
+        ("to the moon: and back", Route(text="to the moon: and back")),
+        ("to be clear: keep the old API", Route(text="to be clear: keep the old API")),
         (
-            "to pan with slack: add the tests",
-            Route(kind=RouteKind.TO, session="pan with slack", text="add the tests"),
+            "To summarize the plan: ship it first",
+            Route(text="To summarize the plan: ship it first"),
         ),
-        ("to the moon: and back", Route(kind=RouteKind.TO, session="the moon", text="and back")),
-        (
-            "to one two three four five six seven: and back",
-            Route(text="to one two three four five six seven: and back"),
-        ),
-        ("to pan with\nslack: add the tests", Route(text="to pan with\nslack: add the tests")),
         ("go to pan-7: add the tests", Route(text="go to pan-7: add the tests")),
         (
             "to pan-7:",

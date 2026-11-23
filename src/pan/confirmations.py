@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from pan.config import CONFIRMATION_MAX_CANDIDATES, CONFIRMATION_TIMEOUT
 from pan.directive import CONFIRM_YES, parse_confirm_reply
-from pan.errors import TargetNotFoundError
+from pan.errors import NoExactMatchError, TargetNotFoundError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import (
@@ -53,11 +53,21 @@ class FilePendingConfirmations:
         self._path = path
 
     def _read_all(self) -> dict[str, PendingConfirmation]:
-        # A malformed entry is skipped (and dropped on the next write), never fatal.
-        if not self._path.exists():
+        # Never fatal, because `pan inbox drain` reads it: an unreadable or malformed file
+        # counts as no questions, and a malformed entry is skipped (both are dropped on the
+        # next write).
+        try:
+            raw_store = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning(f"confirmations unreadable, treating as none: {type(e).__name__}")
+            return {}
+        if not isinstance(raw_store, dict):
+            logger.warning("confirmations file is not an object, treating as none")
             return {}
         pending_by_key: dict[str, PendingConfirmation] = {}
-        for stored_key, raw_pending in json.loads(self._path.read_text()).items():
+        for stored_key, raw_pending in raw_store.items():
             try:
                 pending_by_key[stored_key] = PendingConfirmation.model_validate(raw_pending)
             except ValidationError:
@@ -73,6 +83,9 @@ class FilePendingConfirmations:
 
     def get(self, source: ThreadSource, thread_ts: str) -> PendingConfirmation | None:
         return self._read_all().get(_key(source, thread_ts))
+
+    def all_pending(self) -> list[PendingConfirmation]:
+        return list(self._read_all().values())
 
     def put(self, pending: PendingConfirmation) -> None:
         # Replaces the thread's question, and drops every question that had expired by the
@@ -99,6 +112,25 @@ def live_pending(pending: PendingConfirmation | None, now: datetime) -> PendingC
     if pending is None or now - pending.created_at >= CONFIRMATION_TIMEOUT:
         return None
     return pending
+
+
+class OpenQuestions:
+    # The questions open when `pan inbox drain` ran, read once before the inbox is drained.
+    # Once an item in the batch answers or cancels a thread's question, later items in that
+    # thread see none, as they will once `pan confirm` has run.
+    def __init__(self, questions: list[PendingConfirmation]) -> None:
+        self._by_thread = {
+            (question.source, question.thread_ts): question for question in questions
+        }
+
+    def route(
+        self, route: Route, source: ThreadSource, thread_ts: str, raw_text: str, now: datetime
+    ) -> tuple[Route, bool]:
+        question = self._by_thread.get((source, thread_ts))
+        routed, cancels_confirmation = route_with_pending(route, raw_text, question, now)
+        if routed.kind is RouteKind.CONFIRM or cancels_confirmation:
+            self._by_thread.pop((source, thread_ts), None)
+        return routed, cancels_confirmation
 
 
 def route_with_pending(
@@ -172,7 +204,11 @@ def _valid_candidates(
             continue
         candidates.append(
             ConfirmationCandidate(
-                address=address, name=terminal.name, label=candidate_label(terminal)
+                address=address,
+                name=terminal.name,
+                cwd=terminal.cwd,
+                where=terminal.where,
+                label=candidate_label(terminal),
             )
         )
     if len(candidates) > CONFIRMATION_MAX_CANDIDATES:
@@ -232,13 +268,20 @@ def _chosen_index(choice: str, candidate_count: int) -> int | None:
 
 
 def _still_live(candidate: ConfirmationCandidate, terminals: list[Terminal]) -> bool:
-    # The live terminal at the candidate's address is still the same session: a terminal
-    # now at that address under another name is a different one.
-    return any(
-        terminal.address == candidate.address
-        and (candidate.name is None or terminal.name == candidate.name)
-        for terminal in terminals
-    )
+    # The live terminal at the candidate's address is still the same session: same name, or
+    # for a session with no name, same folder and Herdr label. Anything else now at that
+    # address is a different session.
+    for terminal in terminals:
+        if terminal.address != candidate.address:
+            continue
+        if candidate.name is not None:
+            return terminal.name == candidate.name
+        return terminal.cwd == candidate.cwd and terminal.where == candidate.where
+    return False
+
+
+def _retry_hint(choice: str) -> str:
+    return f"reply {choice} again later, or anything else to cancel."
 
 
 def confirm_session(
@@ -254,11 +297,17 @@ def confirm_session(
     clock: Clock,
 ) -> ThreadRecord | None:
     # The person's `yes` or number for the thread's open question: send the stored task to
-    # the chosen session through the normal `to` send path (busy and prompt refusals apply,
-    # and the thread is tied to it), and clear the question. A reply that picks nothing
-    # (`yes` to several, a number out of range) asks again and keeps the question. A chosen
-    # session that is no longer running gets a reply and TargetNotFoundError, nothing sent.
-    pending = live_pending(confirmations.get(ThreadSource.SLACK, thread_ts), clock.now())
+    # the chosen session through the normal `to` send path (the thread is tied to it), then
+    # clear the question. A reply that picks nothing (`yes` to several, a number out of
+    # range) asks again. A busy session or one waiting on a prompt is refused as usual, but
+    # the question stays open and the reply says to answer again later. A chosen session no
+    # longer running clears the question, gets a reply and TargetNotFoundError. An expired
+    # question is cleared with a reply; with no question at all nothing is posted.
+    stored = confirmations.get(ThreadSource.SLACK, thread_ts)
+    if stored is None:
+        logger.info(f"confirm with no open question thread={thread_ts}")
+        return None
+    pending = live_pending(stored, clock.now())
     if pending is None:
         confirmations.clear(ThreadSource.SLACK, thread_ts)
         slack_post(slack, channel, thread_ts, EXPIRED_REPLY)
@@ -267,25 +316,35 @@ def confirm_session(
     if chosen_index is None:
         slack_post(slack, channel, thread_ts, _reask_text(pending.candidates))
         return None
-    confirmations.clear(ThreadSource.SLACK, thread_ts)
     candidate = pending.candidates[chosen_index]
+    gone_reply = f"{candidate.label} is no longer running; not sent"
     if not _still_live(candidate, _live_terminals(terminal_host)):
-        slack_post(slack, channel, thread_ts, f"{candidate.label} is no longer running; not sent")
+        confirmations.clear(ThreadSource.SLACK, thread_ts)
+        slack_post(slack, channel, thread_ts, gone_reply)
         raise TargetNotFoundError(f"proposed session {candidate.address} is gone")
     logger.info(f"confirmed session thread={thread_ts} terminal={candidate.address}")
-    return send_to_session(
-        thread_ts=thread_ts,
-        channel=channel,
-        selector=candidate.address,
-        text=pending.task,
-        requester=pending.requester,
-        reply_in_slack=pending.reply_in_slack,
-        terminal_host=terminal_host,
-        thread_map=thread_map,
-        inbox_directory=inbox_directory,
-        slack=slack,
-        clock=clock,
-    )
+    try:
+        tied = send_to_session(
+            thread_ts=thread_ts,
+            channel=channel,
+            selector=candidate.address,
+            text=pending.task,
+            requester=pending.requester,
+            reply_in_slack=pending.reply_in_slack,
+            terminal_host=terminal_host,
+            thread_map=thread_map,
+            inbox_directory=inbox_directory,
+            slack=slack,
+            clock=clock,
+            retry_hint=_retry_hint(choice),
+        )
+    except NoExactMatchError as error:
+        # Gone between the check and the send.
+        confirmations.clear(ThreadSource.SLACK, thread_ts)
+        slack_post(slack, channel, thread_ts, gone_reply)
+        raise TargetNotFoundError(f"proposed session {candidate.address} is gone") from error
+    confirmations.clear(ThreadSource.SLACK, thread_ts)
+    return tied
 
 
 def cancel_confirmation(

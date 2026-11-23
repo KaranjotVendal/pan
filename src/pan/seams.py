@@ -117,8 +117,10 @@ class InboxDirectory(Protocol):
 class PendingConfirmations(Protocol):
     # pan's open questions asking the person which session should get a task, one per thread
     # (see PendingConfirmation). `put` replaces the thread's question; `clear` is a no-op when
-    # there is none.
+    # there is none. Reads never fail: an unreadable store counts as holding no questions.
     def get(self, source: ThreadSource, thread_ts: str) -> PendingConfirmation | None: ...
+
+    def all_pending(self) -> list[PendingConfirmation]: ...
 
     def put(self, pending: PendingConfirmation) -> None: ...
 

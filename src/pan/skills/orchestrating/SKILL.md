@@ -119,8 +119,8 @@ It unties the thread and posts one line. It never stops the session.
 
     pan send --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack]
 
-Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.session` may be several words
-(`to pan with slack:`); pass it whole and quoted. `route.text` is sent verbatim — do not rewrite it.
+Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.text` is sent verbatim — do not
+rewrite it.
 The session may be one pan started or one of the person's own desk sessions. `pan send` sends only
 to an exact match: the session's address, name, or Herdr label or space. It types the text only if
 the session is idle (with one line on top saying it came from Slack and naming its Inbox thread, or,
@@ -155,9 +155,10 @@ sessions.
 
     pan confirm --thread <thread_ts> --channel <channel> --choice <route.choice>
 
-It sends the task stored by `pan propose` to the chosen session through the same path as `pan send`
-(busy and prompt refusals apply), ties the thread and posts "Sent to ...". A reply that picks
-nothing (`yes` to several, a number out of range) gets "Reply 1 or 2 to choose ..." and the
+It sends the task stored by `pan propose` to the chosen session through the same path as `pan send`,
+ties the thread and posts "Sent to ...". A busy session or one waiting on a prompt gets a reply
+asking the person to answer again later, and the question stays open (exit 26 or 23). A reply that
+picks nothing (`yes` to several, a number out of range) gets "Reply 1 or 2 to choose ..." and the
 question stays open; a chosen session that has ended gets a one-line reply (exit 20). Do nothing
 more in every case.
 

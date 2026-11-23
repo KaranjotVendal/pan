@@ -20,14 +20,14 @@ from pan.adapters.terminal_host import build_terminal_host
 from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.confirmations import (
     FilePendingConfirmations,
+    OpenQuestions,
     cancel_confirmation,
     confirm_session,
     confirmations_path,
     propose_sessions,
-    route_with_pending,
 )
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_directive, parse_route, route_for_source
+from pan.directive import parse_confirm_reply, parse_directive, parse_route, route_for_source
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -231,10 +231,12 @@ def _confirmations(config: PanConfig) -> FilePendingConfirmations:
 def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
     config = _config()
-    items = FileInboxStore(config.paths.inbox).drain()
+    # The open questions are read before the drain, and reading them never fails, so a bad
+    # confirmations file can never cost drained items.
+    open_questions = OpenQuestions(_confirmations(config).all_pending())
     clock = SystemClock()
+    items = FileInboxStore(config.paths.inbox).drain()
     thread_map = FileThreadMap(config.paths.threads, clock)
-    confirmations = _confirmations(config)
 
     # Attach the route the gateway parsed (parsed here for an item an older gateway wrote)
     # and the directive parsed from the route's text, so the orchestrator reads them as
@@ -244,11 +246,8 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     # `yes`/1-3 reply to it becomes a `confirm` route, and any other message is marked
     # `cancels_confirmation`.
     def routed(item: InboxItem) -> tuple[Route, bool]:
-        return route_with_pending(
-            _item_route(item),
-            item.raw_text,
-            confirmations.get(item.source, item.thread_ts),
-            clock.now(),
+        return open_questions.route(
+            _item_route(item), item.source, item.thread_ts, item.raw_text, clock.now()
         )
 
     if as_json:
@@ -716,9 +715,13 @@ def confirm(
     thread to it; --cancel drops the question and posts Not sent."""
     if cancel == (choice is not None):
         raise typer.BadParameter("pass exactly one of --choice or --cancel")
+    # The same reading as a Slack reply: any case, surrounding spaces, y for yes.
+    normalized_choice = parse_confirm_reply(choice) if choice is not None else None
+    if choice is not None and normalized_choice is None:
+        raise typer.BadParameter("--choice must be yes, y, or a number from 1 to 3")
     config = _config()
     clock = SystemClock()
-    if choice is None:
+    if normalized_choice is None:
         cancel_confirmation(
             thread_ts=thread,
             channel=channel,
@@ -729,7 +732,7 @@ def confirm(
     confirm_session(
         thread_ts=thread,
         channel=channel,
-        choice=choice,
+        choice=normalized_choice,
         terminal_host=build_terminal_host(config.terminal_host),
         thread_map=FileThreadMap(config.paths.threads, clock),
         inbox_directory=ShellPlannotatorInboxAdapter(),

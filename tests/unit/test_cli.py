@@ -1096,7 +1096,9 @@ def _store_question(config: PanConfig, asked_minutes_ago: int) -> None:
             channel="C1",
             selector="pan docs",
             task="add the tests",
-            candidates=[ConfirmationCandidate(address="t3", label="t3 (folder pan)")],
+            candidates=[
+                ConfirmationCandidate(address="t3", cwd=Path("/tmp/pan"), label="t3 (folder pan)")
+            ],
             created_at=datetime.now(tz=UTC) - timedelta(minutes=asked_minutes_ago),
         )
     )
@@ -1151,6 +1153,43 @@ def test_inbox_drain_leaves_a_yes_alone_without_an_open_question(
     assert entry["cancels_confirmation"] is False
 
 
+@pytest.mark.parametrize(
+    "contents",
+    [b"{not json", b"[1, 2]", b"\xff\xfe"],
+    ids=["not-json", "not-an-object", "not-text"],
+)
+def test_inbox_drain_with_a_damaged_confirmations_file_still_emits_every_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    confirmations_path(config.paths.threads).write_bytes(contents)
+    store = FileInboxStore(config.paths.inbox)
+    store.append(_item("Ev1").model_copy(update={"raw_text": "yes"}))
+    store.append(_item("Ev2"))
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    emitted = json.loads(result.stdout)
+    assert sorted(entry["item"]["id"] for entry in emitted) == ["Ev1", "Ev2"]
+    assert all(entry["route"]["kind"] == "task" for entry in emitted)
+
+
+def test_inbox_drain_answers_a_question_once_per_batch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _store_question(config, asked_minutes_ago=1)
+    store = FileInboxStore(config.paths.inbox)
+    for event_id in ("Ev1", "Ev2"):
+        store.append(_item(event_id).model_copy(update={"raw_text": "yes"}))
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    kinds = sorted(entry["route"]["kind"] for entry in json.loads(result.stdout))
+    assert kinds == ["confirm", "task"]
+
+
 def test_propose_command_wires_to_propose_sessions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1192,15 +1231,21 @@ def test_propose_command_wires_to_propose_sessions(
 
 
 @pytest.mark.parametrize(
-    "arguments, expected_call",
+    "arguments, expected_call, expected_choice",
     [
-        (["--choice", "2"], "confirm_session"),
-        (["--cancel"], "cancel_confirmation"),
+        (["--choice", "2"], "confirm_session", "2"),
+        (["--choice", " Y "], "confirm_session", "yes"),
+        (["--choice", "YES"], "confirm_session", "yes"),
+        (["--cancel"], "cancel_confirmation", None),
     ],
-    ids=["choice", "cancel"],
+    ids=["number", "y-with-spaces", "upper-case-yes", "cancel"],
 )
 def test_confirm_command_wires_the_reply(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str], expected_call: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: list[str],
+    expected_call: str,
+    expected_choice: str | None,
 ) -> None:
     _use_config(monkeypatch, tmp_path)
     _use_terminal_host(monkeypatch, FakeTerminalHost())
@@ -1217,9 +1262,14 @@ def test_confirm_command_wires_the_reply(
     ((called, kwargs),) = calls
     assert called == expected_call
     assert kwargs["thread_ts"] == "t-1"
+    assert kwargs.get("choice") == expected_choice
 
 
-@pytest.mark.parametrize("arguments", [[], ["--choice", "1", "--cancel"]], ids=["neither", "both"])
+@pytest.mark.parametrize(
+    "arguments",
+    [[], ["--choice", "1", "--cancel"], ["--choice", "maybe"], ["--choice", "4"]],
+    ids=["neither", "both", "not-a-reply", "out-of-range"],
+)
 def test_confirm_command_needs_exactly_one_of_choice_or_cancel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str]
 ) -> None:
