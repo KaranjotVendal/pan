@@ -71,12 +71,18 @@ def _session_name(terminal: Terminal) -> str:
 
 def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
     # The record pan keeps for the session in this terminal (pan's own or a desk session),
-    # joined by address, then by terminal name; a tied record wins, then the newest.
+    # joined by address, or by terminal name for a record with no address (legacy records).
+    # A record whose address names another terminal never joins by name: it belongs to an
+    # earlier terminal of the same name. A tied record wins, then the newest.
     matches = [
         record
         for record in records
         if (record.terminal_address and record.terminal_address == terminal.address)
-        or (terminal.name is not None and record.terminal_name == terminal.name)
+        or (
+            not record.terminal_address
+            and terminal.name is not None
+            and record.terminal_name == terminal.name
+        )
     ]
     for record in matches:
         if record.tied:

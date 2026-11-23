@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -262,7 +263,31 @@ def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) 
         "Notification": "pan hook notification",
         "PostToolUse": "pan hook inbox-link",
     }
-    assert settings["hooks"]["PostToolUse"][0]["matcher"] == "mcp__plannotator__plannotator_inbox"
+    assert settings["hooks"]["PostToolUse"][0]["matcher"] == (
+        "mcp__plannotator__plannotator_inbox|REPL"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_name, expected_match",
+    [
+        ("mcp__plannotator__plannotator_inbox", True),
+        ("REPL", True),
+        ("Bash", False),
+        ("mcp__plannotator__plannotator", False),
+    ],
+    ids=["inbox-tool", "code-mode-repl", "other-tool", "other-plannotator-tool"],
+)
+def test_worker_inbox_link_matcher_matches_the_inbox_tool_and_the_repl_tool(
+    tmp_path: Path, tool_name: str, expected_match: bool
+) -> None:
+    # Claude Code matches a hook's matcher as a regex against the whole tool name.
+    terminal_host = FakeTerminalHost()
+    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
+    settings = json.loads((record.worktree_path / ".claude" / "settings.json").read_text())
+    matcher = settings["hooks"]["PostToolUse"][0]["matcher"]
+
+    assert (re.fullmatch(matcher, tool_name) is not None) is expected_match
 
 
 def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Path) -> None:

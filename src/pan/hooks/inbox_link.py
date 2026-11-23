@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any, TextIO
 
 from pydantic import BaseModel
 
+from pan.config import PLANNOTATOR_INBOX_TOOL_NAME, REPL_TOOL_NAME
 from pan.logging import initialise_logger
 from pan.seams import ThreadMap
 
@@ -23,6 +25,11 @@ _MAX_SEARCH_DEPTH = 8
 
 
 _JSON_DECODER = json.JSONDecoder()
+
+# The Inbox's send result in prose: "Sent to the Plannotator Inbox (thread <id>, <url>)", also
+# "Already sent to the ..." and "... Plannotator Inbox asking 1 question (thread <id>, <url>)".
+# Code mode's REPL tool returns whatever its code returned, often only this prose.
+_INBOX_PROSE_LINK = re.compile(r"Plannotator Inbox\b[^()]*\(thread ([^\s,()]+), ([^\s()]+)\)")
 
 
 def _embedded_json_values(text: str) -> list[Any]:
@@ -81,18 +88,53 @@ def _find_link(value: Any, depth: int = 0) -> InboxLink | None:
     return None
 
 
-def parse_inbox_link(raw_payload: str) -> InboxLink | None:
-    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}.
-    # `tool_response` may be the structured result (a dict), a string, or a list of content
-    # blocks (possibly under a `content` key) whose `text` is the Inbox's prose line followed
-    # by the result as JSON. All are searched; anything else is None.
+def _find_prose_link(value: Any, depth: int = 0) -> InboxLink | None:
+    # Depth-first search of every string in the value for the Inbox's prose line; the first
+    # match wins.
+    if depth > _MAX_SEARCH_DEPTH:
+        return None
+    if isinstance(value, str):
+        match = _INBOX_PROSE_LINK.search(value)
+        return InboxLink(thread_id=match[1], url=match[2]) if match else None
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        for nested in value:
+            found = _find_prose_link(nested, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _payload(raw_payload: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(raw_payload)
     except ValueError:
         return None
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_inbox_link(raw_payload: str) -> InboxLink | None:
+    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}.
+    # `tool_response` may be the structured result (a dict), a string, or a list of content
+    # blocks (possibly under a `content` key) whose `text` is the Inbox's prose line followed
+    # by the result as JSON. All are searched for the JSON result first, then for the prose
+    # line alone (what a code mode REPL call often returns); anything else is None.
+    payload = _payload(raw_payload)
+    if payload is None:
         return None
-    return _find_link(payload.get("tool_response"))
+    tool_response = payload.get("tool_response")
+    return _find_link(tool_response) or _find_prose_link(tool_response)
+
+
+def _is_unrelated_repl_call(raw_payload: str) -> bool:
+    # A code mode REPL call is about the Inbox only when its code names the Inbox tool or its
+    # result holds the Inbox's prose line; any other REPL call is not the hook's business.
+    payload = _payload(raw_payload)
+    if payload is None or payload.get("tool_name") != REPL_TOOL_NAME:
+        return False
+    names_inbox_tool = PLANNOTATOR_INBOX_TOOL_NAME in json.dumps(payload.get("tool_input"))
+    return not names_inbox_tool and _find_prose_link(payload.get("tool_response")) is None
 
 
 def _sent_thread_name(raw_payload: str) -> str | None:
@@ -113,6 +155,9 @@ def inbox_link_hook(
     # Slack: the link is shown later by `check`. The first link wins, unless a later send
     # names the record's own Inbox thread (the worker may also write in other threads).
     raw_payload = stdin.read()
+    if _is_unrelated_repl_call(raw_payload):
+        logger.debug(f"inbox-link hook skipped a REPL call with no Inbox use thread={thread_ts}")
+        return
     link = parse_inbox_link(raw_payload)
     if link is None:
         logger.info(f"inbox-link hook found no thread link thread={thread_ts}")

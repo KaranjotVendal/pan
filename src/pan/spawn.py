@@ -11,6 +11,7 @@ from pan.config import (
     PAN_ROLE_LABEL,
     PAN_THREAD_LABEL,
     PLANNOTATOR_INBOX_TOOL_NAME,
+    REPL_TOOL_NAME,
     TERMINAL_NAME_MAX_LENGTH,
     WORKER_BRIEF_TASK_MARKER,
     WORKER_NAME_PREFIX,
@@ -49,9 +50,10 @@ logger = initialise_logger(__name__)
 # The Claude Code hooks settings written into each worker's worktree. Stop and Notification
 # mark the thread idle / blocked (and post to Slack only in the reply-in-Slack mode);
 # SessionStart records the Claude session id and transcript path on the thread record (for
-# `pan read --full`); PostToolUse on the Inbox tool records the session's Inbox thread id and
-# link. Non-tool events take a list of {hooks: [{type, command}]} objects (matcher omitted).
-# The `pan hook` commands resolve the thread from the worker's cwd via the thread map.
+# `pan read --full`); PostToolUse on the Inbox tool (or on code mode's REPL tool, which wraps
+# Inbox calls) records the session's Inbox thread id and link. The matcher is a regex
+# alternation of the tool names. Non-tool events take a list of {hooks: [{type, command}]}
+# objects (matcher omitted). The `pan hook` commands resolve the thread from the worker's cwd via the thread map.
 _WORKER_SETTINGS = {
     "hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "pan hook session-start"}]}],
@@ -59,7 +61,7 @@ _WORKER_SETTINGS = {
         "Notification": [{"hooks": [{"type": "command", "command": "pan hook notification"}]}],
         "PostToolUse": [
             {
-                "matcher": PLANNOTATOR_INBOX_TOOL_NAME,
+                "matcher": f"{PLANNOTATOR_INBOX_TOOL_NAME}|{REPL_TOOL_NAME}",
                 "hooks": [{"type": "command", "command": "pan hook inbox-link"}],
             }
         ],

@@ -98,6 +98,20 @@ def test_collect_sessions_shows_a_tied_desk_session_as_external_with_its_thread(
     assert other_summary.thread_ts is None
 
 
+def test_collect_sessions_does_not_join_a_record_of_another_terminal_by_name() -> None:
+    # A record whose address names an earlier (killed) terminal of the same name belongs to
+    # that terminal, not to the new one.
+    terminal = make_terminal("t10", name="desk-test", cwd=Path("/tmp/desk/test"))
+    stale_record = _record("t-1", "desk-test", "t9", "/tmp/desk/test").model_copy(
+        update={"started_by_pan": False}
+    )
+
+    (summary,) = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([stale_record]))
+
+    assert summary.thread_ts is None
+    assert summary.is_pan_owned is False
+
+
 def test_collect_sessions_marks_external_terminal() -> None:
     terminal = make_terminal(
         "t2",

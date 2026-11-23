@@ -9,6 +9,19 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Fixed
 
+- The inbox-link hook now records the Inbox link for a worker in Claude Code's code mode, which
+  calls the Inbox from inside its `REPL` tool. The worker's PostToolUse matcher also matches
+  `REPL` (`mcp__plannotator__plannotator_inbox|REPL`, built from `PLANNOTATOR_INBOX_TOOL_NAME`
+  and the new `REPL_TOOL_NAME`); a REPL call counts only when its code names the Inbox tool or
+  its result holds the Inbox's prose line, and any other REPL call is skipped with a log line.
+  When no JSON result is found, the thread id and url are read from the prose line
+  ("Plannotator Inbox (thread <id>, <url>)", also "Already sent ..." and "... asking 1 question
+  ..."); the first match wins. A recorded link is still kept.
+- A desk session in a new terminal no longer joins the record of an earlier terminal with the
+  same name (killed but never forgotten), which reused that record's Inbox thread name. A record
+  joins a terminal by name only when it holds no terminal address (legacy records); one whose
+  address names another terminal never does. Applies to `to <name>:` (`_session_record_for`)
+  and to `pan sessions` (`_match_record`).
 - A trailing client signature such as "\n*Sent using* <@U0EXAMPLE|Claude>" (added by some Slack
   clients and connectors, any letter case, with optional `*`/`_` emphasis, `>` quote and `|label`)
   is stripped in `_clean_message` before route parsing, so `check`, `sessions` and `forget` match
@@ -16,9 +29,7 @@ as it works (see `AGENT_LOOP.md` step 9).
 - The inbox-link hook now finds the link in the Inbox's real send result, which is a prose line
   followed by the JSON result (it only parsed text that was JSON as a whole). Every early return
   of the hook entrypoints logs why (no cwd in the payload, or no record for `cwd=<path>`), and a
-  `~` in the cwd is expanded. A worker running Claude Code's experimental code mode calls the Inbox
-  from inside its REPL tool, so the PostToolUse hook does not run for those calls at all; `check`
-  still finds the thread by name.
+  `~` in the cwd is expanded.
 - The Notification hook no longer marks a thread blocked for Claude Code's idle reminder
   ("Claude is waiting for your input", `notification_type` `idle_prompt`). Only a prompt waiting
   on the person (`permission_prompt`, `elicitation_dialog`, or with no known type a message about

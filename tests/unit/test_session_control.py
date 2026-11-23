@@ -375,6 +375,41 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
     assert slack.texts() == ["Sent to desk-api · Inbox: https://inbox.example/threads/thr_9"]
 
 
+@pytest.mark.parametrize(
+    "earlier_address, expected_inbox_thread_name",
+    [
+        ("", "desk-test: fix the build"),
+        ("t9", "desk-test: add the tests"),
+    ],
+    ids=["legacy-record-without-address-joins-by-name", "stale-record-of-a-killed-terminal"],
+)
+def test_send_joins_a_record_by_name_only_when_it_has_no_terminal_address(
+    tmp_path: Path, earlier_address: str, expected_inbox_thread_name: str
+) -> None:
+    # A new terminal reusing the name of a killed one (whose record was never forgotten) is
+    # a new session: it gets its own Inbox thread name, not the old record's.
+    desk_folder = Path("/tmp/desk/test")
+    earlier = _record(
+        terminal_name="desk-test",
+        terminal_address=earlier_address,
+        started_by_pan=False,
+        worktree_path=desk_folder,
+        inbox_thread_name="desk-test: fix the build",
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    terminal_host = _host(make_terminal("t10", name="desk-test", cwd=desk_folder))
+
+    _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
+
+    assert terminal_host.sent == [
+        ("t10", from_slack_text(expected_inbox_thread_name, "add the tests"))
+    ]
+    tied = thread_map.get(_NEW_THREAD)
+    assert tied is not None
+    assert tied.terminal_address == "t10"
+    assert tied.inbox_thread_name == expected_inbox_thread_name
+
+
 def test_send_to_a_blocked_session_types_nothing_and_ties_nothing(tmp_path: Path) -> None:
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7"))

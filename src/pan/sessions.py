@@ -66,10 +66,12 @@ def _preferred(candidates: list[ThreadRecord]) -> ThreadRecord | None:
 
 def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
     # The join to pan's records, most precise first: the terminal address recorded at spawn
-    # (or at a `to <name>:` tie), then the terminal name (the stream name), then, for pan's
-    # own workers only, the resolved worktree path against the terminal's launch folder
-    # (symlink-safe, mirroring FileThreadMap.get_by_worktree). A desk session's record holds
-    # a folder pan does not own, so another terminal in that folder never joins to it.
+    # (or at a `to <name>:` tie), then the terminal name (the stream name) for a record with
+    # no address, then, for pan's own workers only, the resolved worktree path against the
+    # terminal's launch folder (symlink-safe, mirroring FileThreadMap.get_by_worktree). A
+    # record whose address names another terminal never joins by name: it belongs to an
+    # earlier terminal of the same name. A desk session's record holds a folder pan does not
+    # own, so another terminal in that folder never joins to it.
     by_address = [
         record
         for record in records
@@ -78,7 +80,11 @@ def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadReco
     if by_address:
         return _preferred(by_address)
     if terminal.name is not None:
-        by_name = [record for record in records if record.terminal_name == terminal.name]
+        by_name = [
+            record
+            for record in records
+            if not record.terminal_address and record.terminal_name == terminal.name
+        ]
         if by_name:
             return _preferred(by_name)
     target_cwd = terminal.cwd.resolve()
