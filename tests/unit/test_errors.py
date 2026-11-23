@@ -8,6 +8,7 @@ from pan.errors import (
     GatedOpDeniedError,
     InboxError,
     PanError,
+    ServiceError,
     SlackPostError,
     SpawnError,
     TargetBlockedError,
@@ -35,6 +36,7 @@ def test_pan_error_is_exception_subclass() -> None:
         TerminalHostError,
         SlackPostError,
         GatedOpDeniedError,
+        ServiceError,
     ],
 )
 def test_taxonomy_subclasses_pan_error(exception_class: type[PanError]) -> None:

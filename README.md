@@ -108,30 +108,42 @@ Config is JSON at `~/.config/pan/config.json` and contains **no secrets**. A min
 hc terminal if it is not running (a fresh session that drains the inbox once on boot), marks workers
 whose terminals are gone as `failed`, and wakes an orchestrator that is already running so any
 backlog in the inbox is drained. herdr-core restores no agents after a Mac reboot, so run `pan up`
-after one, or install the optional `com.pan.up` LaunchAgent below to do it at login. A worker lost
+after one, or install the LaunchAgents below (`pan service install`) to do it at login. A worker lost
 to a reboot keeps its worktree; a follow-up in its thread can reopen it there (`pan reopen`).
 
 ## Run always-on (launchd)
 
 Two LaunchAgents keep the gateway and watcher up across sleep/wake, each `KeepAlive=true` and
-`RunAtLoad=true`. A third, optional one (`com.pan.up`) runs `pan up` once at login and is retried by
-launchd only if it fails (for example while the hc core is not reachable yet). Templates live in
-`launchd/`; each uses a single `<PAN_HOME>` placeholder for your home directory.
+`RunAtLoad=true`. A third (`com.pan.up`) runs `pan up` once at login and is retried by launchd only
+if it fails (for example while the hc core is not reachable yet). Install all three, so pan starts by
+itself after a login or reboot:
+
+    pan service install     # write ~/Library/LaunchAgents/com.pan.{gateway,watcher,up}.plist and load them
+    pan service status      # per agent: plist installed, loaded, pid, last exit code
+    pan service uninstall   # unload them and delete the plists (the hard off switch)
+
+`install` fills each template with your home directory and the absolute path of the `pan` on your
+`PATH` (falling back to `~/.local/bin/pan`, where `uv tool install` puts it), creates `~/.pan/logs`
+for the agents' output (`<name>.out.log`, `<name>.err.log`), and loads the agents with `launchctl
+bootstrap gui/<uid>` in the order gateway, watcher, up. Running it again reinstalls (each loaded
+agent is booted out first), so run it again after moving the `pan` install. The plists set `PATH` to
+include `~/.local/bin`, where the herdr-core installer puts `hc`, since launchd's default `PATH` does
+not.
+
+Manual fallback: the templates ship in the package at `src/pan/launchd/`, with a `<PAN_HOME>`
+placeholder for your home directory and `<PAN_BIN>` for the `pan` executable:
 
 ```sh
 mkdir -p ~/Library/LaunchAgents ~/.pan/logs
 for svc in gateway watcher up; do
-  sed "s|<PAN_HOME>|$HOME|g" "launchd/com.pan.$svc.plist.template" \
-    > "$HOME/Library/LaunchAgents/com.pan.$svc.plist"
-  launchctl load "$HOME/Library/LaunchAgents/com.pan.$svc.plist"
+  sed -e "s|<PAN_HOME>|$HOME|g" -e "s|<PAN_BIN>|$(command -v pan)|g" \
+    "src/pan/launchd/com.pan.$svc.plist.template" > "$HOME/Library/LaunchAgents/com.pan.$svc.plist"
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pan.$svc.plist"
 done
 ```
 
-The templates assume the `pan` and `hc` binaries are in `<PAN_HOME>/.local/bin` (where `uv tool
-install` and the herdr-core installer put them) and set `PATH` to include it, since launchd's default
-`PATH` does not; adjust if your install prefix differs. To stop the services, `launchctl unload` the
-plists — that is the hard off switch. For interactive debugging instead of launchd, run them in hc
-terminals: `hc run --bg --no-parent --name pan-gateway pan gateway` (and the same for the watcher).
+For interactive debugging instead of launchd, run them in hc terminals: `hc run --bg --no-parent
+--name pan-gateway pan gateway` (and the same for the watcher).
 
 ### Lid-closed execution
 
@@ -152,6 +164,7 @@ runs once the actuation lands.
 | --- | --- |
 | `pan gateway` | Run the always-on Bolt Socket Mode gateway (blocking). |
 | `pan watcher` | Run the inbox watcher that nudges the orchestrator (blocking). |
+| `pan service install\|uninstall\|status` | Install and load, remove, or inspect the gateway, watcher and up LaunchAgents (macOS). |
 | `pan config set-token` | Write `~/.pan/credentials.json` at mode 0600 (prompts). |
 | `pan config show` | Print the resolved config, credentials masked. |
 | `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its route, its parsed directive and its thread's tie. |

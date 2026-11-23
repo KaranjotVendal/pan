@@ -24,6 +24,21 @@ READ_FULL_HISTORY_LINES = 5000
 # filesystem events (or several items arriving together) becomes a single wake.
 WATCHER_DEBOUNCE_SECONDS = 1.0
 
+# The launchd agents `pan service` installs, in install order: the gateway and watcher are
+# KeepAlive services, and `up` runs `pan up` once at login (it needs the other two up first).
+# Each is the per-user LaunchAgent com.pan.<name>, rendered from the package's
+# launchd/com.pan.<name>.plist.template.
+LAUNCHD_SERVICE_NAMES: tuple[str, ...] = ("gateway", "watcher", "up")
+LAUNCHD_LABEL_PREFIX = "com.pan."
+LAUNCHD_TEMPLATE_SUFFIX = ".plist.template"
+# The two placeholders in those templates.
+LAUNCHD_HOME_PLACEHOLDER = "<PAN_HOME>"
+LAUNCHD_BINARY_PLACEHOLDER = "<PAN_BIN>"
+# A bootstrap right after a bootout can fail while launchd still tears the old job down, so
+# the launchd adapter retries it this many times, this far apart.
+LAUNCHD_BOOTSTRAP_ATTEMPTS = 3
+LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 1.0
+
 # Labels pan puts on the terminals it starts, for a host that supports them (hc does).
 # Workers carry their thread and channel so `hc ls --label` finds them without the thread
 # map; `herdr.space` opts a terminal into a Herdr app space (only when
@@ -95,9 +110,9 @@ HELP_FLAG_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
 # The unknown-command notice echoes a Slack-supplied token back into the reply, so it is
 # truncated (and reduced to a safe charset in help.py) before it is posted.
 HELP_ECHOED_COMMAND_MAX_LENGTH = 40
-# The commands worth listing to a phone user. The rest (gateway, watcher, hook, inbox, threads,
-# spawn, slack-post) are launchd/dev-only, so they are dropped from the Slack listing; asking for
-# one by name (`help inbox`) still renders it, so nothing is hard-blocked.
+# The commands worth listing to a phone user. The rest (gateway, watcher, service, hook, inbox,
+# threads, spawn, slack-post) are launchd/dev-only, so they are dropped from the Slack listing;
+# asking for one by name (`help inbox`) still renders it, so nothing is hard-blocked.
 HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
     "sessions",
     "check",

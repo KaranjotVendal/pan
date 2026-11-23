@@ -228,6 +228,25 @@ class SessionSummary(BaseModel, frozen=True):
     last_ask: str | None = None
 
 
+class LaunchdJobState(BaseModel, frozen=True):
+    # What launchd reports for one loaded job. `pid` is None when the job is loaded but not
+    # running (com.pan.up after it succeeded); `last_exit_code` is None when it never exited.
+    pid: int | None = None
+    last_exit_code: int | None = None
+    state: str | None = None
+
+
+class ServiceStatus(BaseModel, frozen=True):
+    # One `pan service status` row: `name` is the pan command the agent runs (gateway,
+    # watcher, up), `label` its launchd label (com.pan.<name>).
+    name: str
+    label: str
+    plist_installed: bool
+    loaded: bool
+    pid: int | None = None
+    last_exit_code: int | None = None
+
+
 class SlackCredentials(BaseModel, frozen=True):
     bot_token: SecretStr
     app_token: SecretStr

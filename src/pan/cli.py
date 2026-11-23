@@ -14,6 +14,7 @@ from typer._click.exceptions import ClickException
 
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
+from pan.adapters.launchd import build_service_manager
 from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.adapters.terminal_host import build_terminal_host
 from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
@@ -26,6 +27,7 @@ from pan.errors import (
     InboxError,
     NotPanSessionError,
     PanError,
+    ServiceError,
     SessionBusyError,
     SlackPostError,
     SpawnError,
@@ -50,6 +52,12 @@ from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
 from pan.models import InboxItem, PanConfig, Route, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
+from pan.service import (
+    install_services,
+    resolve_pan_binary,
+    service_statuses,
+    uninstall_services,
+)
 from pan.session_control import (
     check_thread,
     follow_up_to_session,
@@ -70,10 +78,14 @@ config_app = typer.Typer(no_args_is_help=True, help="Manage config and credentia
 inbox_app = typer.Typer(no_args_is_help=True, help="Inbox queue operations")
 threads_app = typer.Typer(no_args_is_help=True, help="Thread-map operations")
 hook_app = typer.Typer(no_args_is_help=True, help="Claude Code worker hook entrypoints")
+service_app = typer.Typer(
+    no_args_is_help=True, help="Install, remove or inspect pan's launchd agents (macOS)"
+)
 app.add_typer(config_app, name="config")
 app.add_typer(inbox_app, name="inbox")
 app.add_typer(threads_app, name="threads")
 app.add_typer(hook_app, name="hook")
+app.add_typer(service_app, name="service")
 
 # Documented taxonomy -> exit-code table. Unclassified exceptions are defects and
 # surface as tracebacks (Principle 4), never mapped here.
@@ -94,6 +106,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     TerminalNameTakenError: 24,
     NotPanSessionError: 25,
     SessionBusyError: 26,
+    ServiceError: 27,
 }
 
 
@@ -129,6 +142,40 @@ def watcher() -> None:
     WatchdogInboxWatcher(
         build_terminal_host(config.terminal_host), config.orchestrator.terminal, config.paths.inbox
     ).start()
+
+
+@service_app.command("install")
+def service_install() -> None:
+    """Install and load the gateway, watcher and up LaunchAgents, so pan starts at login.
+    Running it again reinstalls them."""
+    home = Path.home()
+    pan_binary = resolve_pan_binary(home)
+    labels = install_services(build_service_manager(home), home=home, pan_binary=pan_binary)
+    for label in labels:
+        typer.echo(f"loaded {label}")
+    typer.echo(f"agents run {pan_binary}; logs in {home / '.pan' / 'logs'}")
+
+
+@service_app.command("uninstall")
+def service_uninstall() -> None:
+    """Unload the pan LaunchAgents and delete their plists."""
+    for result in uninstall_services(build_service_manager(Path.home())):
+        loaded = "unloaded" if result.was_loaded else "was not loaded"
+        plist = "plist deleted" if result.plist_removed else "no plist"
+        typer.echo(f"{result.label}: {loaded}, {plist}")
+
+
+@service_app.command("status")
+def service_status() -> None:
+    """Show each pan LaunchAgent: plist installed, loaded, pid and last exit code."""
+    for status in service_statuses(build_service_manager(Path.home())):
+        installed = "installed" if status.plist_installed else "not installed"
+        loaded = "loaded" if status.loaded else "not loaded"
+        pid = status.pid if status.pid is not None else "-"
+        last_exit = status.last_exit_code if status.last_exit_code is not None else "-"
+        typer.echo(
+            f"{status.label:<16} {installed:<13} {loaded:<10} pid={pid} last_exit={last_exit}"
+        )
 
 
 @config_app.command("set-token")

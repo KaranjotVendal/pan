@@ -8,9 +8,9 @@
   the hc core is not reachable yet at login), at most every ThrottleInterval seconds.
   This file carries NO secrets.
 
-  To install, replace every <PAN_HOME> with your home directory (e.g. /Users/you),
-  save as ~/Library/LaunchAgents/com.pan.up.plist, then `launchctl load` it.
-  See README.md.
+  Installed by `pan service install`, which fills in the PAN_HOME placeholder (your home
+  directory) and the PAN_BIN placeholder (the installed `pan` executable). See README.md
+  for a manual install.
 -->
 <plist version="1.0">
 <dict>
@@ -19,7 +19,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string><PAN_HOME>/.local/bin/pan</string>
+        <string><PAN_BIN></string>
         <string>up</string>
     </array>
 
