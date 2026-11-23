@@ -269,12 +269,12 @@ def test_non_leading_read_verb_stays_delegate() -> None:
     "raw_text, expected_target, expected_message",
     [
         (
-            "<@U0BHY6GH48L> relay pan-test-target hello there",
+            "<@U0TESTBOT1> relay pan-test-target hello there",
             "pan-test-target",
             "hello there",
         ),
         (
-            "<@U0BHY6GH48L>relay pan-test-target hello there",
+            "<@U0TESTBOT1>relay pan-test-target hello there",
             "pan-test-target",
             "hello there",
         ),
@@ -295,8 +295,8 @@ def test_leading_mention_stripped_before_relay_verb(
 @pytest.mark.parametrize(
     "raw_text, expected_full",
     [
-        ("<@U0BHY6GH48L> read pan-test-target", False),
-        ("<@U0BHY6GH48L> read pan-test-target --full", True),
+        ("<@U0TESTBOT1> read pan-test-target", False),
+        ("<@U0TESTBOT1> read pan-test-target --full", True),
     ],
 )
 def test_leading_mention_stripped_before_read_verb(raw_text: str, expected_full: bool) -> None:
@@ -308,13 +308,13 @@ def test_leading_mention_stripped_before_read_verb(raw_text: str, expected_full:
 
 
 def test_leading_mention_stripped_before_sessions_flag() -> None:
-    directive = parse_directive("<@U0BHY6GH48L> --sessions")
+    directive = parse_directive("<@U0TESTBOT1> --sessions")
 
     assert directive.mode is TaskMode.SESSIONS
 
 
 def test_leading_mention_stripped_on_delegate_and_absent_from_cleaned_text() -> None:
-    directive = parse_directive("<@U0BHY6GH48L> create a file called notes.txt")
+    directive = parse_directive("<@U0TESTBOT1> create a file called notes.txt")
 
     assert directive.mode is TaskMode.DELEGATE
     assert directive.cleaned_text == "create a file called notes.txt"
@@ -322,7 +322,7 @@ def test_leading_mention_stripped_on_delegate_and_absent_from_cleaned_text() -> 
 
 
 def test_only_leading_mention_stripped_not_one_in_message_body() -> None:
-    directive = parse_directive("<@U0BHY6GH48L> relay pan-test-target tell <@U9999FOO> hi")
+    directive = parse_directive("<@U0TESTBOT1> relay pan-test-target tell <@U9999FOO> hi")
 
     assert directive.mode is TaskMode.RELAY
     assert directive.target == "pan-test-target"
@@ -355,10 +355,10 @@ def test_all_sessions_spellings_route_to_sessions_mode(raw_text: str) -> None:
 @pytest.mark.parametrize(
     "raw_text",
     [
-        "<@U0BHY6GH48L> --sessions",
-        f"<@U0BHY6GH48L> {_EM_DASH}sessions",
-        f"<@U0BHY6GH48L> {_EN_DASH}sessions",
-        "<@U0BHY6GH48L> sessions",
+        "<@U0TESTBOT1> --sessions",
+        f"<@U0TESTBOT1> {_EM_DASH}sessions",
+        f"<@U0TESTBOT1> {_EN_DASH}sessions",
+        "<@U0TESTBOT1> sessions",
     ],
 )
 def test_sessions_spellings_route_after_a_leading_mention(raw_text: str) -> None:
