@@ -130,10 +130,13 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert run.cwd == tmp_path / "pan-backend"
     # The brief is one argv element after `claude`: never parsed as shell text. It opens
     # with the fixed Inbox preamble naming the session's Inbox thread.
-    assert run.argv == ["claude", worker_brief("pan-backend: do the thing", "do the thing")]
+    assert run.argv == [
+        "claude",
+        worker_brief("pan-backend: do the thing", "do the thing", ReplyMode.ON_DEMAND),
+    ]
     assert run.argv[1].endswith("\n\nTask:\ndo the thing")
     assert 'in a thread named exactly "pan-backend: do the thing"' in run.argv[1]
-    assert "Do not post to Slack." in run.argv[1]
+    assert "Do not post to Slack yourself" in run.argv[1]
     assert run.labels == {"pan.role": "worker", "pan.thread": _THREAD, "pan.channel": "C1"}
     assert record.status is WorkerStatus.SPAWNING
     assert record.terminal_name == "pan-backend"
@@ -200,6 +203,8 @@ def test_spawn_sets_the_reply_mode_from_the_request(
     assert slack.posts[0][2].endswith("answers will also be posted here") is (
         expected_mode is ReplyMode.SLACK
     )
+    (run,) = terminal_host.runs
+    assert run.argv[1] == worker_brief(record.inbox_thread_name or "", task, expected_mode)
 
 
 @pytest.mark.parametrize(
@@ -475,3 +480,33 @@ def test_reopen_never_restarts_a_session_pan_did_not_start(tmp_path: Path) -> No
     assert terminal_host.runs == []
     assert thread_map.records == {}
     assert slack.posts == [("C1", _THREAD, to_slack_mrkdwn(desk_session_ended_reply("desk-api")))]
+
+
+@pytest.mark.parametrize(
+    "reply_mode, expected_sentence, unwanted_text",
+    [
+        (
+            ReplyMode.SLACK,
+            "Do not post to Slack yourself: pan posts your final answer to this Slack thread "
+            "for you.",
+            "only when the person asks",
+        ),
+        (
+            ReplyMode.ON_DEMAND,
+            "Do not post to Slack yourself: the Slack thread gets a reply only when the person "
+            "asks for one, and pan posts it for you.",
+            "posts your final answer",
+        ),
+    ],
+    ids=["slack", "on-demand"],
+)
+def test_worker_brief_says_who_replies_in_slack(
+    reply_mode: ReplyMode, expected_sentence: str, unwanted_text: str
+) -> None:
+    brief = worker_brief("pan-a: do the thing", "do the thing", reply_mode)
+
+    preamble, task = brief.split("\n\nTask:\n")
+    assert task == "do the thing"
+    assert preamble.endswith(expected_sentence)
+    assert unwanted_text not in preamble
+    assert "Do not post to Slack." not in preamble

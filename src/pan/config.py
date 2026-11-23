@@ -17,6 +17,9 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "pan" / "config.json"
 # fetched via `hc read` before the orchestrator summarizes them. Named here rather than
 # inlined at the call site so the tunable is discoverable and overridable (Principle 7).
 READ_RECENT_LINES = 200
+# `check` on a session with no transcript posts its screen text, cleaned for Slack and cut to
+# at most this many non-empty lines from the bottom of the screen.
+CHECK_SCREEN_MAX_LINES = 30
 # `pan read --full` on a terminal pan has no transcript for (an external one) falls back to
 # this much hc screen history.
 READ_FULL_HISTORY_LINES = 5000

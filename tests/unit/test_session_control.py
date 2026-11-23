@@ -16,6 +16,7 @@ from pan.errors import (
     TerminalGoneError,
     ThreadNotFoundError,
 )
+from pan.interface import INCOMPLETE_READ_NOTICE
 from pan.models import (
     AgentStatus,
     InboxThread,
@@ -27,6 +28,7 @@ from pan.models import (
 from pan.session_control import (
     UNTIED_THREAD_REPLY,
     check_thread,
+    clean_screen_text,
     follow_up_to_session,
     forget_thread,
     from_slack_text,
@@ -158,7 +160,14 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
     _send(terminal_host, thread_map, slack, reply_in_slack=reply_in_slack)
 
     assert terminal_host.sent == [
-        ("t7", from_slack_text("pan-7: fix the login page", "add the tests"))
+        (
+            "t7",
+            from_slack_text(
+                "pan-7: fix the login page",
+                "add the tests",
+                ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND,
+            ),
+        )
     ]
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
@@ -322,7 +331,7 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     _send(terminal_host, thread_map, slack, "desk-api")
 
     assert terminal_host.sent == [
-        ("t9", from_slack_text("desk-api: add the tests", "add the tests"))
+        ("t9", from_slack_text("desk-api: add the tests", "add the tests", ReplyMode.ON_DEMAND))
     ]
     assert terminal_host.sent[0][1].startswith("From Slack via pan.")
     tied = thread_map.get(_NEW_THREAD)
@@ -363,7 +372,7 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
     _send(terminal_host, thread_map, slack, "desk-api", inbox_directory=inbox_directory)
 
     assert terminal_host.sent == [
-        ("t9", from_slack_text("desk-api: fix the build", "add the tests"))
+        ("t9", from_slack_text("desk-api: fix the build", "add the tests", ReplyMode.ON_DEMAND))
     ]
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
@@ -431,7 +440,7 @@ def test_send_joins_a_session_record_only_to_its_own_terminal(
     _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
 
     assert terminal_host.sent == [
-        ("t10", from_slack_text(expected_inbox_thread_name, "add the tests"))
+        ("t10", from_slack_text(expected_inbox_thread_name, "add the tests", ReplyMode.ON_DEMAND))
     ]
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
@@ -718,7 +727,7 @@ def _follow_up(
                 inbox_thread_name="desk-api: fix the build",
             ),
             make_terminal("t9", name="desk-api", agent_status=AgentStatus.DONE),
-            from_slack_text("desk-api: fix the build", "and the docs"),
+            from_slack_text("desk-api: fix the build", "and the docs", ReplyMode.ON_DEMAND),
         ),
     ],
     ids=["pan-session-verbatim", "desk-session-with-from-slack-line"],
@@ -794,3 +803,113 @@ def test_follow_up_in_an_untied_thread_replies_one_line(tmp_path: Path) -> None:
 
     assert terminal_host.sent == []
     assert slack.texts() == [UNTIED_THREAD_REPLY]
+
+
+@pytest.mark.parametrize(
+    "reply_mode, expected_sentence",
+    [
+        (
+            ReplyMode.SLACK,
+            "Do not post to Slack yourself: pan posts your final answer to this Slack thread "
+            "for you.",
+        ),
+        (
+            ReplyMode.ON_DEMAND,
+            "Do not post to Slack yourself: the Slack thread gets a reply only when the person "
+            "asks for one, and pan posts it for you.",
+        ),
+    ],
+    ids=["slack", "on-demand"],
+)
+def test_from_slack_text_says_who_replies_in_slack(
+    reply_mode: ReplyMode, expected_sentence: str
+) -> None:
+    typed = from_slack_text("desk-api: fix the build", "add the tests", reply_mode)
+
+    header, task = typed.split("\n\nTask:\n")
+    assert task == "add the tests"
+    assert '"desk-api: fix the build"' in header
+    assert header.endswith(expected_sentence)
+
+
+def test_follow_up_to_a_desk_session_in_slack_mode_says_pan_posts_the_answer(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=False,
+        inbox_thread_name="desk-api: fix the build",
+        reply_mode=ReplyMode.SLACK,
+    )
+    thread_map = _thread_map(tmp_path, record)
+    terminal_host = _host(make_terminal("t9", name="desk-api", agent_status=AgentStatus.DONE))
+
+    follow_up_to_session(
+        thread_ts=_OLD_THREAD,
+        channel="C0TEST",
+        text="and the docs",
+        terminal_host=terminal_host,
+        thread_map=thread_map,
+        slack=RecordingSlack(),
+    )
+
+    assert terminal_host.sent == [
+        ("t9", from_slack_text("desk-api: fix the build", "and the docs", ReplyMode.SLACK))
+    ]
+
+
+_DIVIDER = "\u2500" * 200
+
+
+@pytest.mark.parametrize(
+    "screen, max_lines, expected",
+    [
+        ("first line\nsecond line", 30, "first line\nsecond line"),
+        (f"{_DIVIDER}\n> fix it\n{_DIVIDER}\n  ? for shortcuts", 30, "> fix it\n  ? for shortcuts"),
+        (
+            "\u256d\u2500\u2500\u256e\n\u2502 Claude Code \u2502\n\u2570\u2500\u2500\u256f\n--- \n===",
+            30,
+            "\u2502 Claude Code \u2502",
+        ),
+        ("\n\nanswer\n\n\n   \n\nnext\n\n", 30, "answer\n\nnext"),
+        (f"answer\n\n{_DIVIDER}\n\nnext", 30, "answer\n\nnext"),
+        ("trailing   \nspaces\t", 30, "trailing\nspaces"),
+        ("one\ntwo\n\nthree\nfour", 2, "three\nfour"),
+        ("one\ntwo\n\nthree\nfour", 3, "two\n\nthree\nfour"),
+        (
+            f"{INCOMPLETE_READ_NOTICE}\none\n{_DIVIDER}\ntwo\nthree",
+            2,
+            f"{INCOMPLETE_READ_NOTICE}\ntwo\nthree",
+        ),
+    ],
+    ids=[
+        "normal-text-kept",
+        "dividers-removed",
+        "banner-frame-and-ascii-rules-removed",
+        "blank-runs-collapsed",
+        "blank-runs-around-a-divider-collapsed",
+        "trailing-whitespace-stripped",
+        "tail-limit",
+        "tail-limit-keeps-inner-blank-line",
+        "incomplete-marker-kept",
+    ],
+)
+def test_clean_screen_text(screen: str, max_lines: int, expected: str) -> None:
+    assert clean_screen_text(screen, max_lines) == expected
+
+
+def test_check_without_a_transcript_posts_cleaned_screen_text(tmp_path: Path) -> None:
+    thread_map = _thread_map(tmp_path, _record())
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    screen = f"{_DIVIDER}\n\n\nlast screen lines\n\n{_DIVIDER}"
+    terminal_host.read_result = TerminalRead(text=screen, complete=False)
+    slack = RecordingSlack()
+
+    _check(thread_map, terminal_host, slack)
+
+    assert slack.texts() == [
+        'pan-7 · Inbox thread: "pan-7: fix the login page"\n'
+        "pan-7 is idle.\n\n"
+        f"Screen text (no transcript yet):\n```\n{INCOMPLETE_READ_NOTICE}\nlast screen lines\n```"
+    ]
