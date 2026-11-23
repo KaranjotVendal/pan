@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Hashable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from pan.config import (
     CLAUDE_AGENT_NAMES,
     INBOX_ROUTE_LISTING_BUDGET_SECONDS,
     INBOX_ROUTE_MAX_PROJECTS,
+    INBOX_ROUTE_WORKERS,
+    SESSION_ACTIVITY_BUDGET_SECONDS,
 )
 from pan.errors import (
     InboxThreadAmbiguousError,
@@ -75,14 +78,79 @@ def _live_claude_sessions(terminals: list[Terminal]) -> list[Terminal]:
     ]
 
 
-def _project_folders(sessions: list[Terminal]) -> list[Path]:
-    # The distinct folders the live Claude sessions run in, first seen first, capped. Each is
-    # one Inbox listing; plannotator maps a worktree to its main repository's project.
-    folders: list[Path] = []
+def _gather[Key: Hashable, Result](
+    call: Callable[[Key], Result], keys: list[Key], budget_seconds: float, what: str
+) -> dict[Key, Result]:
+    # Run `call` on every key, INBOX_ROUTE_WORKERS at a time in key order, and keep what has
+    # answered within one overall time budget. A key whose call is still queued or running
+    # then, or failed, is skipped with a log line; a running call keeps going in the
+    # background until its own timeout.
+    if not keys:
+        return {}
+    executor = ThreadPoolExecutor(max_workers=INBOX_ROUTE_WORKERS)
+    try:
+        futures: dict[Key, Future[Result]] = {key: executor.submit(call, key) for key in keys}
+        wait(futures.values(), timeout=budget_seconds)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    results: dict[Key, Result] = {}
+    for key, future in futures.items():
+        if future.cancelled() or not future.done():
+            logger.warning(f"{what} skipped, no answer within {budget_seconds}s: {key}")
+            continue
+        if future.exception() is not None:
+            logger.warning(f"{what} failed: {key}")
+            continue
+        results[key] = future.result()
+    return results
+
+
+def activity_ms(terminal: Terminal) -> int | None:
+    # When the session was last active: its last status change, else when it was created.
+    if terminal.status_changed_ms is not None:
+        return terminal.status_changed_ms
+    return terminal.created_ms
+
+
+def _with_activity(
+    sessions: list[Terminal], session_details: Callable[[str], Terminal] | None
+) -> list[Terminal]:
+    # The sessions with their activity times, fetched (by address) for those the listing gave
+    # none; a session whose details do not come back keeps none.
+    missing = [session.address for session in sessions if activity_ms(session) is None]
+    if session_details is None or not missing:
+        return sessions
+    details = _gather(
+        session_details, missing, SESSION_ACTIVITY_BUDGET_SECONDS, "session activity lookup"
+    )
+    return [
+        session.model_copy(
+            update={
+                "status_changed_ms": details[session.address].status_changed_ms,
+                "created_ms": details[session.address].created_ms,
+            }
+        )
+        if session.address in details
+        else session
+        for session in sessions
+    ]
+
+
+def project_folders(sessions: list[Terminal]) -> list[Path]:
+    # The distinct folders the live Claude sessions run in, most recently active first (a
+    # folder is as active as its most active session; with no time, last, in listing order),
+    # capped. Each is one Inbox listing; plannotator maps a worktree to its main repository's
+    # project. Worktrees of one repository are not merged here: telling them apart would cost
+    # a git call per folder, and a thread listed twice is kept once (_open_threads).
+    folder_activity: dict[Path, int] = {}
     for session in sessions:
         folder = _resolved(session.cwd)
-        if folder not in folders:
-            folders.append(folder)
+        session_activity = activity_ms(session)
+        known = folder_activity.get(folder, -1)
+        folder_activity[folder] = max(
+            known, session_activity if session_activity is not None else -1
+        )
+    folders = sorted(folder_activity, key=lambda folder: folder_activity[folder], reverse=True)
     if len(folders) > INBOX_ROUTE_MAX_PROJECTS:
         logger.info(
             f"inbox routing lists {INBOX_ROUTE_MAX_PROJECTS} of {len(folders)} session folders"
@@ -91,32 +159,15 @@ def _project_folders(sessions: list[Terminal]) -> list[Path]:
 
 
 def _open_threads(inbox_directory: InboxDirectory, folders: list[Path]) -> list[InboxThread]:
-    # Every folder is listed at once, within one overall time budget; a folder whose listing
-    # has not answered by then is skipped (its call keeps running in the background until its
-    # own timeout). Several folders can share a project, so a thread listed more than once is
-    # kept once, in folder order.
-    if not folders:
-        return []
-    executor = ThreadPoolExecutor(max_workers=INBOX_ROUTE_MAX_PROJECTS)
-    try:
-        listings: dict[Path, Future[list[InboxThread]]] = {
-            folder: executor.submit(inbox_directory.list_threads, folder) for folder in folders
-        }
-        wait(listings.values(), timeout=INBOX_ROUTE_LISTING_BUDGET_SECONDS)
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    # The folders' open threads, listed in folder order within one overall time budget, so a
+    # budget that runs out skips the stalest folders. Several folders can share a project, so
+    # a thread listed more than once is kept once, in folder order.
+    listings = _gather(
+        inbox_directory.list_threads, folders, INBOX_ROUTE_LISTING_BUDGET_SECONDS, "inbox listing"
+    )
     threads: dict[str, InboxThread] = {}
-    for folder, listing in listings.items():
-        if not listing.done():
-            logger.warning(
-                f"inbox routing skipped a folder that did not answer within "
-                f"{INBOX_ROUTE_LISTING_BUDGET_SECONDS}s folder={folder}"
-            )
-            continue
-        if listing.exception() is not None:
-            logger.warning(f"inbox routing listing failed folder={folder}")
-            continue
-        for thread in listing.result():
+    for folder in folders:
+        for thread in listings.get(folder, []):
             threads.setdefault(thread.thread_id, thread)
     return list(threads.values())
 
@@ -127,6 +178,7 @@ def route_by_inbox_thread(
     *,
     inbox_directory: InboxDirectory,
     session_folders: SessionFolders,
+    session_details: Callable[[str], Terminal] | None = None,
 ) -> RoutedSession | None:
     # The live Claude session that writes the Inbox thread the selector names: the thread's
     # newest agent message gives the session id, its transcript gives the folder, and the live
@@ -135,7 +187,8 @@ def route_by_inbox_thread(
     # names several threads, when several sessions run in that folder, or when none does;
     # route_session tries the words before it reports any of these.
     sessions = _live_claude_sessions(terminals)
-    threads = matching_threads(selector, _open_threads(inbox_directory, _project_folders(sessions)))
+    folders = project_folders(_with_activity(sessions, session_details))
+    threads = matching_threads(selector, _open_threads(inbox_directory, folders))
     if not threads:
         return None
     if len(threads) > 1:
@@ -186,6 +239,7 @@ def route_session(
     *,
     inbox_directory: InboxDirectory,
     session_folders: SessionFolders,
+    session_details: Callable[[str], Terminal] | None = None,
 ) -> RoutedSession:
     # `to <selector>:` resolution, first match wins: exact address, exact terminal name,
     # exact Herdr label or its space (resolve_target), then the Inbox thread the selector
@@ -193,6 +247,8 @@ def route_session(
     # thread but cannot reach one live session for it, the words are still tried: one match
     # wins, several get their pick list, and only with none is the thread step's refusal
     # raised (it says more than a plain not-found). Ambiguity is refused, never guessed.
+    # `session_details` (the terminal host's `get`) gives each session's activity time, which
+    # orders the Inbox listings most recently active first.
     try:
         return RoutedSession(terminal=resolve_target(selector, terminals))
     except TargetNotFoundError:
@@ -200,7 +256,11 @@ def route_session(
     thread_refusal: PanError | None = None
     try:
         routed = route_by_inbox_thread(
-            selector, terminals, inbox_directory=inbox_directory, session_folders=session_folders
+            selector,
+            terminals,
+            inbox_directory=inbox_directory,
+            session_folders=session_folders,
+            session_details=session_details,
         )
     except (ThreadSessionNotRunningError, InboxThreadAmbiguousError, TargetAmbiguousError) as e:
         logger.info(f"inbox routing refused, trying words selector={selector}: {e}")

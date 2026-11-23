@@ -89,10 +89,16 @@ INBOX_LOOKUP_THREAD_LIMIT = 50
 INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
 # `to <selector>:` routing by Inbox thread name lists the open threads of the projects of at
 # most this many distinct folders among the live Claude sessions (one plannotator call each).
-INBOX_ROUTE_MAX_PROJECTS = 6
-# Those listings run at once; any that has not answered within this many seconds in total is
-# skipped, so routing never waits on the Inbox for longer than this.
+INBOX_ROUTE_MAX_PROJECTS = 40
+# Those listings run this many at a time, most recently active folder first; any that has not
+# answered within this many seconds in total is skipped (the stalest, given the order), so
+# routing never waits on the Inbox for longer than this.
+INBOX_ROUTE_WORKERS = 8
 INBOX_ROUTE_LISTING_BUDGET_SECONDS = 8.0
+# The live Claude sessions' last status change (one `hc get` each, run INBOX_ROUTE_WORKERS at a
+# time) orders those folders; a session whose details have not come back within this many
+# seconds in total keeps no activity time and goes last.
+SESSION_ACTIVITY_BUDGET_SECONDS = 2.0
 # A `to` selector is at most this many words (`to pan with slack: <task>`), so a long sentence
 # that happens to start with "to" and hold a colon stays a plain task.
 TO_ROUTE_SELECTOR_MAX_WORDS = 6

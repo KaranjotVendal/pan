@@ -20,6 +20,7 @@ from pan.models import InboxThread, Terminal, TerminalState
 from pan.routing import (
     RoutedSession,
     matching_threads,
+    project_folders,
     route_by_words,
     route_session,
     words_match,
@@ -379,3 +380,162 @@ def test_inbox_listings_run_at_once_within_one_time_budget(
         assert time.monotonic() - started < 2
     finally:
         release.set()
+
+
+def _session(address: str, folder: str, status_ms: int | None, created_ms: int | None) -> Terminal:
+    return make_terminal(address, cwd=Path(folder)).model_copy(
+        update={"status_changed_ms": status_ms, "created_ms": created_ms}
+    )
+
+
+@pytest.mark.parametrize(
+    "sessions, expected_folder_names",
+    [
+        (
+            [
+                _session("t1", "/tmp/old", 100, 10),
+                _session("t2", "/tmp/new", 300, 10),
+                _session("t3", "/tmp/mid", 200, 10),
+            ],
+            ["new", "mid", "old"],
+        ),
+        (
+            [_session("t1", "/tmp/status", 150, 10), _session("t2", "/tmp/created", None, 200)],
+            ["created", "status"],
+        ),
+        (
+            [
+                _session("t1", "/tmp/unknown-a", None, None),
+                _session("t2", "/tmp/known", 5, None),
+                _session("t3", "/tmp/unknown-b", None, None),
+            ],
+            ["known", "unknown-a", "unknown-b"],
+        ),
+        (
+            [
+                _session("t1", "/tmp/shared", 100, 10),
+                _session("t2", "/tmp/other", 200, 10),
+                _session("t3", "/tmp/shared", 300, 10),
+            ],
+            ["shared", "other"],
+        ),
+    ],
+    ids=[
+        "newest-status-change-first",
+        "created-time-when-no-status-change",
+        "no-time-goes-last-in-listing-order",
+        "a-folder-is-as-active-as-its-most-active-session",
+    ],
+)
+def test_project_folders_most_recently_active_first(
+    sessions: list[Terminal], expected_folder_names: list[str]
+) -> None:
+    assert [folder.name for folder in project_folders(sessions)] == expected_folder_names
+
+
+def test_project_folders_respects_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routing, "INBOX_ROUTE_MAX_PROJECTS", 3)
+    sessions = [_session(f"t{index}", f"/tmp/repo-{index}", index, None) for index in range(5)]
+
+    assert [folder.name for folder in project_folders(sessions)] == [
+        "repo-4",
+        "repo-3",
+        "repo-2",
+    ]
+
+
+class ConcurrencyInboxDirectory:
+    # Records the order listings start in and the most that ran at once; each takes a while.
+    def __init__(self, seconds_per_listing: float) -> None:
+        self._seconds_per_listing = seconds_per_listing
+        self._lock = threading.Lock()
+        self._running = 0
+        self.peak = 0
+        self.started: list[Path] = []
+
+    def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None:
+        return None
+
+    def list_threads(self, project_path: Path) -> list[InboxThread]:
+        with self._lock:
+            self._running += 1
+            self.peak = max(self.peak, self._running)
+            self.started.append(project_path)
+        time.sleep(self._seconds_per_listing)
+        with self._lock:
+            self._running -= 1
+        return []
+
+    def latest_agent_session(self, thread_id: str) -> str | None:
+        return None
+
+
+@pytest.mark.parametrize("workers", [1, 2, 3], ids=["one-worker", "two-workers", "three-workers"])
+def test_listings_run_with_a_worker_count_separate_from_the_cap(
+    monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    monkeypatch.setattr(routing, "INBOX_ROUTE_WORKERS", workers)
+    monkeypatch.setattr(routing, "INBOX_ROUTE_MAX_PROJECTS", 6)
+    inbox_directory = ConcurrencyInboxDirectory(seconds_per_listing=0.05)
+    sessions = [_session(f"t{index}", f"/tmp/repo-{index}", index, None) for index in range(8)]
+
+    with pytest.raises(TargetNotFoundError):
+        route_session(
+            "nothing like it",
+            sessions,
+            inbox_directory=inbox_directory,
+            session_folders=FakeSessionFolders(),
+        )
+
+    assert inbox_directory.peak == workers
+    assert len(inbox_directory.started) == 6
+
+
+def test_a_budget_that_runs_out_skips_the_stalest_folders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routing, "INBOX_ROUTE_WORKERS", 1)
+    monkeypatch.setattr(routing, "INBOX_ROUTE_LISTING_BUDGET_SECONDS", 0.25)
+    inbox_directory = ConcurrencyInboxDirectory(seconds_per_listing=0.1)
+    sessions = [_session(f"t{index}", f"/tmp/repo-{index}", index, None) for index in range(6)]
+
+    with pytest.raises(TargetNotFoundError):
+        route_session(
+            "nothing like it",
+            sessions,
+            inbox_directory=inbox_directory,
+            session_folders=FakeSessionFolders(),
+        )
+    time.sleep(0.15)
+
+    started = [folder.name for folder in inbox_directory.started]
+    assert started == ["repo-5", "repo-4", "repo-3"][: len(started)]
+    assert 1 <= len(started) <= 3
+    assert "repo-0" not in started
+
+
+def test_activity_times_are_fetched_for_sessions_the_listing_gave_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(routing, "INBOX_ROUTE_WORKERS", 1)
+    listed = [_session(f"t{index}", f"/tmp/repo-{index}", None, None) for index in range(3)]
+    details = {
+        "t1": _session("t1", "/tmp/repo-1", 300, 1),
+        "t2": _session("t2", "/tmp/repo-2", 100, 1),
+    }
+
+    def session_details(address: str) -> Terminal:
+        if address not in details:
+            raise TargetNotFoundError(address)
+        return details[address]
+
+    inbox_directory = ConcurrencyInboxDirectory(seconds_per_listing=0)
+    with pytest.raises(TargetNotFoundError):
+        route_session(
+            "nothing like it",
+            listed,
+            inbox_directory=inbox_directory,
+            session_folders=FakeSessionFolders(),
+            session_details=session_details,
+        )
+
+    # t0's details failed, so its folder has no time and goes last.
+    assert [folder.name for folder in inbox_directory.started] == ["repo-1", "repo-2", "repo-0"]

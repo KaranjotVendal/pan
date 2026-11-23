@@ -193,6 +193,10 @@ class Terminal(BaseModel, frozen=True):
     agent: str | None = None
     agent_status: AgentStatus
     turn: int | None = None
+    # When the agent status last changed and when the terminal was created (Unix ms), when the
+    # host reports them (hc's `get` does, its `ls` does not).
+    status_changed_ms: int | None = None
+    created_ms: int | None = None
 
 
 class InboxThread(BaseModel, frozen=True):

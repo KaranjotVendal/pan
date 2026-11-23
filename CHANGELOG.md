@@ -72,9 +72,13 @@ as it works (see `AGENT_LOOP.md` step 9).
   Plannotator Inbox thread the session writes (exact name, else every selector word starts a word of
   the name, ignoring case; resolved threads are not listed), then every selector word in the live
   session's name, Herdr label and folder name. Thread routing lists the open threads of the projects
-  of the distinct folders of live Claude sessions (at most `INBOX_ROUTE_MAX_PROJECTS`, 6), all at
-  once within one overall budget of `INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8 s; a project that has not
-  answered is skipped with a log line); reads the matching thread in full for the `author.session` of
+  of the distinct folders of live Claude sessions (at most `INBOX_ROUTE_MAX_PROJECTS`, 40), most
+  recently active folder first (a session's last status change, else its creation time, from hc's
+  `get`, fetched only for this step within `SESSION_ACTIVITY_BUDGET_SECONDS`, 2 s; new
+  `Terminal.status_changed_ms` and `Terminal.created_ms`), `INBOX_ROUTE_WORKERS` (8) at a time
+  within one overall budget of `INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8 s; a project that has not
+  answered is skipped with a log line, so a budget that runs out skips the stalest). Worktrees of one
+  repository are not merged before listing (a thread listed twice is kept once); reads the matching thread in full for the `author.session` of
   its newest agent message (a message with no `created_at` counts as newer than every earlier one);
   finds that session's folder from the first `cwd` in its transcript
   (`~/.claude/projects/*/<id>.jsonl`, the most recently modified when there are several, at most

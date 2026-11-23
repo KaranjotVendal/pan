@@ -78,9 +78,12 @@ def _agent_name(entry: dict) -> str | None:
     return None
 
 
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _turn(entry: dict) -> int | None:
-    turn = entry.get("turn")
-    return turn if isinstance(turn, int) and not isinstance(turn, bool) else None
+    return _optional_int(entry.get("turn"))
 
 
 def _where(entry: dict) -> str | None:
@@ -113,6 +116,8 @@ def _to_terminal(entry: object) -> Terminal | None:
         agent=_agent_name(entry),
         agent_status=_map_agent_status(entry.get("status")),
         turn=_turn(entry),
+        status_changed_ms=_optional_int(entry.get("status_ms")),
+        created_ms=_optional_int(entry.get("created_ms")),
     )
 
 

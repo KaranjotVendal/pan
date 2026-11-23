@@ -291,7 +291,11 @@ def send_to_session(
     terminals = terminal_host.list_terminals()
     try:
         routed = route_session(
-            selector, terminals, inbox_directory=inbox_directory, session_folders=session_folders
+            selector,
+            terminals,
+            inbox_directory=inbox_directory,
+            session_folders=session_folders,
+            session_details=terminal_host.get,
         )
     except ThreadSessionNotRunningError as error:
         slack_post(slack, channel, thread_ts, _not_running_reply(error.thread_name))

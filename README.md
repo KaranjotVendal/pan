@@ -215,11 +215,11 @@ work, or to start one named `<name>: <short task>`.
 
 To reach a session by its Inbox thread, pan lists the open threads of the projects of the live
 Claude sessions (`plannotator inbox call read_thread`, read only, at most `INBOX_ROUTE_MAX_PROJECTS`
-projects), reads the matching thread's newest agent message for its Claude session id, finds that
+(40) projects, most recently active first, `INBOX_ROUTE_WORKERS` (8) at a time), reads the matching thread's newest agent message for its Claude session id, finds that
 session's folder from the first lines of its transcript under `~/.claude/projects`, and sends to the
-live Claude session in that folder. The listings run at once and pan waits at most
+live Claude session in that folder. pan waits at most
 `INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8) for them in total; a project that has not answered is
-skipped. When no live session runs in that folder and no session matches the words either, pan
+skipped, so the stalest go first. When no live session runs in that folder and no session matches the words either, pan
 replies that the session writing the thread is not running. Follow-ups in the thread go to
 the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
 only unties it, and when it has ended pan says so and suggests `new:` or `to <name>:`. Desk sessions
