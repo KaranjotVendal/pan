@@ -308,6 +308,38 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert captured["base"] == config.orchestrator.worktree_base
     assert captured["app_space"] == "sp42"
     assert isinstance(captured["terminal_host"], ShellHcAdapter)
+    assert captured["from_thread_reply"] is False
+
+
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_from_thread_reply"),
+    [([], False), (["--thread-reply"], True)],
+    ids=["top-level", "thread-reply"],
+)
+def test_spawn_passes_thread_reply_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra_arguments: list[str],
+    expected_from_thread_reply: bool,
+) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda: _make_config(tmp_path))
+    monkeypatch.setattr(
+        cli,
+        "load_credentials",
+        lambda path: SlackCredentials(
+            bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
+        ),
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "spawn_worker", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(
+        cli.app,
+        ["spawn", "--thread", "t-1", "--task", "build it", "--channel", "C1", *extra_arguments],
+    )
+
+    assert result.exit_code == 0
+    assert captured["from_thread_reply"] is expected_from_thread_reply
 
 
 def test_watcher_builds_from_config_and_starts(
@@ -915,8 +947,16 @@ def test_up_starts_the_orchestrator_from_config(
     ]
 
 
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_reply_in_slack"),
+    [([], False), (["--reply-in-slack"], True)],
+    ids=["no-flag", "reply-in-slack"],
+)
 def test_reopen_wires_the_record_to_reopen_worker(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra_arguments: list[str],
+    expected_reply_in_slack: bool,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
     FileThreadMap(config.paths.threads, cli.SystemClock()).put(_record("t-1"))
@@ -930,12 +970,15 @@ def test_reopen_wires_the_record_to_reopen_worker(
     captured: dict[str, Any] = {}
     monkeypatch.setattr(cli, "reopen_worker", lambda **kwargs: captured.update(kwargs))
 
-    result = runner.invoke(cli.app, ["reopen", "--thread", "t-1", "--task", "one more thing"])
+    result = runner.invoke(
+        cli.app, ["reopen", "--thread", "t-1", "--task", "one more thing", *extra_arguments]
+    )
 
     assert result.exit_code == 0
     assert captured["record"].thread_ts == "t-1"
     assert captured["task"] == "one more thing"
     assert captured["app_space"] == "sp42"
+    assert captured["reply_in_slack"] is expected_reply_in_slack
 
 
 def test_reopen_unknown_thread_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1119,8 +1162,16 @@ def test_send_command_wires_to_send_to_session(
     assert captured["slack"] is slack
 
 
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_reply_in_slack"),
+    [([], False), (["--reply-in-slack"], True)],
+    ids=["no-flag", "reply-in-slack"],
+)
 def test_send_command_without_a_session_name_follows_up_to_the_tied_session(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra_arguments: list[str],
+    expected_reply_in_slack: bool,
 ) -> None:
     _use_config(monkeypatch, tmp_path)
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
@@ -1130,7 +1181,17 @@ def test_send_command_without_a_session_name_follows_up_to_the_tied_session(
     monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: pytest.fail("not a to-route"))
 
     result = runner.invoke(
-        cli.app, ["send", "--thread", "t-1", "--channel", "C0TEST", "--task", "and the docs"]
+        cli.app,
+        [
+            "send",
+            "--thread",
+            "t-1",
+            "--channel",
+            "C0TEST",
+            "--task",
+            "and the docs",
+            *extra_arguments,
+        ],
     )
 
     assert result.exit_code == 0
@@ -1138,6 +1199,7 @@ def test_send_command_without_a_session_name_follows_up_to_the_tied_session(
     assert captured["text"] == "and the docs"
     assert captured["terminal_host"] is terminal_host
     assert captured["slack"] is slack
+    assert captured["reply_in_slack"] is expected_reply_in_slack
 
 
 def test_inbox_drain_refuses_a_to_route_from_x(

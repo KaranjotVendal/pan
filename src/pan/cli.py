@@ -315,9 +315,15 @@ def spawn(
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
+    thread_reply: bool = typer.Option(
+        False,
+        "--thread-reply",
+        help="the message was a reply inside a Slack thread; the brief says to read the thread",
+    ),
 ) -> None:
     """Create worktree + hc terminal + worker session; tie the thread to it; post the start
-    notice naming its Inbox thread."""
+    notice naming its Inbox thread. With --thread-reply the brief tells the session to read the
+    Slack thread first with its own Slack read-thread tool."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
@@ -342,6 +348,7 @@ def spawn(
         requester=requester,
         request_text=request_text,
         reply_in_slack=reply_in_slack,
+        from_thread_reply=thread_reply,
     )
 
 
@@ -349,9 +356,15 @@ def spawn(
 def reopen(
     thread: str = typer.Option(..., "--thread"),
     task: str = typer.Option(..., "--task"),
+    reply_in_slack: bool = typer.Option(
+        False,
+        "--reply-in-slack",
+        help="switch the thread to posting the answer in Slack at every turn end",
+    ),
 ) -> None:
     """Reopen a thread's finished or lost worker in its existing worktree, continuing its
-    last Claude conversation with the follow-up task; post the ack."""
+    last Claude conversation with the follow-up task; post the ack. --reply-in-slack switches
+    the thread to posting answers in Slack (never back)."""
     config = _config()
     clock = SystemClock()
     thread_map = FileThreadMap(config.paths.threads, clock)
@@ -371,6 +384,7 @@ def reopen(
         thread_map=thread_map,
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
+        reply_in_slack=reply_in_slack,
     )
 
 
@@ -675,7 +689,8 @@ def send(
     a notice naming its Inbox thread. --to must name one session exactly: its address, name, or
     Herdr label or space. With no exact match (or a label several sessions share) nothing is
     sent or posted and it exits 28: propose a session with pan propose. Without --to, send a
-    follow-up to the thread's tied session. A busy or blocked session gets a short reply and
+    follow-up to the thread's tied session; --reply-in-slack then switches the thread to posting
+    answers in Slack (never back). A busy or blocked session gets a short reply and
     nothing is typed; a session pan did not start gets one line on top saying the text came
     from Slack and which Inbox thread to use."""
     config = _config()
@@ -690,6 +705,7 @@ def send(
             terminal_host=terminal_host,
             thread_map=thread_map,
             slack=_slack_adapter(config),
+            reply_in_slack=reply_in_slack,
         )
         return
     send_to_session(

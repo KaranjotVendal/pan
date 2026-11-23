@@ -169,14 +169,14 @@ runs once the actuation lands.
 | `pan config show` | Print the resolved config, credentials masked. |
 | `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its route, its parsed directive and its thread's tie; a `yes`/1-3 reply to an open `pan propose` question becomes a `confirm` route, and any other message there is marked `cancels_confirmation`. |
 | `pan up` | Start the orchestrator if needed, mark lost workers failed, wake it (idempotent). |
-| `pan spawn --thread … --task … --channel …` | Create worktree + hc terminal + worker; tie the thread to it; post the start notice naming its Inbox thread. |
-| `pan reopen --thread … --task …` | Reopen a finished or lost worker in its worktree, continuing its conversation. |
+| `pan spawn --thread … --task … --channel … [--thread-reply]` | Create worktree + hc terminal + worker; tie the thread to it; post the start notice naming its Inbox thread. With `--thread-reply` (the message was a reply inside a Slack thread) the brief names the channel and thread ts and tells the session to read the whole thread first with its own Slack read-thread tool (`slack_read_thread`), only to read. |
+| `pan reopen --thread … --task … [--reply-in-slack]` | Reopen a finished or lost worker in its worktree, continuing its conversation. `--reply-in-slack` switches the thread to posting answers in Slack. |
 | `pan threads get --thread …` | Print a thread's `ThreadRecord` as JSON. |
 | `pan slack-post --thread … --channel … --text …` | Post to a thread through the single Slack egress. |
 | `pan status --thread …` | Report a worker's live status (from its hc terminal). |
 | `pan sessions [--json] [--thread … --channel …]` | List every live hc terminal with the last thing each was asked, marking pan-owned ones and status drift; with `--thread` and `--channel`, post the table to that thread. |
 | `pan check --thread … --channel …` | Post the tied session's latest answer to the thread as is (its transcript's last answer, or its screen lines), with its Inbox thread and whether it is still working or waiting on a prompt. |
-| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. `--to` must match exactly (address, name, or Herdr label or space); otherwise nothing is sent or posted and it exits 28. Without `--to`, send a follow-up to the thread's tied session. A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
+| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post "Sent to …" with its Inbox thread. `--to` must match exactly (address, name, or Herdr label or space); otherwise nothing is sent or posted and it exits 28. Without `--to`, send a follow-up to the thread's tied session. `--reply-in-slack` switches the thread to posting answers in Slack (on a follow-up it stays on for the thread; leaving it off never turns it off). A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
 | `pan propose --thread … --channel … --to … --task … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
 | `pan confirm --thread … --channel … --choice <yes\|n>` / `--cancel` | Act on the reply to that question: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
@@ -203,7 +203,7 @@ first word after the mention, spelled exactly, in any letter case; anything else
 | `sessions` | List live sessions: name, idle or busy, last ask, and the Inbox thread when pan knows it. Also `--sessions`. |
 | `forget` | Untie the thread; the session keeps running. |
 | `done` / `done --discard` | Close the thread's session and remove its worktree and branch; see [Closing a session](#closing-a-session). The whole message must be just this (`--discard` may be typed as a phone's `—discard`). |
-| `reply in slack` (anywhere) | Also post the session's answers here at every turn end. |
+| `reply in slack` (anywhere) | Also post the session's answers here at every turn end. The orchestrator also turns this on when the message plainly asks for the result in the thread ("share it here", "post it here", "send the link here", "reply here"); this is its one judgment about the reply mode, and it never changes the route. |
 | `--stream <name>` | Name a new session's terminal. |
 | `relay <target> <message>` | Send a one-off message into any live session; ties nothing. |
 | `read <target> [--full]` | Read a live session's recent output (or all of it); ties nothing. |
@@ -277,3 +277,6 @@ You should see the `:eyes:` ack within about a second, then a start notice namin
 its Plannotator Inbox thread. The worker runs in its own git worktree and hc terminal and reports in
 that Inbox thread; add "reply in slack" to the message to also get its answer in the Slack thread. A
 follow-up reply in the same thread goes to the same worker; `@pan check` posts its latest answer.
+When you start a session with a reply inside an existing thread, its brief tells it to read that
+whole thread first with its own Slack read-thread tool, so it sees the earlier messages; pan does
+not copy the thread anywhere.

@@ -66,6 +66,30 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- A new session started from a reply inside a Slack thread reads that thread first. The
+  orchestrator passes the new `pan spawn --thread-reply` when the inbox item's `is_thread_reply`
+  is true, and the worker brief then adds a paragraph (`slack_thread_paragraph`) naming the
+  channel and thread ts and telling the session to read the whole thread, every message and every
+  page, with the Slack read-thread tool (`slack_read_thread`, `SLACK_READ_THREAD_TOOL_NAME`), only
+  to read and never to post; if the tool is unavailable it says so in its Inbox thread and goes on
+  with the task text. pan itself does not fetch the thread. Top-level mentions, follow-ups, reopens
+  and `to` sends are unchanged.
+- A follow-up can turn on replies in Slack. `pan send` without `--to` (`follow_up_to_session`) and
+  `pan reopen` (`reopen_worker`) take `--reply-in-slack`: it sets the thread record's reply mode to
+  slack (`upgraded_reply_mode`), saved only once the delivery succeeds: right after the text is
+  typed (the new `ThreadMap.set_reply_mode`), or with the reopened record's tie after the launch.
+  The Stop hook then posts the session's answer to the thread, and the mode stays for the thread.
+  A busy or blocked refusal, or a failed reopen, leaves the record unchanged. Without the flag the
+  mode is left as it is; it never goes back to on demand. A desk session's typed "from Slack" line
+  uses the new mode. SKILL.md step (b) passes the
+  flag on follow-ups and reopens under the same "reply in Slack by meaning" rule ("reply back with
+  the link", "post it here"). Before, a follow-up such as "reply back with the link" in a thread
+  started without it reached the session but its answer stayed in the terminal.
+- The orchestrator passes `--reply-in-slack` (to `pan spawn`, `pan send` and `pan propose`) when a
+  message plainly asks for its result in the Slack thread ("share it here", "post it here", "send
+  the link here", "reply here"), as well as when it says "reply in slack". `wants_slack_reply`
+  stays the code-level hint; the new judgment is the orchestrator's second bounded exception to
+  INV-3, stated in SKILL.md next to the confirm exception, and it sets the reply mode only.
 - `@pan done` closes the thread's session. New route word `done` (`RouteKind.DONE`), the whole
   message like `check` and `forget`, and `done --discard` (`Route.discard`; a phone's `—discard`
   works too). New `pan done --thread --channel [--discard]` (`session_control.done_thread`) and

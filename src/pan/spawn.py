@@ -12,6 +12,7 @@ from pan.config import (
     PAN_THREAD_LABEL,
     PLANNOTATOR_INBOX_TOOL_NAME,
     REPL_TOOL_NAME,
+    SLACK_READ_THREAD_TOOL_NAME,
     TERMINAL_NAME_MAX_LENGTH,
     WORKER_BRIEF_TASK_MARKER,
     WORKER_NAME_PREFIX,
@@ -90,6 +91,17 @@ _SLACK_REPLY_SENTENCES: dict[ReplyMode, str] = {
     ),
 }
 
+# Added to the brief of a new session started from a reply inside a Slack thread, so the
+# session reads the earlier messages for context. pan does not fetch the thread: the session
+# reads it with its own Slack tool, only to read.
+_SLACK_THREAD_PARAGRAPH = (
+    "This request came from a reply in the Slack thread in channel {channel} with thread ts "
+    "{thread_ts}. Before you start, read the whole thread (every message, following pagination "
+    "until there are no more) with the Slack read-thread tool ({tool_name}). Use it only to "
+    "read; do not post to Slack. If the tool is unavailable, say so in the Inbox thread and "
+    "continue with the task text."
+)
+
 _NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
 
 
@@ -121,10 +133,25 @@ def slack_reply_sentence(reply_mode: ReplyMode) -> str:
     return _SLACK_REPLY_SENTENCES[reply_mode]
 
 
-def worker_brief(inbox_thread: str, task: str, reply_mode: ReplyMode) -> str:
+def slack_thread_paragraph(channel: str, thread_ts: str) -> str:
+    return _SLACK_THREAD_PARAGRAPH.format(
+        channel=channel, thread_ts=thread_ts, tool_name=SLACK_READ_THREAD_TOOL_NAME
+    )
+
+
+def worker_brief(
+    inbox_thread: str,
+    task: str,
+    reply_mode: ReplyMode,
+    *,
+    thread_paragraph: str | None = None,
+) -> str:
+    # `thread_paragraph` (slack_thread_paragraph) goes after the preamble, before the task.
     preamble = _WORKER_BRIEF_PREAMBLE.format(
         inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
     )
+    if thread_paragraph is not None:
+        preamble = f"{preamble}\n\n{thread_paragraph}"
     return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
 
 
@@ -204,9 +231,12 @@ def spawn_worker(
     requester: str | None = None,
     request_text: str | None = None,
     reply_in_slack: bool = False,
+    from_thread_reply: bool = False,
 ) -> ThreadRecord:
     # `request_text` is the original message; it asks for Slack replies when it contains
     # "reply in slack" (falls back to the task when absent). `reply_in_slack` forces it.
+    # `from_thread_reply` marks a request that was a reply inside a Slack thread: the brief
+    # then tells the session to read that thread first.
     name = worker_terminal_name(stream, id_gen)
     created_at = clock.now()
     inbox_thread = inbox_thread_name(name, task)
@@ -214,6 +244,7 @@ def spawn_worker(
         request_text if request_text is not None else task
     )
     reply_mode = ReplyMode.SLACK if asks_for_slack_reply else ReplyMode.ON_DEMAND
+    thread_paragraph = slack_thread_paragraph(channel, thread_ts) if from_thread_reply else None
 
     try:
         _ensure_name_free(terminal_host, name)
@@ -224,7 +255,7 @@ def spawn_worker(
         terminal = launcher.launch(
             name,
             worktree_path,
-            worker_brief(inbox_thread, task, reply_mode),
+            worker_brief(inbox_thread, task, reply_mode, thread_paragraph=thread_paragraph),
             worker_labels(thread_ts, channel, app_space),
         )
     except (SpawnError, TerminalHostError) as error:
@@ -277,6 +308,13 @@ def spawn_worker(
     return record
 
 
+def upgraded_reply_mode(record: ThreadRecord, *, reply_in_slack: bool) -> ReplyMode:
+    # The thread's reply mode once a follow-up or reopen is delivered: the reply-in-Slack mode
+    # when asked, else the record's own. Never back to on demand. Callers save it only after
+    # the delivery succeeds, so a refused or failed one leaves the record as it was.
+    return ReplyMode.SLACK if reply_in_slack else record.reply_mode
+
+
 def reopen_worker(
     *,
     record: ThreadRecord,
@@ -287,15 +325,20 @@ def reopen_worker(
     thread_map: ThreadMap,
     slack: SlackAdapter,
     clock: Clock,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
     # Reopen a finished or lost worker in its existing worktree: a new terminal under the
     # same name continues the worktree's last Claude conversation with the follow-up task.
     # The binding stays the same thread record (INV-7), tied again; only its terminal and
     # status change. A session pan did not start is never reopened: its folder is not pan's.
+    # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved with the tie once
+    # the launch succeeds, so the Stop hook posts the answer; without it the mode is left as
+    # it is, and a failed reopen changes nothing.
     name = record.terminal_name
     if not record.started_by_pan:
         slack_post(slack, record.channel, record.thread_ts, desk_session_ended_reply(name))
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
+    reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
     try:
         if not record.worktree_path.is_dir():
             raise SpawnError(f"worktree missing for stream {name}")
@@ -320,6 +363,7 @@ def reopen_worker(
             "terminal_address": terminal.address,
             "status": WorkerStatus.SPAWNING,
             "updated_at": clock.now(),
+            "reply_mode": reply_mode,
         }
     )
     thread_map.tie(reopened)
