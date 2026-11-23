@@ -9,6 +9,7 @@ from pan.models import (
     InboxThread,
     LaunchdJobState,
     PendingConfirmation,
+    ReplyMode,
     Terminal,
     TerminalRead,
     ThreadRecord,
@@ -68,6 +69,11 @@ class ThreadMap(Protocol):
 
     def update_status(
         self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None: ...
+
+    # Persist the thread's reply mode (a follow-up or reopen that asks for the answer in Slack).
+    def set_reply_mode(
+        self, thread_ts: str, reply_mode: ReplyMode, *, session_name: str | None = None
     ) -> None: ...
 
     def records(self) -> list[ThreadRecord]: ...

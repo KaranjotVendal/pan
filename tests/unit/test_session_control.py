@@ -719,7 +719,11 @@ def test_check_does_not_look_up_a_session_whose_inbox_thread_is_known(tmp_path: 
 
 
 def _follow_up(
-    terminal_host: FakeTerminalHost, thread_map: FileThreadMap, slack: RecordingSlack
+    terminal_host: FakeTerminalHost,
+    thread_map: FileThreadMap,
+    slack: RecordingSlack,
+    *,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
     return follow_up_to_session(
         thread_ts=_OLD_THREAD,
@@ -728,7 +732,65 @@ def _follow_up(
         terminal_host=terminal_host,
         thread_map=thread_map,
         slack=slack,
+        reply_in_slack=reply_in_slack,
     )
+
+
+@pytest.mark.parametrize(
+    ("started_by_pan", "initial_mode", "reply_in_slack", "expected_mode"),
+    [
+        (True, ReplyMode.ON_DEMAND, True, ReplyMode.SLACK),
+        (False, ReplyMode.ON_DEMAND, True, ReplyMode.SLACK),
+        (True, ReplyMode.ON_DEMAND, False, ReplyMode.ON_DEMAND),
+        (False, ReplyMode.ON_DEMAND, False, ReplyMode.ON_DEMAND),
+        (True, ReplyMode.SLACK, False, ReplyMode.SLACK),
+        (False, ReplyMode.SLACK, False, ReplyMode.SLACK),
+    ],
+    ids=[
+        "pan-session-flag-sets-slack",
+        "desk-session-flag-sets-slack",
+        "pan-session-no-flag-keeps-on-demand",
+        "desk-session-no-flag-keeps-on-demand",
+        "pan-session-no-flag-never-downgrades",
+        "desk-session-no-flag-never-downgrades",
+    ],
+)
+def test_follow_up_reply_in_slack_persists_the_mode_for_the_thread(
+    tmp_path: Path,
+    started_by_pan: bool,
+    initial_mode: ReplyMode,
+    reply_in_slack: bool,
+    expected_mode: ReplyMode,
+) -> None:
+    name, address = ("pan-7", "t7") if started_by_pan else ("desk-api", "t9")
+    record = _record(
+        terminal_name=name,
+        terminal_address=address,
+        started_by_pan=started_by_pan,
+        reply_mode=initial_mode,
+        inbox_thread_name=f"{name}: fix the build",
+    )
+    thread_map = _thread_map(tmp_path, record)
+    agent_status = AgentStatus.IDLE if started_by_pan else AgentStatus.DONE
+    terminal_host = _host(make_terminal(address, name=name, agent_status=agent_status))
+
+    returned = _follow_up(
+        terminal_host, thread_map, RecordingSlack(), reply_in_slack=reply_in_slack
+    )
+
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.reply_mode is expected_mode
+    assert returned.reply_mode is expected_mode
+    # A desk session's typed header says who replies in Slack under the mode as it now stands.
+    expected_text = (
+        "and the docs"
+        if started_by_pan
+        else from_slack_text(
+            f"{name}: fix the build", "and the docs", expected_mode, thread_known=False
+        )
+    )
+    assert terminal_host.sent == [(address, expected_text)]
 
 
 @pytest.mark.parametrize(

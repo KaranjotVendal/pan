@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from pan.errors import ThreadNotFoundError
 from pan.logging import initialise_logger
-from pan.models import ThreadRecord, WorkerStatus
+from pan.models import ReplyMode, ThreadRecord, WorkerStatus
 from pan.seams import Clock
 
 logger = initialise_logger(__name__)
@@ -176,6 +176,16 @@ class FileThreadMap:
         record.updated_at = self._clock.now()
         self._write_all(records)
         logger.info(f"threadmap update thread={thread_ts} status={status}")
+
+    def set_reply_mode(
+        self, thread_ts: str, reply_mode: ReplyMode, *, session_name: str | None = None
+    ) -> None:
+        records = self._read_all()
+        record = self._require(records, thread_ts, session_name)
+        record.reply_mode = reply_mode
+        record.updated_at = self._clock.now()
+        self._write_all(records)
+        logger.info(f"threadmap update thread={thread_ts} reply_mode={reply_mode}")
 
     def record_session(
         self,

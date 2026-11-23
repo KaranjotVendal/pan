@@ -305,6 +305,18 @@ def spawn_worker(
     return record
 
 
+def upgrade_reply_mode(
+    thread_map: ThreadMap, record: ThreadRecord, *, reply_in_slack: bool
+) -> ThreadRecord:
+    # Switch the record to the reply-in-Slack mode when asked and it is not in it yet, and
+    # return the record as it now stands. Never switches back to on demand.
+    if not reply_in_slack or record.reply_mode is ReplyMode.SLACK:
+        return record
+    thread_map.set_reply_mode(record.thread_ts, ReplyMode.SLACK, session_name=record.terminal_name)
+    logger.info(f"reply mode set to slack thread={record.thread_ts} session={record.terminal_name}")
+    return record.model_copy(update={"reply_mode": ReplyMode.SLACK})
+
+
 def reopen_worker(
     *,
     record: ThreadRecord,
@@ -315,15 +327,19 @@ def reopen_worker(
     thread_map: ThreadMap,
     slack: SlackAdapter,
     clock: Clock,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
     # Reopen a finished or lost worker in its existing worktree: a new terminal under the
     # same name continues the worktree's last Claude conversation with the follow-up task.
     # The binding stays the same thread record (INV-7), tied again; only its terminal and
     # status change. A session pan did not start is never reopened: its folder is not pan's.
+    # `reply_in_slack` switches the thread to the reply-in-Slack mode before the launch, so
+    # the Stop hook posts the answer; without it the mode is left as it is.
     name = record.terminal_name
     if not record.started_by_pan:
         slack_post(slack, record.channel, record.thread_ts, desk_session_ended_reply(name))
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
+    record = upgrade_reply_mode(thread_map, record, reply_in_slack=reply_in_slack)
     try:
         if not record.worktree_path.is_dir():
             raise SpawnError(f"worktree missing for stream {name}")

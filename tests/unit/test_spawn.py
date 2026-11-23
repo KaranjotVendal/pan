@@ -43,9 +43,17 @@ class FakeGit:
 
 
 class FakeThreadMap:
-    def __init__(self) -> None:
+    def __init__(self, timeline: list[str] | None = None) -> None:
         self.records: dict[str, ThreadRecord] = {}
         self.ties: list[str] = []
+        self._timeline = timeline if timeline is not None else []
+
+    def set_reply_mode(
+        self, thread_ts: str, reply_mode: ReplyMode, *, session_name: str | None = None
+    ) -> None:
+        self._timeline.append(f"reply_mode={reply_mode.value}")
+        record = self.records[thread_ts]
+        self.records[thread_ts] = record.model_copy(update={"reply_mode": reply_mode})
 
     def get(self, thread_ts: str) -> ThreadRecord | None:
         return self.records.get(thread_ts)
@@ -410,6 +418,8 @@ def _reopen(
     terminal_host: FakeTerminalHost,
     thread_map: FakeThreadMap,
     slack: FakeSlack,
+    *,
+    reply_in_slack: bool = False,
 ) -> ThreadRecord:
     return reopen_worker(
         record=record,
@@ -420,6 +430,7 @@ def _reopen(
         thread_map=thread_map,
         slack=slack,
         clock=LaterClock(),
+        reply_in_slack=reply_in_slack,
     )
 
 
@@ -548,3 +559,32 @@ def test_slack_thread_paragraph_says_read_every_message_and_never_post() -> None
     assert "slack_read_thread" in paragraph
     assert "do not post to Slack" in paragraph
     assert "If the tool is unavailable, say so in the Inbox thread" in paragraph
+
+
+@pytest.mark.parametrize(
+    ("initial_mode", "reply_in_slack", "expected_mode", "expected_timeline"),
+    [
+        (ReplyMode.ON_DEMAND, True, ReplyMode.SLACK, ["reply_mode=slack", "run"]),
+        (ReplyMode.ON_DEMAND, False, ReplyMode.ON_DEMAND, ["run"]),
+        (ReplyMode.SLACK, False, ReplyMode.SLACK, ["run"]),
+        (ReplyMode.SLACK, True, ReplyMode.SLACK, ["run"]),
+    ],
+    ids=["flag-sets-slack", "no-flag-keeps-on-demand", "no-flag-never-downgrades", "already-slack"],
+)
+def test_reopen_reply_in_slack_sets_the_mode_before_the_launch(
+    tmp_path: Path,
+    initial_mode: ReplyMode,
+    reply_in_slack: bool,
+    expected_mode: ReplyMode,
+    expected_timeline: list[str],
+) -> None:
+    terminal_host = FakeTerminalHost()
+    thread_map, slack = FakeThreadMap(terminal_host.timeline), FakeSlack()
+    record = _finished_record(tmp_path).model_copy(update={"reply_mode": initial_mode})
+    thread_map.put(record)
+
+    reopened = _reopen(record, terminal_host, thread_map, slack, reply_in_slack=reply_in_slack)
+
+    assert terminal_host.timeline == expected_timeline
+    assert reopened.reply_mode is expected_mode
+    assert thread_map.records[_THREAD].reply_mode is expected_mode

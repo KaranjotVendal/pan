@@ -69,9 +69,12 @@ still the same live terminal before sending.
 
 **Reply in Slack by meaning.** INV-3 has a second bounded exception, the reply mode only.
 `route.reply_in_slack` is the exact phrase "reply in slack", matched in code; treat it as a hint,
-not the whole rule. Pass `--reply-in-slack` (to `pan spawn`, `pan send` and `pan propose`) when `route.reply_in_slack` is true, AND also when the
-message's meaning plainly asks for the answer or result in this Slack thread: "share it here", "post
-it here", "send the link here", "reply here", "let me know here", "drop the result in this thread".
+not the whole rule. Pass `--reply-in-slack` (to `pan spawn`, `pan send` with or without `--to`,
+`pan propose` and `pan reopen`) when `route.reply_in_slack` is true, AND also when the message's
+meaning plainly asks for the answer or result in this Slack thread: "share it here", "post it here",
+"send the link here", "reply here", "reply back with the link", "let me know here", "drop the
+result in this thread". On a follow-up or a reopen the flag switches the thread to replying in Slack
+from then on; leaving it off never switches it back.
 Do not pass it when the message does not ask for that: "here" meaning a place in the code, a
 repository or a page ("fix the bug here", "the config is here"), or a message that only asks for the
 work to be done. When unsure, leave it off: the person can still `@pan check`. This judgment sets the
@@ -267,9 +270,12 @@ for it.
 - `tie.status` is `spawning`, `running`, `idle` or `blocked`: send `cleaned_text` to the tied
   session through pan (never shell hc yourself, and never use `pan relay` for this):
 
-      pan send --thread <thread_ts> --channel <channel> --task '<cleaned_text>'
+      pan send --thread <thread_ts> --channel <channel> --task '<cleaned_text>' [--reply-in-slack]
 
-  With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
+  Pass `--reply-in-slack` under the same rule as everywhere else (step 2, "Reply in Slack by
+  meaning"; a follow-up such as "reply back with the link" or "post it here" counts). It switches
+  the thread's reply mode to Slack before the text is typed, so the session's answer is posted to
+  the thread. With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
   the `:eyes:` reaction already acknowledged the message. A busy session (exit 26) or one waiting on
   a prompt (exit 23) gets a short reply from `pan send` itself, and nothing is typed: do nothing
   more. Exit 22 means the session has ended: when `pan threads get` shows `started_by_pan` true,
@@ -279,7 +285,9 @@ for it.
   `pan threads get`) and its worktree is still there, reopen it. That is the same session, not a
   new one. A session pan did not start is never reopened: `pan reopen` refuses it with a reply.
 
-      pan reopen --thread <thread_ts> --task '<cleaned_text>'
+      pan reopen --thread <thread_ts> --task '<cleaned_text>' [--reply-in-slack]
+
+  Pass `--reply-in-slack` under the same rule as for `pan send` above.
 
   It starts a new terminal under the same name in the same worktree, continues that worktree's last
   Claude conversation with the follow-up, sets the record back to `spawning`, and posts the

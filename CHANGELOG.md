@@ -74,6 +74,15 @@ as it works (see `AGENT_LOOP.md` step 9).
   to read and never to post; if the tool is unavailable it says so in its Inbox thread and goes on
   with the task text. pan itself does not fetch the thread. Top-level mentions, follow-ups, reopens
   and `to` sends are unchanged.
+- A follow-up can turn on replies in Slack. `pan send` without `--to` (`follow_up_to_session`) and
+  `pan reopen` (`reopen_worker`) take `--reply-in-slack`: it sets the thread record's reply mode to
+  slack (the new `ThreadMap.set_reply_mode`, via `upgrade_reply_mode`) before anything is typed or
+  launched, so the Stop hook posts the session's answer to the thread, and the mode stays for the
+  thread. Without the flag the mode is left as it is; it never goes back to on demand. A desk
+  session's typed "from Slack" line uses the mode as it now stands. SKILL.md step (b) passes the
+  flag on follow-ups and reopens under the same "reply in Slack by meaning" rule ("reply back with
+  the link", "post it here"). Before, a follow-up such as "reply back with the link" in a thread
+  started without it reached the session but its answer stayed in the terminal.
 - The orchestrator passes `--reply-in-slack` (to `pan spawn`, `pan send` and `pan propose`) when a
   message plainly asks for its result in the Slack thread ("share it here", "post it here", "send
   the link here", "reply here"), as well as when it says "reply in slack". `wants_slack_reply`
