@@ -14,29 +14,33 @@ from typer._click.exceptions import ClickException
 
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
-from pan.adapters.hc import ShellHcAdapter
-from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
+from pan.adapters.terminal_host import build_terminal_host
+from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_directive
+from pan.directive import parse_directive, parse_route, route_for_source
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HcError,
     InboxError,
+    NotPanSessionError,
     PanError,
+    SessionBusyError,
     SlackPostError,
     SpawnError,
     TargetAmbiguousError,
     TargetBlockedError,
     TargetNotFoundError,
     TerminalGoneError,
+    TerminalHostError,
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
 )
 from pan.gateway.app import BoltSlackAdapter
-from pan.gateway.slack_post import slack_post
+from pan.gateway.slack_post import slack_post, slack_post_parts
+from pan.hooks.inbox_link import inbox_link_hook
 from pan.hooks.notification import notification_hook
 from pan.hooks.session_start import session_start_hook
 from pan.hooks.stop import stop_hook
@@ -44,11 +48,17 @@ from pan.inbox import FileInboxStore
 from pan.interface import read_session, relay_to_session
 from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
-from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
+from pan.models import InboxItem, PanConfig, Route, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
+from pan.session_control import (
+    check_thread,
+    follow_up_to_session,
+    forget_thread,
+    send_to_session,
+)
 from pan.sessions import collect_sessions, worker_status_for
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
-from pan.threadmap import FileThreadMap
+from pan.threadmap import FileThreadMap, tie_note
 from pan.watcher import WatchdogInboxWatcher
 
 logger = initialise_logger(__name__)
@@ -74,7 +84,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     InboxError: 13,
     ThreadNotFoundError: 14,
     SpawnError: 15,
-    HcError: 16,
+    TerminalHostError: 16,
     SlackPostError: 17,
     GatedOpDeniedError: 18,
     TargetNotFoundError: 20,
@@ -82,11 +92,19 @@ _EXIT_CODES: dict[type[PanError], int] = {
     TerminalGoneError: 22,
     TargetBlockedError: 23,
     TerminalNameTakenError: 24,
+    NotPanSessionError: 25,
+    SessionBusyError: 26,
 }
 
 
 def _exit_code_for(error: PanError) -> int:
-    return _EXIT_CODES.get(type(error), 1)
+    # The most specific documented class wins, so an adapter's own subclass (the hc
+    # adapter's HcError) maps through its neutral base (TerminalHostError).
+    for error_class in type(error).__mro__:
+        exit_code = _EXIT_CODES.get(error_class)
+        if exit_code is not None:
+            return exit_code
+    return 1
 
 
 def _config() -> PanConfig:
@@ -108,7 +126,9 @@ def gateway() -> None:
 def watcher() -> None:
     """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
     config = _config()
-    WatchdogInboxWatcher(ShellHcAdapter(), config.orchestrator.terminal, config.paths.inbox).start()
+    WatchdogInboxWatcher(
+        build_terminal_host(config.terminal_host), config.orchestrator.terminal, config.paths.inbox
+    ).start()
 
 
 @config_app.command("set-token")
@@ -139,27 +159,57 @@ def config_show() -> None:
     typer.echo(credentials.model_dump_json())
 
 
+def _item_route(item: InboxItem) -> Route:
+    # The route the gateway parsed (parsed here for an item an older gateway wrote), held to
+    # the routes the item's source may use.
+    route = item.route if item.route is not None else parse_route(item.raw_text, item.source)
+    return route_for_source(route, item.source)
+
+
 @inbox_app.command("drain")
 def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
     config = _config()
     items = FileInboxStore(config.paths.inbox).drain()
-    # Attach the deterministically-parsed directive to each item so the orchestrator
-    # reads the mode/cleaned_text from here (parse_directive runs in code) rather than
-    # re-deriving it by judgment — enforcing INV-3.
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    # Attach the route the gateway parsed (parsed here for an item an older gateway wrote)
+    # and the directive parsed from the route's text, so the orchestrator reads them as
+    # facts (both pure code) rather than re-deriving them by judgment — enforcing INV-3. The
+    # thread's tie is attached as a plain-words fact, read now because it can change after
+    # the gateway wrote the item.
     if as_json:
-        payload = [
-            {
-                "item": item.model_dump(mode="json"),
-                "directive": parse_directive(item.raw_text).model_dump(mode="json"),
-            }
-            for item in items
-        ]
+        payload = []
+        for item in items:
+            route = _item_route(item)
+            record = thread_map.get(item.thread_ts)
+            note = tie_note(record)
+            tie = None
+            if record is not None and note is not None:
+                tie = {
+                    "session": record.terminal_name,
+                    "terminal_address": record.terminal_address,
+                    "status": record.status.value,
+                    "note": note,
+                }
+            payload.append(
+                {
+                    "item": item.model_dump(mode="json", exclude={"route"}),
+                    "route": route.model_dump(mode="json"),
+                    "directive": parse_directive(route.text).model_dump(mode="json"),
+                    "tie": tie,
+                }
+            )
         typer.echo(json.dumps(payload))
         return
     for item in items:
-        directive = parse_directive(item.raw_text)
-        typer.echo(f"{item.id} {item.channel} {item.thread_ts} {directive.mode.value}")
+        route = _item_route(item)
+        directive = parse_directive(route.text)
+        typer.echo(
+            f"{item.id} {item.channel} {item.thread_ts} {route.kind.value} {directive.mode.value}"
+        )
+        note = tie_note(thread_map.get(item.thread_ts))
+        if note is not None:
+            typer.echo(f"  {note}")
 
 
 @app.command()
@@ -169,12 +219,20 @@ def spawn(
     channel: str = typer.Option(..., "--channel"),
     stream: str | None = typer.Option(None, "--stream"),
     repo: Path | None = typer.Option(None, "--repo"),
+    requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
+    request_text: str | None = typer.Option(
+        None, "--request-text", help="the original message; 'reply in slack' in it sets the mode"
+    ),
+    reply_in_slack: bool = typer.Option(
+        False, "--reply-in-slack", help="post the answer in Slack at every turn end"
+    ),
 ) -> None:
-    """Create worktree + hc terminal + worker session; record a ThreadRecord; post the ack."""
+    """Create worktree + hc terminal + worker session; tie the thread to it; post the start
+    notice naming its Inbox thread."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
     spawn_worker(
@@ -186,12 +244,15 @@ def spawn(
         stream=stream,
         app_space=config.orchestrator.app_space,
         git=ShellGitWorktreeAdapter(),
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=FileThreadMap(config.paths.threads, clock),
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
         id_gen=UuidGen(),
+        requester=requester,
+        request_text=request_text,
+        reply_in_slack=reply_in_slack,
     )
 
 
@@ -209,15 +270,15 @@ def reopen(
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
     credentials = load_credentials(config.paths.credentials)
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
     # only maps the exit code.
     reopen_worker(
         record=record,
         task=task,
         app_space=config.orchestrator.app_space,
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map,
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
@@ -287,6 +348,7 @@ def _dispatch_completion_hook(
         thread_map,
         slack,
         stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
     )
 
 
@@ -310,19 +372,51 @@ def hook_session_start() -> None:
     if record is None:
         logger.warning("session-start hook: no thread record for cwd")
         return
-    session_start_hook(record.thread_ts, thread_map, stdin=io.StringIO(raw_stdin))
+    session_start_hook(
+        record.thread_ts,
+        thread_map,
+        stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
+    )
 
 
 @hook_app.command("stop")
 def hook_stop() -> None:
-    """Claude Code Stop hook: post the worker's final summary and mark the thread DONE."""
+    """Claude Code Stop hook: mark the thread IDLE; post the answer only in reply-in-Slack mode."""
     _run_completion_hook(stop_hook)
 
 
 @hook_app.command("notification")
 def hook_notification() -> None:
-    """Claude Code Notification hook: post the worker's question and mark the thread BLOCKED."""
+    """Claude Code Notification hook: mark the thread BLOCKED; post only in reply-in-Slack mode."""
     _run_completion_hook(notification_hook)
+
+
+def _dispatch_inbox_link_hook(raw_stdin: str, thread_map: ThreadMap) -> None:
+    cwd = _extract_cwd(raw_stdin)
+    record = thread_map.get_by_worktree(Path(cwd)) if cwd is not None else None
+    if record is None:
+        logger.warning("inbox-link hook: no thread record for cwd")
+        return
+    inbox_link_hook(
+        record.thread_ts,
+        thread_map,
+        stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
+    )
+
+
+@hook_app.command("inbox-link")
+def hook_inbox_link() -> None:
+    """Claude Code PostToolUse hook on the Inbox tool: record the worker's Inbox thread link."""
+    # This hook must never fail the Inbox tool call it follows, so every error is logged
+    # and swallowed here (exit 0), defects included. It never posts to Slack.
+    try:
+        raw_stdin = sys.stdin.read()
+        config = _config()
+        _dispatch_inbox_link_hook(raw_stdin, FileThreadMap(config.paths.threads, SystemClock()))
+    except Exception as e:
+        logger.warning(f"inbox-link hook failed: {type(e).__name__}")
 
 
 @app.command()
@@ -335,39 +429,142 @@ def status(thread: str = typer.Option(..., "--thread")) -> None:
     terminal = None
     if record.terminal_address:
         try:
-            terminal = ShellHcAdapter().get(record.terminal_address)
+            terminal = build_terminal_host(config.terminal_host).get(record.terminal_address)
         except TerminalGoneError:
             terminal = None
     typer.echo(worker_status_for(terminal, record.status).value)
 
 
 def _render_sessions_table(summaries: list[SessionSummary]) -> str:
-    header = f"{'TERMINAL':<9} {'NAME':<24} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} DRIFT"
+    header = (
+        f"{'TERMINAL':<9} {'NAME':<24} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} "
+        f"{'DRIFT':<5} LAST_ASK"
+    )
     lines = [header]
     for summary in summaries:
         owner = "pan" if summary.is_pan_owned else "external"
         pan_status = summary.pan_status.value if summary.pan_status is not None else "-"
         display_name = summary.name or summary.where or summary.cwd.name
         drift = "DRIFT" if summary.drift else ""
-        lines.append(
+        last_ask = summary.last_ask or ""
+        row = (
             f"{summary.address:<9} {display_name:<24} "
-            f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift}"
+            f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift:<5} {last_ask}"
         )
+        lines.append(row.rstrip())
     return "\n".join(lines)
 
 
 @app.command()
-def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
-    """List all live hc terminals, reconciled against the pan thread map, flagging status
-    drift. --json emits the SessionSummary list for the orchestrator."""
+def sessions(
+    as_json: bool = typer.Option(False, "--json"),
+    thread: str | None = typer.Option(None, "--thread", help="post the list to this thread"),
+    channel: str | None = typer.Option(None, "--channel", help="the thread's channel"),
+) -> None:
+    """List all live hc terminals with the last thing each was asked, reconciled against the
+    pan thread map, flagging status drift. --json emits the SessionSummary list; --thread and
+    --channel post the table to that Slack thread as is."""
     config = _config()
     summaries = collect_sessions(
-        ShellHcAdapter(), FileThreadMap(config.paths.threads, SystemClock())
+        build_terminal_host(config.terminal_host),
+        FileThreadMap(config.paths.threads, SystemClock()),
     )
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
-    typer.echo(_render_sessions_table(summaries))
+    table = _render_sessions_table(summaries)
+    if thread is not None and channel is not None:
+        slack_post_parts(
+            _slack_adapter(config), channel, thread, f"{CODE_FENCE}\n{table}\n{CODE_FENCE}"
+        )
+        return
+    typer.echo(table)
+
+
+def _slack_adapter(config: PanConfig) -> BoltSlackAdapter:
+    credentials = load_credentials(config.paths.credentials)
+    return BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), SystemClock())
+
+
+@app.command()
+def check(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+) -> None:
+    """Post the thread's tied session's latest answer to the thread, as is: the last answer in
+    its transcript, or its recent screen lines. Names its Inbox thread (looked up by name for a
+    session pan did not start) and says if it is still working or waiting on a prompt."""
+    config = _config()
+    check_thread(
+        thread_ts=thread,
+        channel=channel,
+        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
+        terminal_host=build_terminal_host(config.terminal_host),
+        inbox_directory=ShellPlannotatorInboxAdapter(),
+        slack=_slack_adapter(config),
+        screen_lines=READ_RECENT_LINES,
+    )
+
+
+@app.command()
+def forget(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+) -> None:
+    """Untie the thread from its session and say so in the thread. Never stops the session."""
+    config = _config()
+    forget_thread(
+        thread_ts=thread,
+        channel=channel,
+        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
+        slack=_slack_adapter(config),
+    )
+
+
+@app.command()
+def send(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+    to: str | None = typer.Option(
+        None, "--to", help="a live session's name or address; omit to send to the tied session"
+    ),
+    task: str = typer.Option(..., "--task"),
+    requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
+    reply_in_slack: bool = typer.Option(
+        False, "--reply-in-slack", help="post the answer in Slack at every turn end"
+    ),
+) -> None:
+    """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
+    a notice naming its Inbox thread. Without --to, send a follow-up to the thread's tied
+    session. A busy, blocked, unknown or ambiguous session gets a short reply and nothing is
+    typed; a session pan did not start gets one line on top saying the text came from Slack."""
+    config = _config()
+    clock = SystemClock()
+    thread_map = FileThreadMap(config.paths.threads, clock)
+    terminal_host = build_terminal_host(config.terminal_host)
+    if to is None:
+        follow_up_to_session(
+            thread_ts=thread,
+            channel=channel,
+            text=task,
+            terminal_host=terminal_host,
+            thread_map=thread_map,
+            slack=_slack_adapter(config),
+        )
+        return
+    send_to_session(
+        thread_ts=thread,
+        channel=channel,
+        selector=to,
+        text=task,
+        requester=requester,
+        reply_in_slack=reply_in_slack,
+        terminal_host=terminal_host,
+        thread_map=thread_map,
+        inbox_directory=ShellPlannotatorInboxAdapter(),
+        slack=_slack_adapter(config),
+        clock=clock,
+    )
 
 
 _TARGET_HELP = "session selector: hc address | terminal name | Herdr app space label"
@@ -378,9 +575,10 @@ def relay(
     target: str = typer.Argument(..., help=_TARGET_HELP),
     message: str = typer.Argument(..., help="text to send into the target terminal"),
 ) -> None:
-    """Relay a message into a live hc terminal (pan-owned or external)."""
-    hc = ShellHcAdapter()
-    resolved = relay_to_session(hc, target, message, hc.list_terminals())
+    """Relay a message into a live terminal (pan-owned or external)."""
+    config = _config()
+    terminal_host = build_terminal_host(config.terminal_host)
+    resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
     typer.echo(
         f"relayed into {resolved.name or resolved.where or resolved.address} terminal {resolved.address}"
     )
@@ -393,13 +591,13 @@ def read(
 ) -> None:
     """Print a live session's raw output: recent lines, or the full transcript with --full."""
     config = _config()
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     records = FileThreadMap(config.paths.threads, SystemClock()).records()
     raw = read_session(
-        hc,
+        terminal_host,
         records,
         target,
-        hc.list_terminals(),
+        terminal_host.list_terminals(),
         full=full,
         lines=READ_RECENT_LINES,
         full_history_lines=READ_FULL_HISTORY_LINES,
@@ -411,15 +609,23 @@ def read(
 
 @app.command()
 def stop(thread: str = typer.Option(..., "--thread")) -> None:
-    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED."""
+    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED.
+    Refuses for a session pan did not start: it only unties the thread and never stops it."""
     config = _config()
     thread_map = FileThreadMap(config.paths.threads, SystemClock())
     record = thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
+    if not record.started_by_pan:
+        if record.tied:
+            thread_map.untie(thread)
+        raise NotPanSessionError(
+            f"{record.terminal_name} was not started by pan, so pan never stops it; "
+            "this thread is untied from it"
+        )
     if record.terminal_address:
-        ShellHcAdapter().remove(record.terminal_address)
-    thread_map.update_status(thread, WorkerStatus.FAILED)
+        build_terminal_host(config.terminal_host).remove(record.terminal_address)
+    thread_map.update_status(thread, WorkerStatus.FAILED, session_name=record.terminal_name)
     typer.echo(f"stopped {thread}")
 
 
@@ -429,7 +635,7 @@ def up() -> None:
     FAILED, and wake an already-running orchestrator once. Safe to run any time."""
     config = _config()
     report = bring_up(
-        ShellHcAdapter(),
+        build_terminal_host(config.terminal_host),
         FileThreadMap(config.paths.threads, SystemClock()),
         terminal=config.orchestrator.terminal,
         cwd=config.orchestrator.cwd,

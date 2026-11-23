@@ -6,12 +6,13 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from pan.config import CODE_FENCE
+from pan.directive import parse_route
 from pan.errors import SlackPostError, UnauthorizedSenderError
 from pan.gateway.auth import auth_check
 from pan.gateway.slack_post import slack_post
 from pan.help import parse_help_request, render_cli_help
 from pan.logging import initialise_logger
-from pan.models import InboxItem, PanConfig, SlackCredentials
+from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadSource
 from pan.seams import Clock, InboxStore
 
 logger = initialise_logger(__name__)
@@ -88,6 +89,12 @@ class BoltSlackAdapter:
             logger.info(f"gateway answered help id={event_id} named={named}")
             return
 
+        # INV-1, as amended for session control: the gateway parses the route words (pure
+        # string logic, parse_route) and writes the route on the item, so every front door
+        # shares one parser. It still decides nothing about the work: the orchestrator acts
+        # on the route.
+        route = parse_route(raw_text)
+
         # Fast :eyes: ack, ordered BEFORE the append so the sender sees acknowledgement
         # immediately and before any downstream work (INV-1).
         self.add_reaction(channel, message_ts, _EYES)
@@ -100,6 +107,8 @@ class BoltSlackAdapter:
             is_thread_reply=thread_ts_value is not None,
             raw_text=raw_text,
             received_at=self._clock.now(),
+            source=ThreadSource.SLACK,
+            route=route,
         )
         self._inbox.append(item)
         logger.info(f"gateway appended event id={event_id} channel={channel}")

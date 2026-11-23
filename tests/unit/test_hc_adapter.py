@@ -7,8 +7,13 @@ from typing import Any
 
 import pytest
 
-from pan.adapters.hc import ShellHcAdapter
-from pan.errors import HcError, TargetBlockedError, TerminalGoneError, TerminalNameTakenError
+from pan.adapters.hc import HcError, ShellHcAdapter
+from pan.errors import (
+    TargetBlockedError,
+    TerminalGoneError,
+    TerminalHostError,
+    TerminalNameTakenError,
+)
 from pan.models import AgentStatus, TerminalState
 
 # Shapes captured from live `hc` 0.1.21 output (paths anonymised). `ls` reports `status`
@@ -254,6 +259,12 @@ def test_remove_is_idempotent_for_a_gone_terminal(
     ShellHcAdapter().remove("t1")
 
 
+def test_hc_error_is_a_terminal_host_error() -> None:
+    # Callers outside the adapter catch the neutral TerminalHostError, so hc's own
+    # failures must reach them through it.
+    assert issubclass(HcError, TerminalHostError)
+
+
 @pytest.mark.parametrize(
     "kind, returncode, expected_error",
     [
@@ -268,7 +279,7 @@ def test_error_kinds_map_to_typed_errors(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
     returncode: int,
-    expected_error: type[HcError],
+    expected_error: type[TerminalHostError],
 ) -> None:
     _install_runner(monkeypatch, [_hc_error(kind, returncode)])
 

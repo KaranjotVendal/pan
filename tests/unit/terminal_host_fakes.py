@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pan.errors import HcError, TerminalGoneError
+from pan.errors import TerminalGoneError, TerminalHostError
 from pan.models import AgentStatus, Terminal, TerminalRead, TerminalState
 
 
@@ -37,13 +37,13 @@ def make_terminal(
 
 
 @dataclass
-class FakeHc:
-    # An in-memory HcAdapter. `terminals` maps address -> Terminal; `labels` maps address ->
+class FakeTerminalHost:
+    # An in-memory TerminalHost. `terminals` maps address -> Terminal; `labels` maps address ->
     # its labels for `list_terminals` filtering. `errors` maps an operation name ("run",
     # "send", "read", "get", "list") to an error it raises.
     terminals: dict[str, Terminal] = field(default_factory=dict)
     labels: dict[str, dict[str, str]] = field(default_factory=dict)
-    errors: dict[str, HcError] = field(default_factory=dict)
+    errors: dict[str, TerminalHostError] = field(default_factory=dict)
     read_result: TerminalRead = field(
         default_factory=lambda: TerminalRead(text="recent output", complete=True)
     )

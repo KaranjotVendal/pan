@@ -9,6 +9,17 @@ from typing import Any
 # "assistant", the text under `message.content` (a string, or a list of blocks of which
 # only `text` blocks are prose). The exact shape is version-dependent (live-verify).
 _SPEAKERS = ("user", "assistant")
+# User entries Claude Code writes itself rather than the person: slash-command echoes and
+# their output, injected reminders, interrupt markers. Their text starts with one of these.
+_MACHINE_USER_TEXT_PREFIXES = (
+    "<command-",
+    "<local-command-",
+    "<system-reminder>",
+    "<bash-",
+    "<task-notification>",
+    "Caveat:",
+    "[Request interrupted",
+)
 
 
 def _entry_texts(entry: Any) -> tuple[str, str] | None:
@@ -35,18 +46,31 @@ def _entry_texts(entry: Any) -> tuple[str, str] | None:
     return str(entry["type"]), "\n".join(texts)
 
 
-def _turns(transcript_path: Path) -> Iterator[tuple[str, str]]:
+def _entries(transcript_path: Path) -> Iterator[Any]:
     for raw_line in transcript_path.read_text().splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
         try:
-            entry = json.loads(stripped)
+            yield json.loads(stripped)
         except json.JSONDecodeError:
             continue
+
+
+def _turns(transcript_path: Path) -> Iterator[tuple[str, str]]:
+    for entry in _entries(transcript_path):
         turn = _entry_texts(entry)
         if turn is not None:
             yield turn
+
+
+def _is_person_text(entry: dict[str, Any], text: str) -> bool:
+    # A user entry the person wrote: not a meta entry, not a subagent's (sidechain) prompt,
+    # not text Claude Code put there itself. Tool results carry no text block, so
+    # _entry_texts already skips them.
+    if entry.get("isMeta") or entry.get("isSidechain"):
+        return False
+    return not text.lstrip().startswith(_MACHINE_USER_TEXT_PREFIXES)
 
 
 def last_assistant_text(transcript_path: Path) -> str | None:
@@ -59,6 +83,22 @@ def last_assistant_text(transcript_path: Path) -> str | None:
     except OSError:
         return None
     return assistant_texts[-1] if assistant_texts else None
+
+
+def last_user_text(transcript_path: Path) -> str | None:
+    # The last thing the person asked the session: the last user text they wrote, or None
+    # when the file is unreadable or holds none.
+    last_text: str | None = None
+    try:
+        for entry in _entries(transcript_path):
+            turn = _entry_texts(entry)
+            if turn is None or turn[0] != "user":
+                continue
+            if _is_person_text(entry, turn[1]):
+                last_text = turn[1]
+    except OSError:
+        return None
+    return last_text
 
 
 def render_transcript(transcript_path: Path) -> str:

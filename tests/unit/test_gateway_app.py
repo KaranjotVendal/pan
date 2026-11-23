@@ -11,7 +11,7 @@ from slack_sdk.errors import SlackApiError
 
 from pan.errors import SlackPostError
 from pan.gateway.app import BoltSlackAdapter
-from pan.models import InboxItem, PanConfig, SlackCredentials
+from pan.models import InboxItem, PanConfig, Route, RouteKind, SlackCredentials, ThreadSource
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 
@@ -116,6 +116,8 @@ def test_allowed_app_mention_acks_then_appends() -> None:
     assert item.is_thread_reply is False
     assert item.raw_text == "<@B> do the thing"
     assert item.received_at == _FIXED_NOW
+    assert item.source is ThreadSource.SLACK
+    assert item.route == Route(text="do the thing")
 
     kinds = [entry[0] for entry in timeline]
     assert kinds == ["reaction", "append"]  # :eyes: before append (INV-1)
@@ -302,3 +304,22 @@ def test_client_failure_becomes_slack_post_error(method_name: str) -> None:
             adapter.add_reaction("C1", "1718000000.000200", "eyes")
         else:
             adapter.post_message("C1", "1718000000.000200", "text")
+
+
+@pytest.mark.parametrize(
+    "text, expected_route",
+    [
+        ("<@B> new: fix the login page", Route(kind=RouteKind.NEW, text="fix the login page")),
+        ("<@B> to pan-7: add tests", Route(kind=RouteKind.TO, session="pan-7", text="add tests")),
+        ("<@B> check", Route(kind=RouteKind.CHECK)),
+    ],
+)
+def test_gateway_writes_the_parsed_route_on_the_item(text: str, expected_route: Route) -> None:
+    adapter, _client, inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {"user": "U1", "channel": "C1", "ts": "1718000000.000200", "text": text}
+
+    adapter.handle_event(event, "Ev1")
+
+    (item,) = inbox.items
+    assert item.route == expected_route
+    assert item.raw_text == text

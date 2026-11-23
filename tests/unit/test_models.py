@@ -12,6 +12,7 @@ from pan.models import (
     Directive,
     InboxItem,
     PanConfig,
+    RouteKind,
     SlackConfig,
     TaskMode,
     ThreadRecord,
@@ -83,7 +84,6 @@ def test_directive_defaults() -> None:
     directive = Directive(cleaned_text="do the work")
 
     assert directive.mode is TaskMode.DELEGATE
-    assert directive.force_new is False
     assert directive.target_stream is None
     assert directive.agent is None
     assert directive.cleaned_text == "do the work"
@@ -158,8 +158,9 @@ def test_herdr_era_record_loads_as_lost(legacy_status: str, expected_status: Wor
     "enum_member, value",
     [
         (TaskMode.DELEGATE, "delegate"),
-        (TaskMode.SYNC, "sync"),
-        (TaskMode.STATUS, "status"),
+        (TaskMode.SESSIONS, "sessions"),
+        (RouteKind.NEW, "new"),
+        (RouteKind.TO, "to"),
         (WorkerStatus.SPAWNING, "spawning"),
         (WorkerStatus.RUNNING, "running"),
         (WorkerStatus.BLOCKED, "blocked"),

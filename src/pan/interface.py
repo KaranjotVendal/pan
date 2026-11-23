@@ -3,7 +3,7 @@ from __future__ import annotations
 from pan.errors import TargetAmbiguousError, TargetNotFoundError
 from pan.logging import initialise_logger
 from pan.models import Terminal, ThreadRecord
-from pan.seams import HcAdapter
+from pan.seams import TerminalHost
 from pan.transcript import render_transcript
 
 logger = initialise_logger(__name__)
@@ -22,8 +22,8 @@ def _space_of(where: str | None) -> str | None:
 
 def resolve_target(selector: str, terminals: list[Terminal]) -> Terminal:
     # Exact-match targeting with precise-id precedence, so an ambiguous label is
-    # re-targetable by a precise one (INV-3, no fuzzy judgment). An hc address wins, then
-    # a terminal name (unique among live terminals in hc); both resolve to one terminal.
+    # re-targetable by a precise one (INV-3, no fuzzy judgment). A host address wins, then
+    # a terminal name (unique among live terminals); both resolve to one terminal.
     # Only the Herdr app label axis (`where`, or just its space) can be ambiguous: zero
     # matches is not-found, one resolves, and more than one is refused with the candidates.
     for terminal in terminals:
@@ -46,17 +46,17 @@ def resolve_target(selector: str, terminals: list[Terminal]) -> Terminal:
 
 
 def relay_to_session(
-    hc: HcAdapter,
+    terminal_host: TerminalHost,
     selector: str,
     message: str,
     terminals: list[Terminal],
 ) -> Terminal:
-    # Resolve the target, then paste the message and press Enter in one hc send. Returns
+    # Resolve the target, then paste the message and press Enter in one terminal host send. Returns
     # the resolved terminal so the caller can build a precise ack. TargetNotFoundError /
     # TargetAmbiguousError propagate before any send; a target waiting on a person raises
-    # TargetBlockedError from hc without anything being typed.
+    # TargetBlockedError from the host without anything being typed.
     target = resolve_target(selector, terminals)
-    hc.send(target.address, message)
+    terminal_host.send(target.address, message)
     logger.info(f"relay terminal={target.address} selector={selector} len={len(message)}")
     return target
 
@@ -73,7 +73,7 @@ def _transcript_for(target: Terminal, records: list[ThreadRecord]) -> str | None
 
 
 def read_session(
-    hc: HcAdapter,
+    terminal_host: TerminalHost,
     records: list[ThreadRecord],
     selector: str,
     terminals: list[Terminal],
@@ -86,17 +86,17 @@ def read_session(
     # or with full=True the Claude transcript recorded by a pan worker's SessionStart hook
     # (falling back to long screen history, labelled as such, for any other terminal). The
     # caller (the orchestrator) summarizes; the CLI stays deterministic and returns raw
-    # content. Resolution errors propagate before hc is touched.
+    # content. Resolution errors propagate before the terminal host is touched.
     target = resolve_target(selector, terminals)
     if full:
         transcript = _transcript_for(target, records)
         if transcript is not None:
             content = transcript
         else:
-            history = hc.read(target.address, full_history_lines)
+            history = terminal_host.read(target.address, full_history_lines)
             content = f"{FULL_HISTORY_NOTICE}\n{history.text}"
     else:
-        recent = hc.read(target.address, lines)
+        recent = terminal_host.read(target.address, lines)
         content = recent.text if recent.complete else f"{INCOMPLETE_READ_NOTICE}\n{recent.text}"
     logger.info(
         f"read terminal={target.address} selector={selector} full={full} out_len={len(content)}"

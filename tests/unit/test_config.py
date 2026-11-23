@@ -7,7 +7,7 @@ import pytest
 
 from pan.config import load_config
 from pan.errors import ConfigMissingError
-from pan.models import Agent
+from pan.models import Agent, TerminalHostKind
 
 
 def _minimal_config() -> dict:
@@ -91,6 +91,27 @@ def test_herdr_era_pane_id_names_its_replacement(tmp_path: Path) -> None:
     data["orchestrator"]["pane_id"] = "w1:p1"
 
     with pytest.raises(ConfigMissingError, match="orchestrator.terminal"):
+        load_config(_write_config(tmp_path, data))
+
+
+@pytest.mark.parametrize(
+    "terminal_host_entry", [{}, {"terminal_host": "hc"}], ids=["omitted", "explicit-hc"]
+)
+def test_terminal_host_defaults_to_hc(tmp_path: Path, terminal_host_entry: dict) -> None:
+    data = {**_minimal_config(), **terminal_host_entry}
+
+    config = load_config(_write_config(tmp_path, data))
+
+    assert config.terminal_host is TerminalHostKind.HC
+
+
+@pytest.mark.parametrize("unknown_terminal_host", ["rex", "HC", "", 42, None])
+def test_unknown_terminal_host_is_a_clear_config_error(
+    tmp_path: Path, unknown_terminal_host: object
+) -> None:
+    data = {**_minimal_config(), "terminal_host": unknown_terminal_host}
+
+    with pytest.raises(ConfigMissingError, match="terminal_host .* is not supported"):
         load_config(_write_config(tmp_path, data))
 
 

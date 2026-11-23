@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.slack_format import to_slack_mrkdwn
+from pan.slack_format import split_for_slack, to_slack_mrkdwn
 
 
 @pytest.mark.parametrize(
@@ -109,3 +109,33 @@ def test_prose_pipe_line_followed_by_divider_is_not_a_table() -> None:
 )
 def test_totality(raw: str, expected: str) -> None:
     assert to_slack_mrkdwn(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "text, max_length, expected_parts",
+    [
+        ("short answer", 40, ["short answer"]),
+        ("aaaa\nbbbb\ncccc\ndddd", 14, ["aaaa\nbbbb", "cccc\ndddd"]),
+        ("a" * 25, 14, ["aaaaaa", "aaaaaa", "aaaaaa", "aaaaaa\na"]),
+        (
+            "intro\n```\nline one\nline two\n```\nend",
+            24,
+            ["intro\n```\nline one\n```", "```\nline two\n```\nend"],
+        ),
+    ],
+    ids=["fits", "at-line-breaks", "long-line-cut", "fence-closed-and-reopened"],
+)
+def test_split_for_slack(text: str, max_length: int, expected_parts: list[str]) -> None:
+    parts = split_for_slack(text, max_length)
+
+    assert parts == expected_parts
+    assert all(len(part) <= max_length for part in parts)
+
+
+def test_split_for_slack_keeps_every_line_in_order() -> None:
+    lines = [f"line {number}" for number in range(500)]
+
+    parts = split_for_slack("\n".join(lines), 300)
+
+    assert len(parts) > 1
+    assert "\n".join(parts).split("\n") == lines

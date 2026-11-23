@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hc_fakes import FakeHc, make_terminal
+from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import TargetAmbiguousError, TargetBlockedError, TargetNotFoundError
 from pan.interface import (
@@ -78,29 +78,29 @@ def test_resolve_target_shared_space_raises_ambiguous_with_candidates() -> None:
 
 @pytest.mark.parametrize("message", ["re-run the tests", "add the --json path"])
 def test_relay_sends_verbatim_into_the_resolved_terminal(message: str) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
-    resolved = relay_to_session(hc, "pan-backend", message, _terminals())
+    resolved = relay_to_session(terminal_host, "pan-backend", message, _terminals())
 
     assert resolved.address == "t5"
-    assert hc.sent == [("t5", message)]
+    assert terminal_host.sent == [("t5", message)]
 
 
 @pytest.mark.parametrize("selector", ["does-not-exist", "web"])
 def test_relay_does_not_send_when_target_unresolvable(selector: str) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
     with pytest.raises((TargetNotFoundError, TargetAmbiguousError)):
-        relay_to_session(hc, selector, "hi", _terminals())
+        relay_to_session(terminal_host, selector, "hi", _terminals())
 
-    assert hc.timeline == []
+    assert terminal_host.timeline == []
 
 
 def test_relay_into_a_blocked_target_raises_blocked() -> None:
-    hc = FakeHc(errors={"send": TargetBlockedError("blocked")})
+    terminal_host = FakeTerminalHost(errors={"send": TargetBlockedError("blocked")})
 
     with pytest.raises(TargetBlockedError):
-        relay_to_session(hc, "t5", "yes", _terminals())
+        relay_to_session(terminal_host, "t5", "yes", _terminals())
 
 
 @pytest.mark.parametrize(
@@ -114,23 +114,23 @@ def test_relay_into_a_blocked_target_raises_blocked() -> None:
     ],
 )
 def test_read_recent_reads_history(terminal_read: TerminalRead, expected: str) -> None:
-    hc = FakeHc(read_result=terminal_read)
+    terminal_host = FakeTerminalHost(read_result=terminal_read)
 
     content = read_session(
-        hc, [], "pan-backend", _terminals(), full=False, lines=42, full_history_lines=900
+        terminal_host, [], "pan-backend", _terminals(), full=False, lines=42, full_history_lines=900
     )
 
     assert content == expected
-    assert hc.reads == [("t5", 42)]
+    assert terminal_host.reads == [("t5", 42)]
 
 
 def test_read_full_renders_the_recorded_transcript(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
     transcript.write_text('{"type": "user", "message": {"content": "fix it"}}\n')
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
     content = read_session(
-        hc,
+        terminal_host,
         [_record("t5", transcript)],
         "pan-backend",
         _terminals(),
@@ -140,7 +140,7 @@ def test_read_full_renders_the_recorded_transcript(tmp_path: Path) -> None:
     )
 
     assert content == "user: fix it"
-    assert hc.reads == []
+    assert terminal_host.reads == []
 
 
 @pytest.mark.parametrize(
@@ -149,14 +149,20 @@ def test_read_full_renders_the_recorded_transcript(tmp_path: Path) -> None:
     ids=["external", "no-transcript-recorded", "transcript-unreadable"],
 )
 def test_read_full_falls_back_to_labelled_screen_history(records: list[ThreadRecord]) -> None:
-    hc = FakeHc(read_result=TerminalRead(text="long history", complete=True))
+    terminal_host = FakeTerminalHost(read_result=TerminalRead(text="long history", complete=True))
 
     content = read_session(
-        hc, records, "pan-backend", _terminals(), full=True, lines=42, full_history_lines=900
+        terminal_host,
+        records,
+        "pan-backend",
+        _terminals(),
+        full=True,
+        lines=42,
+        full_history_lines=900,
     )
 
     assert content == f"{FULL_HISTORY_NOTICE}\nlong history"
-    assert hc.reads == [("t5", 900)]
+    assert terminal_host.reads == [("t5", 900)]
 
 
 @pytest.mark.parametrize("full", [False, True])
@@ -164,12 +170,14 @@ def test_read_full_falls_back_to_labelled_screen_history(records: list[ThreadRec
     "selector, expected_error",
     [("does-not-exist", TargetNotFoundError), ("web", TargetAmbiguousError)],
 )
-def test_read_does_not_touch_hc_when_target_unresolvable(
+def test_read_does_not_touch_terminal_host_when_target_unresolvable(
     selector: str, expected_error: type[Exception], full: bool
 ) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
     with pytest.raises(expected_error):
-        read_session(hc, [], selector, _terminals(), full=full, lines=10, full_history_lines=900)
+        read_session(
+            terminal_host, [], selector, _terminals(), full=full, lines=10, full_history_lines=900
+        )
 
-    assert hc.reads == []
+    assert terminal_host.reads == []

@@ -5,7 +5,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from pan.errors import HcError, TargetBlockedError, TerminalGoneError, TerminalNameTakenError
+from pan.errors import (
+    TargetBlockedError,
+    TerminalGoneError,
+    TerminalHostError,
+    TerminalNameTakenError,
+)
 from pan.logging import initialise_logger
 from pan.models import AgentStatus, Terminal, TerminalRead, TerminalState
 
@@ -13,9 +18,15 @@ logger = initialise_logger(__name__)
 
 _HC = "hc"
 
+
+# A failure of the `hc` program itself (missing binary, unexpected output, or an hc error
+# kind pan has no typed error for). Callers outside this adapter catch TerminalHostError.
+class HcError(TerminalHostError): ...
+
+
 # hc error kinds (from the `{error: {kind, message, hint}}` object on stderr) that pan
 # handles distinctly; any other kind is a plain HcError.
-_ERROR_KINDS: dict[str, type[HcError]] = {
+_ERROR_KINDS: dict[str, type[TerminalHostError]] = {
     "not_found": TerminalGoneError,
     "finished": TerminalGoneError,
     "blocked": TargetBlockedError,
@@ -100,6 +111,7 @@ def _label_arguments(labels: dict[str, str]) -> list[str]:
 
 
 class ShellHcAdapter:
+    # The hc implementation of the TerminalHost seam. hc labels are supported natively.
     def run(self, *, name: str, cwd: Path, argv: list[str], labels: dict[str, str]) -> Terminal:
         # Start a program in a new background terminal. `--no-parent` keeps it independent
         # of whichever terminal invoked pan, so it outlives that session and hc types no
@@ -185,7 +197,7 @@ class ShellHcAdapter:
             raise HcError(f"hc {subcommand} output is not a JSON object")
         return parsed
 
-    def _error_for(self, subcommand: str, returncode: int, stderr: str) -> HcError:
+    def _error_for(self, subcommand: str, returncode: int, stderr: str) -> TerminalHostError:
         # hc reports failures as `{error: {kind, message, hint}}` on stderr. The kind picks
         # the typed error; the message is hc's own (terminal names, never payloads).
         kind = None
@@ -198,5 +210,7 @@ class ShellHcAdapter:
         if isinstance(error_object, dict):
             kind = error_object.get("kind")
             message = str(error_object.get("message", ""))
-        error_type = _ERROR_KINDS.get(kind, HcError) if isinstance(kind, str) else HcError
+        error_type: type[TerminalHostError] = (
+            _ERROR_KINDS.get(kind, HcError) if isinstance(kind, str) else HcError
+        )
         return error_type(f"hc {subcommand} failed (code {returncode}, kind {kind}): {message}")

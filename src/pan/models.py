@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 class TaskMode(StrEnum):
     DELEGATE = "delegate"
-    SYNC = "sync"
-    STATUS = "status"
     SESSIONS = "sessions"
     RELAY = "relay"  # send a message into a target terminal
     READ = "read"  # read a target session's output (recent | --full transcript)
@@ -20,9 +18,25 @@ class TaskMode(StrEnum):
 class WorkerStatus(StrEnum):
     SPAWNING = "spawning"
     RUNNING = "running"
+    # Between turns: the session's turn ended and it waits for a follow-up. Set by the
+    # Stop hook; the terminal is still live, so it is not finished work.
+    IDLE = "idle"
     BLOCKED = "blocked"
     DONE = "done"
     FAILED = "failed"
+
+
+class ThreadSource(StrEnum):
+    # Where a thread lives, so a Slack thread ts and (later) an X post id never collide.
+    SLACK = "slack"
+    X = "x"
+
+
+class ReplyMode(StrEnum):
+    # ON_DEMAND: Slack gets the start notice and then a reply only when asked. SLACK: the
+    # request asked for a reply in Slack, so the answer is posted at every turn end.
+    ON_DEMAND = "on_demand"
+    SLACK = "slack"
 
 
 class AgentStatus(StrEnum):
@@ -44,6 +58,12 @@ class TerminalState(StrEnum):
     FINISHED = "finished"
 
 
+class TerminalHostKind(StrEnum):
+    # The terminal multiplexer pan drives through the TerminalHost seam (config key
+    # `terminal_host`). Only one host is active at a time.
+    HC = "hc"
+
+
 class Autonomy(StrEnum):
     FULL = "full"
     GATED = "gated"
@@ -56,9 +76,32 @@ class Agent(StrEnum):
     PI = "pi"
 
 
+class RouteKind(StrEnum):
+    # The route words at the start of a message (see directive.parse_route). TASK means no
+    # route word: the thread's tie decides. NOTICE means pan only replies with Route.notice
+    # (a retired flag, or a route word with no task) and does nothing else.
+    TASK = "task"
+    NEW = "new"
+    TO = "to"
+    SESSIONS = "sessions"
+    FORGET = "forget"
+    CHECK = "check"
+    NOTICE = "notice"
+
+
+class Route(BaseModel, frozen=True):
+    kind: RouteKind = RouteKind.TASK
+    # The live session named by `to <name>:`.
+    session: str | None = None
+    # The message with the mention and route word removed: the task, or the text to send.
+    text: str = ""
+    # "reply in slack" appears in the message.
+    reply_in_slack: bool = False
+    notice: str | None = None
+
+
 class Directive(BaseModel, frozen=True):
     mode: TaskMode = TaskMode.DELEGATE
-    force_new: bool = False
     target_stream: str | None = None
     agent: Agent | None = None
     # relay/read selector (hc address | terminal name | Herdr app space label) and the relay
@@ -79,6 +122,9 @@ class InboxItem(BaseModel, frozen=True):
     is_thread_reply: bool
     raw_text: str
     received_at: datetime
+    source: ThreadSource = ThreadSource.SLACK
+    # Parsed by the gateway; None on items an older gateway wrote (drain parses those).
+    route: Route | None = None
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -93,6 +139,8 @@ class ThreadRecord(BaseModel):
     terminal_name: str
     terminal_address: str = ""
     channel: str
+    # The worker's worktree; for a session pan did not start (started_by_pan False), the
+    # session's own folder, which pan never removes.
     worktree_path: Path
     agent: Agent = Agent.CLAUDE
     # Recorded by the worker's SessionStart hook; used by `pan read --full`.
@@ -101,6 +149,20 @@ class ThreadRecord(BaseModel):
     status: WorkerStatus = WorkerStatus.SPAWNING
     created_at: datetime
     updated_at: datetime
+    # Session control. Every field defaults, so records written before they existed load.
+    source: ThreadSource = ThreadSource.SLACK
+    # The thread is tied to this session: follow-ups go to it. One thread per session, so a
+    # new tie of the session elsewhere unties this one (FileThreadMap.tie).
+    tied: bool = True
+    started_by_pan: bool = True
+    # The sender of the request that started the session (a Slack user id).
+    requester: str | None = None
+    reply_mode: ReplyMode = ReplyMode.ON_DEMAND
+    # The Plannotator Inbox thread the session reports in: the name pan gives it at spawn,
+    # and the id and link the inbox-link hook captures from the session's first send.
+    inbox_thread_name: str | None = None
+    inbox_thread_id: str | None = None
+    inbox_thread_url: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -118,9 +180,10 @@ class ThreadRecord(BaseModel):
 
 
 class Terminal(BaseModel, frozen=True):
-    # The confined projection of one hc terminal; the only terminal type the hc adapter
-    # lets escape (INV-8). `address` is hc's id (t7, machine/t7); `name` is unique among
-    # live terminals; `where` is the Herdr app's "space / tab" label when it shows one.
+    # The confined projection of one terminal; the only terminal type a terminal host
+    # adapter lets escape (INV-8). `address` is the host's id (for hc: t7, machine/t7);
+    # `name` is unique among live terminals; `where` is the Herdr app's "space / tab" label
+    # when it shows one (hc only; other hosts leave it empty).
     address: str
     name: str | None = None
     where: str | None = None
@@ -130,8 +193,16 @@ class Terminal(BaseModel, frozen=True):
     agent_status: AgentStatus
 
 
+class InboxThread(BaseModel, frozen=True):
+    # One Plannotator Inbox thread found by name. `url` is None when the Inbox listing
+    # carries no link for it.
+    thread_id: str
+    name: str
+    url: str | None = None
+
+
 class TerminalRead(BaseModel, frozen=True):
-    # `complete` is False when hc could return only the visible screen (the target was
+    # `complete` is False when the host could return only the visible screen (the target was
     # working, blocked or in error), so a summary of it must not overclaim.
     text: str
     complete: bool
@@ -151,6 +222,8 @@ class SessionSummary(BaseModel, frozen=True):
     pan_status: WorkerStatus | None = None
     is_pan_owned: bool = False
     drift: bool = False
+    # The last thing the session was asked, from its transcript when pan knows it.
+    last_ask: str | None = None
 
 
 class SlackCredentials(BaseModel, frozen=True):
@@ -197,6 +270,7 @@ class PanPaths(BaseModel, frozen=True):
 
 class PanConfig(BaseModel, frozen=True):
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    terminal_host: TerminalHostKind = TerminalHostKind.HC
     orchestrator: OrchestratorConfig
     defaults: Defaults
     users: dict[str, UserPolicy] = Field(default_factory=dict)

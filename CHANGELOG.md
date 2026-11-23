@@ -7,6 +7,111 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Added
+
+- Reaching sessions pan did not start ("desk sessions"). `to <name>:` (`pan send --to`) now reaches
+  any live session. A desk session gets a thread record with `started_by_pan` false and its own
+  folder as `worktree_path`, tied to the thread (one thread per session still holds).
+- Busy sessions are refused. Before typing into any existing session (`to <name>:` or a follow-up),
+  pan reads its state from the terminal host: idle (or done) is typed into; busy, an error, no
+  status or an unknown state is refused with "<name> is busy; try again, or @pan check"
+  (`SessionBusyError`, exit 26); waiting on a prompt keeps the blocked reply. Nothing is typed on a
+  refusal.
+- `pan send` without `--to` sends a follow-up to the thread's tied session (`follow_up_to_session`)
+  with the same checks. When the session has ended it exits 22: the orchestrator reopens pan's own
+  sessions; for a desk session pan says it ended and suggests `new:` or `to <name>:`.
+- Text typed into a session from `to <name>:`, and every follow-up to a desk session, gets one line
+  on top: "From Slack via pan", the Plannotator Inbox thread to use (`<name>: <short task>`, or the
+  one pan named before), and that Slack hears back only when asked (`from_slack_text`).
+- The `InboxDirectory` seam and `ShellPlannotatorInboxAdapter` (`src/pan/adapters/plannotator_inbox.py`)
+  look an Inbox thread up by name with `plannotator inbox call read_thread` (`asked_by: "anyone"`,
+  the session's folder as `project_path`). Read only, never sends; any failure returns nothing.
+  `check` and the "Sent to …" notice use it for sessions whose Inbox thread id is unknown; the
+  listing carries no link, so usually only the name is shown. Needs a live check.
+- Messages from X may not use `to <name>:` until the X safety gate (MOB-87): `parse_route` takes the
+  source and `route_for_source` turns such a route into a notice, at parse time and again at drain.
+
+- Route words, parsed in code by `parse_route` (`src/pan/directive.py`): `new: <task>`,
+  `to <name>: <task>`, and the whole-message words `check`, `sessions` and `forget`. Strict: the
+  route word is the first word after the mention, spelled exactly, in any letter case, after the
+  phone-punctuation repair; anything else is task text. "reply in slack" anywhere sets
+  `reply_in_slack` on the route.
+- The gateway parses the route and writes it on the inbox item; `InboxItem` gains `source` and
+  `route`. INV-1 now reads: the gateway parses route words, and still decides nothing about the
+  work. `pan inbox drain --json` emits each item's `route` (parsed at drain for an item an older
+  gateway wrote) and the directive parsed from the route's text.
+- `pan check --thread … --channel …` posts the tied session's latest answer as is: the last answer
+  in its transcript, or its recent screen lines labelled as screen text. It names the Inbox thread
+  (link, or name before the link is known) and says when the session is still working, waiting on a
+  prompt at the terminal, or ended. Long answers are posted in labelled parts (`split_for_slack` in
+  `src/pan/slack_format.py`, `slack_post_parts` in `src/pan/gateway/slack_post.py`). An untied thread
+  gets "this thread isn't tied to a session; @pan sessions lists them".
+- `pan send --thread … --channel … --to <name> --task …` (the `to <name>:` route) sends the task to
+  a live session and ties the thread to it, posting "Sent to <name> · Inbox: …". An unknown name gets
+  a reply listing close matches, an ambiguous one lists the candidates, a blocked one says it is
+  waiting on a prompt; nothing is sent. For now only sessions pan started can be named; any other
+  live session gets "<name> is not a pan session; reaching your own sessions comes next"
+  (`NotPanSessionError`, exit 25).
+- `pan forget --thread … --channel …` unties the thread and says so; it never stops the session.
+- `pan sessions` shows the last thing each session was asked (`last_ask`, from its transcript when
+  pan knows it; a worker's brief is cut back to its task), and with `--thread` and `--channel` posts
+  the table to a Slack thread. `last_user_text` in `src/pan/transcript.py` reads it, skipping tool
+  results, meta and sidechain entries, and text Claude Code writes itself.
+
+- Thread records carry session-control fields: `source` (`slack`; room for `x`), `tied`,
+  `started_by_pan`, `requester`, `reply_mode` (`on_demand` by default, or `slack`), and the
+  session's Plannotator Inbox thread (`inbox_thread_name`, `inbox_thread_id`, `inbox_thread_url`).
+  Records written before them load with defaults. `FileThreadMap` gains `tie` (one thread per
+  session: tying a session to a new thread unties its old one), `untie` and `record_inbox_thread`.
+- `pan hook inbox-link`, a PostToolUse hook on `mcp__plannotator__plannotator_inbox` in the worker
+  settings. It reads the Inbox thread id and link from the tool result and stores them on the
+  worker's thread record. It never posts to Slack and always exits 0. The payload shape needs a live
+  check.
+- `wants_slack_reply` (`src/pan/directive.py`): "reply in slack" anywhere in a request, any letter
+  case, sets the new thread's reply mode to `slack`. `pan spawn` takes `--requester`,
+  `--request-text` and `--reply-in-slack`.
+- An `idle` worker status: the session's turn ended and it waits for a follow-up.
+
+### Changed
+
+- Thread records are kept per (thread, session) instead of per thread (`record_key`). `new:` in a
+  tied thread, or `to <name>:` naming another session, no longer overwrites the old session's
+  record: it stays, untied, and its hooks still find it by worktree. `FileThreadMap.get` returns the
+  thread's tied record (else its newest); `get`, `update_status`, `record_session` and
+  `record_inbox_thread` take `session_name` to pick one session's record. Files keyed by thread
+  alone load as before and are rewritten in the new shape on the next write.
+- The Stop and Notification hooks of a session whose thread moved to another session only update
+  its own record; they post nothing to that thread.
+- `pan stop` refuses for a session pan did not start (`NotPanSessionError`, exit 25): it unties the
+  thread and never stops the session. `pan reopen` refuses such a session too. `pan sessions`
+  shows a tied desk session as external, with its thread.
+- `to <name>:` no longer refuses sessions pan did not start (the slice B notice "<name> is not a
+  pan session; reaching your own sessions comes next" is gone).
+- `--new`, `--status`, `--sync` and the leading `!` are retired. A message carrying one gets a short
+  reply naming what replaced it (`new:`, `check` / `sessions`, `reply in slack`) and nothing else
+  happens. `parse_directive` no longer reads them; `TaskMode` loses `sync` and `status` and
+  `Directive` loses `force_new`. `relay` and `read` stay as one-off actions that tie nothing.
+- The orchestrating skill acts on the route first: `check`, `sessions` and `forget` run the `pan`
+  command that posts its own reply; `to <name>:` runs `pan send`; `new:` spawns; with no route words
+  the tie decides as before. The Slack help footer and the README list the route words.
+- Replies to Slack are on demand. The Stop hook marks the thread `idle` (not `done`) and posts the
+  last answer only in reply mode `slack`, where it posts at every turn end as before. The
+  Notification hook only marks the thread `blocked`, posting the prompt only in reply mode `slack`.
+- `pan spawn` posts one start notice naming the session and its Inbox thread (`Started pan-7 in a
+  new worktree · Inbox thread: "pan-7: <short task>"`) instead of "on it — stream ...". The worker's
+  brief opens with a fixed preamble: use the Plannotator Inbox in a thread with exactly that name,
+  send a first short message there before starting, and do not post to Slack. A failed spawn leaves
+  the thread untied.
+- `pan inbox drain` puts the thread's tie on each item (`tie` in `--json`, an indented line in text
+  output): "this thread's work belongs to <session> (<status>); send follow-ups there; never start a
+  second session for the same work".
+- The orchestrating skill no longer guesses between reopening and spawning fresh. In a tied thread,
+  follow-ups go to the tied session (relayed, or reopened when it ended); a plain `@pan` in an untied
+  thread starts a new session; `--new` moves the tie to a new session. SYNC now spawns with
+  `--reply-in-slack` instead of blocking.
+- `pan status` and `pan sessions` report an idle hc agent as `idle`; `running` and `idle` never count
+  as drift. `pan up` treats `idle` workers as live when looking for lost ones.
+
 ### Fixed
 
 - The watcher woke the orchestrator 5 times for one Slack message: every filesystem event in the
@@ -16,6 +121,15 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- Put hc behind a neutral terminal host seam, with no behaviour change. The `HcAdapter` protocol is
+  now `TerminalHost` (`src/pan/seams.py`); `ShellHcAdapter` is its hc implementation, built by
+  `build_terminal_host` (`src/pan/adapters/terminal_host.py`) from the new config key
+  `terminal_host` (only `"hc"`, the default; any other value is a config error, exit 11). Callers
+  outside the adapter catch the new neutral `TerminalHostError` (exit 16); `HcError` moved into the
+  hc adapter as its subclass, and `TerminalGoneError`, `TargetBlockedError` and
+  `TerminalNameTakenError` now subclass `TerminalHostError`. Parameters named `hc` are now
+  `terminal_host`. Ownership of a terminal stays decided by the thread map; labels are only a hint.
+  `pan relay` now loads the config, to pick the terminal host.
 - Migrated from the herdr TUI CLI and morcli to herdr-core (`hc`). herdr is no longer installed and
   `morcli streams` depends on it, so spawn, sessions, relay, read, status, stop and the watcher wake
   were all broken. A new `ShellHcAdapter` (`src/pan/adapters/hc.py`, seam `HcAdapter`) is the only
