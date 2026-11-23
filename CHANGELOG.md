@@ -7,6 +7,34 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Fixed
+
+- A trailing client signature such as "\n*Sent using* <@U0EXAMPLE|Claude>" (added by some Slack
+  clients and connectors, any letter case, with optional `*`/`_` emphasis, `>` quote and `|label`)
+  is stripped in `_clean_message` before route parsing, so `check`, `sessions` and `forget` match
+  again and the signature never reaches task text, briefs or Inbox thread names.
+- The inbox-link hook now finds the link in the Inbox's real send result, which is a prose line
+  followed by the JSON result (it only parsed text that was JSON as a whole). Every early return
+  of the hook entrypoints logs why (no cwd in the payload, or no record for `cwd=<path>`), and a
+  `~` in the cwd is expanded. A worker running Claude Code's experimental code mode calls the Inbox
+  from inside its REPL tool, so the PostToolUse hook does not run for those calls at all; `check`
+  still finds the thread by name.
+- The Notification hook no longer marks a thread blocked for Claude Code's idle reminder
+  ("Claude is waiting for your input", `notification_type` `idle_prompt`). Only a prompt waiting
+  on the person (`permission_prompt`, `elicitation_dialog`, or with no known type a message about
+  permission or approval) marks it blocked or posts.
+- A brand-new Claude session, which reports no status until its first turn ends, is no longer
+  refused as busy: no status counts as ready for a known Claude agent (`claude`, `claude-code`)
+  at turn 0 or with no turn count. Shells and other programs with no status, unknown states and
+  working sessions are still refused. `Terminal` gains `turn`; the hc adapter reads it, and names
+  the agent of a status-less `hc get` entry by its launched program.
+- The Inbox lookup by name is documented and tested against the live listing shape. The desk
+  session's lookup missed because it ran right after the task was typed, before the session had
+  created its thread; `check` looks again until it is found. `project_path` works for any folder:
+  a git worktree maps to its main repository's project.
+- Tests no longer write to the real `~/.pan/logs/pan.log`: `PAN_LOG_DIR` points the log file at
+  another folder, and `tests/conftest.py` sets it to a throwaway folder before pan is imported.
+
 ### Added
 
 - Reaching sessions pan did not start ("desk sessions"). `to <name>:` (`pan send --to`) now reaches

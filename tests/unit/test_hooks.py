@@ -125,7 +125,14 @@ def test_stop_hook_in_reply_in_slack_mode_posts_and_marks_idle() -> None:
     "hook, payload",
     [
         (stop_hook, {"hook_event_name": "Stop", "transcript_path": None}),
-        (notification_hook, {"hook_event_name": "Notification", "message": "q"}),
+        (
+            notification_hook,
+            {
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "q",
+            },
+        ),
     ],
     ids=["stop", "notification"],
 )
@@ -213,7 +220,11 @@ def test_notification_hook_marks_blocked_and_posts_only_in_reply_in_slack_mode(
     reply_mode: ReplyMode, message: str | None, expected_posts: list[tuple[str, str, str]]
 ) -> None:
     thread_map, slack = FakeThreadMap(reply_mode=reply_mode), FakeSlack()
-    payload_fields: dict[str, str] = {"session_id": "s1", "hook_event_name": "Notification"}
+    payload_fields: dict[str, str] = {
+        "session_id": "s1",
+        "hook_event_name": "Notification",
+        "notification_type": "permission_prompt",
+    }
     if message is not None:
         payload_fields["message"] = message
 
@@ -223,6 +234,53 @@ def test_notification_hook_marks_blocked_and_posts_only_in_reply_in_slack_mode(
 
     assert slack.posts == expected_posts
     assert thread_map.status_updates == [(_THREAD, WorkerStatus.BLOCKED)]
+
+
+@pytest.mark.parametrize(
+    "notification_type, message, expected_statuses",
+    [
+        ("permission_prompt", "Claude needs your permission to use Bash", [WorkerStatus.BLOCKED]),
+        ("elicitation_dialog", "Claude Code needs your input", [WorkerStatus.BLOCKED]),
+        ("idle_prompt", "Claude is waiting for your input", []),
+        ("auth_success", "Signed in", []),
+        (None, "Claude needs your permission to use Bash", [WorkerStatus.BLOCKED]),
+        (None, "Claude needs your approval to run rm", [WorkerStatus.BLOCKED]),
+        (None, "Claude is waiting for your input", []),
+        (None, None, []),
+        ("some_new_type", "Claude needs your permission to use Bash", [WorkerStatus.BLOCKED]),
+        ("some_new_type", "Claude is waiting for your input", []),
+    ],
+    ids=[
+        "permission-prompt",
+        "elicitation-dialog",
+        "idle-prompt",
+        "auth-success",
+        "no-type-permission-text",
+        "no-type-approval-text",
+        "no-type-idle-text",
+        "no-type-no-text",
+        "unknown-type-permission-text",
+        "unknown-type-idle-text",
+    ],
+)
+def test_notification_hook_marks_blocked_only_for_a_prompt_waiting_on_the_person(
+    notification_type: str | None,
+    message: str | None,
+    expected_statuses: list[WorkerStatus],
+) -> None:
+    thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
+    payload_fields: dict[str, str] = {"session_id": "s1", "hook_event_name": "Notification"}
+    if notification_type is not None:
+        payload_fields["notification_type"] = notification_type
+    if message is not None:
+        payload_fields["message"] = message
+
+    notification_hook(
+        _THREAD, "C1", thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
+    )
+
+    assert [status for _, status in thread_map.status_updates] == expected_statuses
+    assert len(slack.posts) == len(expected_statuses)
 
 
 @pytest.mark.parametrize(
@@ -280,6 +338,30 @@ _INBOX_RESULT = {
 }
 
 
+# The Inbox's real send_message text (ids and host replaced): a prose line naming the thread,
+# then the structured result as JSON.
+_INBOX_RESULT_TEXT = (
+    "Sent to the Plannotator Inbox (thread thr_1, https://inbox.example/t/thr_1). The person's "
+    "reply arrives in this session by itself, as a new message once the session is idle: end "
+    "your turn, or go on with other work.\n\n"
+    + json.dumps(
+        {
+            "message_id": "msg_1",
+            "thread_id": "thr_1",
+            "new_thread": True,
+            "thread_name": "pan-task: do the thing",
+            "project": {"id": "prj_1", "name": "repo", "root": "/repo"},
+            "questions": [],
+            "attachments": [],
+            "superseded": [],
+            "replayed": False,
+            "cursor": 14786,
+            "url": "https://inbox.example/t/thr_1",
+        }
+    )
+)
+
+
 def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the thing") -> str:
     tool_input: dict[str, str] = {"action": "send_message", "body": "starting"}
     if thread is not None:
@@ -303,6 +385,10 @@ def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the
         {"content": [{"type": "text", "text": json.dumps(_INBOX_RESULT)}]},
         {"structuredContent": _INBOX_RESULT, "content": []},
         [{"type": "text", "text": "Sent."}, {"type": "text", "text": json.dumps(_INBOX_RESULT)}],
+        _INBOX_RESULT_TEXT,
+        [{"type": "text", "text": _INBOX_RESULT_TEXT}],
+        {"content": [{"type": "text", "text": _INBOX_RESULT_TEXT}]},
+        "[draft] " + _INBOX_RESULT_TEXT,
     ],
     ids=[
         "dict",
@@ -311,6 +397,10 @@ def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the
         "content-key",
         "structured-content",
         "second-block",
+        "real-text",
+        "real-text-block",
+        "real-text-content-key",
+        "real-text-after-a-bracket",
     ],
 )
 def test_parse_inbox_link_finds_thread_id_and_url(tool_response: object) -> None:

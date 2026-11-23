@@ -10,8 +10,29 @@ import pytest
 from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter, find_thread_in_listing
 from pan.models import InboxThread
 
+# The envelope and row fields of a live `plannotator inbox call read_thread` listing (ids,
+# names and paths replaced): the project, its threads newest first, and a total.
+_LIVE_LISTING = {
+    "project": {"id": "prj_1", "name": "desk-test", "root": "/tmp/desk/test"},
+    "threads": [
+        {
+            "thread_id": "msg_1",
+            "subject": "desk-test: reply with the word hello",
+            "thread_name": "desk-test: reply with the word hello",
+            "section": "quiet",
+            "message_count": 1,
+            "questions": {"open": 0, "picked": 0, "prompt": None},
+            "last_author": "agent",
+            "last_at": "2026-01-01T00:00:00.000Z",
+            "last_person_at": None,
+            "last_person_message_id": None,
+            "unread": False,
+        }
+    ],
+    "total": 1,
+}
 # The row fields `plannotator inbox --help` documents for read_thread with no thread id. The
-# exact envelope around the rows is not documented, so the adapter searches for them.
+# adapter searches for rows wherever they sit.
 _LISTING = {
     "threads": [
         {
@@ -57,6 +78,11 @@ _LISTING = {
             "desk-api: fix the build",
             InboxThread(thread_id="thr_2", name="desk-api: fix the build"),
         ),
+        (
+            _LIVE_LISTING,
+            "desk-test: reply with the word hello",
+            InboxThread(thread_id="msg_1", name="desk-test: reply with the word hello"),
+        ),
         (_LISTING, "desk-api: something else", None),
         ({"threads": [{"thread_id": "thr_3", "subject": "no name"}]}, "no name", None),
         ("not a listing", "desk-api: fix the build", None),
@@ -66,6 +92,7 @@ _LISTING = {
         "case-and-spacing-ignored",
         "row-with-a-link",
         "bare-list",
+        "live-listing",
         "no-match",
         "unnamed-thread-never-matches-by-subject",
         "unexpected-shape",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import difflib
 
-from pan.config import WORKER_BRIEF_TASK_MARKER
+from pan.config import CLAUDE_AGENT_NAMES, WORKER_BRIEF_TASK_MARKER
 from pan.errors import (
     SessionBusyError,
     TargetAmbiguousError,
@@ -38,7 +38,8 @@ FROM_SLACK_HEADER = (
     '"{inbox_thread_name}"; Slack gets a reply only when someone asks for one.'
 )
 # The agent states in which a session is waiting for input, so text can be typed into it. Any
-# other state (working, an error, no status, an unknown one) counts as busy.
+# other state (working, an error, no status, an unknown one) counts as busy, except a fresh
+# Claude session (see _is_ready).
 _READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
 _CLOSE_MATCH_LIMIT = 3
 _CLOSE_MATCH_CUTOFF = 0.6
@@ -132,6 +133,20 @@ def _blocked_reply(name: str) -> str:
     return f"{name} is waiting on a prompt at the terminal; nothing was sent"
 
 
+def _is_ready(terminal: Terminal) -> bool:
+    # A Claude session reports no status until its first turn ends, so a brand-new one reads
+    # NONE while it waits at its prompt. NONE counts as ready only for a known Claude agent
+    # that has not finished a turn (or whose host does not count turns); a shell or other
+    # program with no status, UNKNOWN and WORKING stay refused.
+    if terminal.agent_status in _READY_STATUSES:
+        return True
+    return (
+        terminal.agent_status is AgentStatus.NONE
+        and terminal.agent in CLAUDE_AGENT_NAMES
+        and (terminal.turn is None or terminal.turn == 0)
+    )
+
+
 def _deliver(
     terminal_host: TerminalHost,
     terminal: Terminal,
@@ -149,7 +164,7 @@ def _deliver(
     if terminal.agent_status is AgentStatus.BLOCKED:
         slack_post(slack, channel, thread_ts, _blocked_reply(name))
         raise TargetBlockedError(f"{terminal.address} is waiting on a person")
-    if terminal.agent_status not in _READY_STATUSES:
+    if not _is_ready(terminal):
         slack_post(slack, channel, thread_ts, _busy_reply(name))
         raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
     try:
@@ -163,8 +178,10 @@ def _with_inbox_link(
     record: ThreadRecord, inbox_directory: InboxDirectory, thread_map: ThreadMap
 ) -> ThreadRecord:
     # A session pan has no hooks in (a desk session, or a worker whose hook missed the link)
-    # gets its Inbox thread looked up once by the name pan gave it, in the session's folder.
-    # The id and any link found are stored; with nothing found the name alone is shown.
+    # gets its Inbox thread looked up by the name pan gave it, in the session's folder, each
+    # time until it is found (the session creates the thread only on its first Inbox send,
+    # so the lookup at send time usually misses and `check` finds it later). The id and any
+    # link found are stored; with nothing found the name alone is shown.
     if record.inbox_thread_name is None or record.inbox_thread_id is not None:
         return record
     found = inbox_directory.find_thread(record.worktree_path, record.inbox_thread_name)

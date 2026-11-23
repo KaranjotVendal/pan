@@ -24,6 +24,7 @@ def make_terminal(
     state: TerminalState = TerminalState.LIVE,
     agent: str | None = "claude-code",
     agent_status: AgentStatus = AgentStatus.IDLE,
+    turn: int | None = None,
 ) -> Terminal:
     return Terminal(
         address=address,
@@ -33,6 +34,7 @@ def make_terminal(
         state=state,
         agent=agent,
         agent_status=agent_status,
+        turn=turn,
     )
 
 

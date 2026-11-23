@@ -495,6 +495,61 @@ def test_parse_route(raw_text: str, expected_route: Route) -> None:
 @pytest.mark.parametrize(
     "raw_text, expected_route",
     [
+        ("check\n*Sent using* <@U0TEST|Claude>", Route(kind=RouteKind.CHECK)),
+        ("<@U0BOT> check\n*Sent using* <@U0TEST|Claude>", Route(kind=RouteKind.CHECK)),
+        ("sessions *Sent using* <@U0TEST>", Route(kind=RouteKind.SESSIONS)),
+        ("forget\n_sent using_ <@U0TEST|Claude>", Route(kind=RouteKind.FORGET)),
+        ("Check\n\n> *Sent using* <@U0TEST|Claude>  ", Route(kind=RouteKind.CHECK)),
+        ("check\n&gt; *Sent using* <@U0TEST|Claude>", Route(kind=RouteKind.CHECK)),
+        ("check SENT USING <@U0TEST>", Route(kind=RouteKind.CHECK)),
+        (
+            "new: fix the login page\n*Sent using* <@U0TEST|Claude>",
+            Route(kind=RouteKind.NEW, text="fix the login page"),
+        ),
+        (
+            "to desk-test: reply with the word hello *Sent using* <@U0TEST>",
+            Route(kind=RouteKind.TO, session="desk-test", text="reply with the word hello"),
+        ),
+        (
+            "fix the bug\n*Sent using* <@U0TEST|Claude>",
+            Route(text="fix the bug"),
+        ),
+        (
+            "say who sent using <@U0TEST> earlier",
+            Route(text="say who sent using <@U0TEST> earlier"),
+        ),
+        ("ask <@U0TEST> about it", Route(text="ask <@U0TEST> about it")),
+    ],
+    ids=[
+        "check-exact-form",
+        "check-after-mention",
+        "sessions-same-line",
+        "forget-underscore",
+        "check-quoted",
+        "check-escaped-quote",
+        "check-upper-case",
+        "new-task",
+        "to-task",
+        "plain-task",
+        "mid-text-kept",
+        "trailing-mention-kept",
+    ],
+)
+def test_parse_route_strips_a_trailing_client_signature(
+    raw_text: str, expected_route: Route
+) -> None:
+    assert parse_route(raw_text) == expected_route
+
+
+def test_parse_directive_strips_a_trailing_client_signature() -> None:
+    directive = parse_directive("<@U0BOT> fix the bug\n*Sent using* <@U0TEST|Claude>")
+
+    assert directive.cleaned_text == "fix the bug"
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_route",
+    [
         (
             "to desk-api: delete the branch",
             Route(kind=RouteKind.NOTICE, session="desk-api", notice=X_TO_ROUTE_NOTICE),

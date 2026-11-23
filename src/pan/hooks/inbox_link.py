@@ -22,17 +22,48 @@ class InboxLink(BaseModel, frozen=True):
 _MAX_SEARCH_DEPTH = 8
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _embedded_json_values(text: str) -> list[Any]:
+    # The JSON objects and arrays a text holds. The Inbox's send result is prose first and
+    # the structured result after it ("Sent to the Plannotator Inbox (thread ...). ...\n\n
+    # {...}"), so the whole text is not JSON; each `{` or `[` is tried as the start of one.
+    try:
+        return [json.loads(text)]
+    except ValueError:
+        pass
+    values: list[Any] = []
+    position = 0
+    while True:
+        starts = [
+            index for index in (text.find("{", position), text.find("[", position)) if index >= 0
+        ]
+        if not starts:
+            return values
+        start = min(starts)
+        try:
+            value, end = _JSON_DECODER.raw_decode(text, start)
+        except ValueError:
+            position = start + 1
+            continue
+        values.append(value)
+        position = end
+
+
 def _find_link(value: Any, depth: int = 0) -> InboxLink | None:
     # Depth-first search for the first object carrying both a string `thread_id` and a
-    # string `url`. A string is tried as JSON (an MCP text block holds the result as text).
+    # string `url`. A string is searched for the JSON it holds (an MCP text block holds the
+    # result as text, after a line of prose).
     if depth > _MAX_SEARCH_DEPTH:
         return None
     if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except ValueError:
-            return None
-        return _find_link(decoded, depth + 1) if isinstance(decoded, dict | list) else None
+        for decoded in _embedded_json_values(value):
+            if isinstance(decoded, dict | list):
+                found = _find_link(decoded, depth + 1)
+                if found is not None:
+                    return found
+        return None
     if isinstance(value, dict):
         thread_id, url = value.get("thread_id"), value.get("url")
         if isinstance(thread_id, str) and thread_id and isinstance(url, str) and url:
@@ -51,10 +82,10 @@ def _find_link(value: Any, depth: int = 0) -> InboxLink | None:
 
 
 def parse_inbox_link(raw_payload: str) -> InboxLink | None:
-    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}. The
-    # shape of `tool_response` for an MCP tool needs a live check: it may be the structured
-    # result (a dict), a string holding that JSON, or a list of content blocks whose `text`
-    # holds it (possibly under a `content` key). All are searched; anything else is None.
+    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}.
+    # `tool_response` may be the structured result (a dict), a string, or a list of content
+    # blocks (possibly under a `content` key) whose `text` is the Inbox's prose line followed
+    # by the result as JSON. All are searched; anything else is None.
     try:
         payload = json.loads(raw_payload)
     except ValueError:
