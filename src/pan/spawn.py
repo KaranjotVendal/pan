@@ -51,10 +51,10 @@ logger = initialise_logger(__name__)
 # mark the thread idle / blocked (and post to Slack only in the reply-in-Slack mode);
 # SessionStart records the Claude session id and transcript path on the thread record (for
 # `pan read --full`); PostToolUse on the Inbox tool (or on code mode's REPL tool, which wraps
-# Inbox calls) records the session's Inbox thread id and link. The matcher is a regex
-# alternation of the tool names. Non-tool events take a list of {hooks: [{type, command}]}
-# objects (matcher omitted). The `pan hook` commands resolve the thread from the worker's cwd
-# via the thread map.
+# Inbox calls) records the session's Inbox thread id and link. The matcher is an anchored
+# regex alternation of exactly those tool names. Non-tool events take a list of
+# {hooks: [{type, command}]} objects (matcher omitted). The `pan hook` commands resolve the
+# thread from the worker's cwd via the thread map.
 _WORKER_SETTINGS = {
     "hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "pan hook session-start"}]}],
@@ -62,7 +62,7 @@ _WORKER_SETTINGS = {
         "Notification": [{"hooks": [{"type": "command", "command": "pan hook notification"}]}],
         "PostToolUse": [
             {
-                "matcher": f"{PLANNOTATOR_INBOX_TOOL_NAME}|{REPL_TOOL_NAME}",
+                "matcher": f"^({PLANNOTATOR_INBOX_TOOL_NAME}|{REPL_TOOL_NAME})$",
                 "hooks": [{"type": "command", "command": "pan hook inbox-link"}],
             }
         ],

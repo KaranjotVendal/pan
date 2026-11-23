@@ -25,7 +25,7 @@ from pan.models import (
     WorkerStatus,
 )
 from pan.seams import Clock, InboxDirectory, SlackAdapter, TerminalHost, ThreadMap
-from pan.sessions import joins_terminal, worker_status_for
+from pan.sessions import joins_by_address, joins_terminal, worker_status_for
 from pan.spawn import desk_session_ended_reply, inbox_thread_name
 from pan.transcript import last_assistant_text
 
@@ -340,10 +340,18 @@ def forget_thread(
 
 
 def _live_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Terminal | None:
+    # The record's live terminal, by its address (else its name). A terminal now at that
+    # address under another name is a different session, so the record's one is gone.
     selector = record.terminal_address or record.terminal_name
     try:
         terminal = terminal_host.get(selector)
     except TerminalGoneError:
+        return None
+    if record.terminal_address and not joins_by_address(record, terminal):
+        logger.info(
+            f"terminal at address={record.terminal_address} is not {record.terminal_name}; "
+            f"treating the session as gone thread={record.thread_ts}"
+        )
         return None
     return terminal if terminal.state is TerminalState.LIVE else None
 

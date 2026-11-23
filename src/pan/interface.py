@@ -4,6 +4,7 @@ from pan.errors import TargetAmbiguousError, TargetNotFoundError
 from pan.logging import initialise_logger
 from pan.models import Terminal, ThreadRecord
 from pan.seams import TerminalHost
+from pan.sessions import joins_by_address
 from pan.transcript import render_transcript
 
 logger = initialise_logger(__name__)
@@ -62,8 +63,9 @@ def relay_to_session(
 
 
 def _transcript_for(target: Terminal, records: list[ThreadRecord]) -> str | None:
+    # The transcript of the record joined to the target by address (names agreeing).
     for record in records:
-        if record.terminal_address == target.address and record.transcript_path is not None:
+        if joins_by_address(record, target) and record.transcript_path is not None:
             try:
                 return render_transcript(record.transcript_path)
             except OSError:

@@ -80,7 +80,8 @@ def _in_own_worktree(record: ThreadRecord, terminal: Terminal) -> bool:
 
 def joins_by_address(record: ThreadRecord, terminal: Terminal) -> bool:
     # The terminal address recorded at spawn (or at a `to <name>:` tie), with names that
-    # agree: hc can reuse an address for a new terminal of another name.
+    # agree: hc can reuse an address for a new terminal of another name. hc cannot rename a
+    # terminal, so a different name at the same address means a different terminal.
     return (
         bool(record.terminal_address)
         and record.terminal_address == terminal.address
@@ -104,9 +105,9 @@ def joins_terminal(record: ThreadRecord, terminal: Terminal) -> bool:
 
 def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
     # The join to pan's records, most precise first: by address, then by name (see
-    # joins_by_address / joins_by_name), then, for pan's own workers only, the worktree path
-    # against the terminal's launch folder. The worktree join skips a record whose address
-    # names another terminal unless the names also match, so a new, differently named
+    # joins_by_address / joins_by_name), then, for pan's own workers with no recorded address
+    # only, the worktree path against the terminal's launch folder. A record whose address
+    # names another terminal never joins by worktree alone, so a new, differently named
     # terminal in a killed worker's worktree does not inherit its record.
     by_address = [record for record in records if joins_by_address(record, terminal)]
     if by_address:
@@ -118,11 +119,7 @@ def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadReco
         [
             record
             for record in records
-            if _in_own_worktree(record, terminal)
-            and (
-                not record.terminal_address
-                or (terminal.name is not None and record.terminal_name == terminal.name)
-            )
+            if _in_own_worktree(record, terminal) and not record.terminal_address
         ]
     )
 

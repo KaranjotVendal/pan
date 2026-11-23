@@ -572,10 +572,34 @@ def test_parse_inbox_link_takes_no_json_link_from_a_repl_call(tool_response: obj
     assert parse_inbox_link(_repl_post_tool_use(tool_response)) is None
 
 
-def test_parse_inbox_link_takes_the_first_prose_line() -> None:
-    link = parse_inbox_link(_repl_post_tool_use([_SENT_PROSE, _OTHER_SENT_PROSE]))
+@pytest.mark.parametrize(
+    "tool_response, expected_link",
+    [
+        ([_SENT_PROSE, _SENT_PROSE], _PROSE_LINK),
+        (f"{_SENT_PROSE}\n{_SENT_PROSE}", _PROSE_LINK),
+        ([_SENT_PROSE, _OTHER_SENT_PROSE], None),
+        (f"{_SENT_PROSE}\n{_OTHER_SENT_PROSE}", None),
+    ],
+    ids=["same-thread-twice", "same-thread-twice-one-text", "two-threads", "two-threads-one-text"],
+)
+def test_parse_inbox_link_needs_one_thread_among_the_send_lines(
+    tool_response: object, expected_link: InboxLink | None
+) -> None:
+    assert parse_inbox_link(_repl_post_tool_use(tool_response)) == expected_link
 
-    assert link == _PROSE_LINK
+
+@pytest.mark.parametrize(
+    "tool_response",
+    [
+        {"messages": [{"body": _SENT_PROSE}]},
+        {"result": {"text": _SENT_PROSE}},
+        [[{"type": "text", "text": _SENT_PROSE}]],
+        {"content": [{"type": "text", "text": json.dumps({"body": _SENT_PROSE})}]},
+    ],
+    ids=["message-body", "nested-result-object", "nested-blocks", "json-in-a-block"],
+)
+def test_parse_inbox_link_searches_only_the_top_level_text(tool_response: object) -> None:
+    assert parse_inbox_link(_repl_post_tool_use(tool_response)) is None
 
 
 def test_parse_inbox_link_prefers_the_json_result_over_the_prose_line() -> None:
@@ -616,22 +640,38 @@ def test_inbox_link_hook_ignores_a_repl_call_that_does_not_use_the_inbox() -> No
     assert thread_map.inbox_threads == []
 
 
+def _send_code(thread_argument: str) -> str:
+    return (
+        'await tools.mcp__plannotator__plannotator_inbox({action: "send_message", '
+        f'{thread_argument}, body: "hi"}})'
+    )
+
+
 @pytest.mark.parametrize(
     "code, expected_recorded",
     [
+        (_send_code('thread: "pan-task: do the thing"'), [(_THREAD, _PROSE_THREAD_ID, _PROSE_URL)]),
         (
-            'await tools.mcp__plannotator__plannotator_inbox({action: "send_message", '
-            'thread: "pan-task: do the thing", body: "hi"})',
+            _send_code("thread : 'pan-task: do the thing'"),
             [(_THREAD, _PROSE_THREAD_ID, _PROSE_URL)],
         ),
-        (
-            'await tools.mcp__plannotator__plannotator_inbox({action: "send_message", '
-            'thread: "some other thread", body: "hi"})',
-            [],
-        ),
+        (_send_code("thread:`pan-task: do the thing`"), [(_THREAD, _PROSE_THREAD_ID, _PROSE_URL)]),
+        (_send_code('thread: "pan-task: do the thing and more"'), []),
+        (_send_code("thread: \"pan-task: do the thing'"), []),
+        (_send_code('thread: "some other thread"'), []),
+        (_send_code('body2: "pan-task: do the thing"'), []),
         (_REPL_INBOX_CODE, []),
     ],
-    ids=["own-thread-updates", "other-thread-kept", "reply-without-name-kept"],
+    ids=[
+        "own-thread-double-quotes",
+        "own-thread-single-quotes-and-spaces",
+        "own-thread-backticks",
+        "longer-name-kept",
+        "mismatched-quotes-kept",
+        "other-thread-kept",
+        "own-name-not-as-thread-argument-kept",
+        "reply-without-name-kept",
+    ],
 )
 def test_inbox_link_hook_keeps_a_recorded_link_unless_a_repl_send_names_its_own_thread(
     code: str, expected_recorded: list[tuple[str, str, str]]
@@ -644,3 +684,56 @@ def test_inbox_link_hook_keeps_a_recorded_link_unless_a_repl_send_names_its_own_
     inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(_repl_post_tool_use(_SENT_PROSE, code)))
 
     assert thread_map.inbox_threads == expected_recorded
+
+
+@pytest.mark.parametrize(
+    "recorded_thread_id, tool_response, expected_recorded",
+    [
+        (None, [_SENT_PROSE, _OTHER_SENT_PROSE], []),
+        ("thr_1", [_SENT_PROSE, _OTHER_SENT_PROSE], []),
+        (_PROSE_THREAD_ID, [_SENT_PROSE, _OTHER_SENT_PROSE], []),
+        (None, [_SENT_PROSE, _SENT_PROSE], [(_THREAD, _PROSE_THREAD_ID, _PROSE_URL)]),
+    ],
+    ids=[
+        "two-threads-nothing-recorded",
+        "two-threads-neither-recorded-kept",
+        "two-threads-one-recorded-kept",
+        "one-thread-twice-recorded",
+    ],
+)
+def test_inbox_link_hook_records_nothing_when_send_lines_name_several_threads(
+    recorded_thread_id: str | None,
+    tool_response: object,
+    expected_recorded: list[tuple[str, str, str]],
+) -> None:
+    thread_map = FakeThreadMap()
+    thread_map.records[_THREAD] = thread_map.records[_THREAD].model_copy(
+        update={"inbox_thread_id": recorded_thread_id}
+    )
+    own_thread_code = _send_code('thread: "pan-task: do the thing"')
+
+    inbox_link_hook(
+        _THREAD, thread_map, stdin=io.StringIO(_repl_post_tool_use(tool_response, own_thread_code))
+    )
+
+    assert thread_map.inbox_threads == expected_recorded
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["Bash", "mcp__plannotator__plannotator", "REPL_extra", None],
+    ids=["other-tool", "other-plannotator-tool", "repl-prefix", "no-tool-name"],
+)
+def test_inbox_link_hook_skips_tools_other_than_the_inbox_and_repl(tool_name: str | None) -> None:
+    thread_map = FakeThreadMap()
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_input": {"code": _REPL_INBOX_CODE},
+        "tool_response": _INBOX_RESULT_TEXT,
+    }
+    if tool_name is not None:
+        payload["tool_name"] = tool_name
+
+    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(json.dumps(payload)))
+
+    assert thread_map.inbox_threads == []

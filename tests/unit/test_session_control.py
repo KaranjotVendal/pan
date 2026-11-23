@@ -506,6 +506,25 @@ def _check(
 
 
 @pytest.mark.parametrize(
+    "live_terminal_name, expected_state",
+    [("pan-7", "pan-7 is idle."), ("pan-8", "pan-7 has ended.")],
+    ids=["same-terminal", "address-reused-by-another-name"],
+)
+def test_check_finds_the_session_terminal_by_address_only_when_names_agree(
+    tmp_path: Path, live_terminal_name: str, expected_state: str
+) -> None:
+    thread_map = _thread_map(
+        tmp_path, _record(transcript_path=_transcript_answering(tmp_path, "Done."))
+    )
+    terminal_host = _host(make_terminal("t7", name=live_terminal_name))
+    slack = RecordingSlack()
+
+    _check(thread_map, terminal_host, slack)
+
+    assert expected_state in slack.texts()[0]
+
+
+@pytest.mark.parametrize(
     "agent_status, expected_state",
     [
         (AgentStatus.IDLE, "pan-7 is idle."),
