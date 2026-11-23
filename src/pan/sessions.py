@@ -140,6 +140,16 @@ def last_ask_for(record: ThreadRecord | None) -> str | None:
     return one_line or None
 
 
+def _known_inbox_thread_name(record: ThreadRecord | None) -> str | None:
+    # The session's Inbox thread when pan named it (its own workers) or found it (an id is
+    # recorded); a name pan only suggested to a desk session is not shown.
+    if record is None or record.inbox_thread_name is None:
+        return None
+    if record.started_by_pan or record.inbox_thread_id is not None:
+        return record.inbox_thread_name
+    return None
+
+
 def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list[SessionSummary]:
     # Pure reconcile over the injected seams: enumerate every live terminal, join the
     # pan thread map to identify pan-owned ones, and flag status drift. Ownership comes
@@ -165,6 +175,7 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
                 is_pan_owned=pan_record is not None,
                 drift=pan_record is not None and session_drift(pan_record.status, terminal),
                 last_ask=last_ask_for(record),
+                inbox_thread_name=_known_inbox_thread_name(record),
             )
         )
     logger.info(f"sessions collected count={len(summaries)}")

@@ -445,6 +445,26 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "external" in lines[2]
 
 
+def test_sessions_table_shows_the_inbox_thread_under_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    with_thread = _summary().model_copy(update={"inbox_thread_name": "pan-a: fix the build"})
+    monkeypatch.setattr(
+        cli,
+        "collect_sessions",
+        lambda terminal_host, thread_map: [with_thread, _summary(is_pan_owned=False)],
+    )
+
+    result = runner.invoke(cli.app, ["sessions"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[1].split()[:2] == ["t12", "pan-a"]
+    assert lines[2].strip() == "inbox: pan-a: fix the build"
+    assert "external" in lines[3]
+
+
 def _live_terminal_host() -> FakeTerminalHost:
     terminal_host = FakeTerminalHost()
     terminal_host.add(make_terminal("t3", where="web / codex"))

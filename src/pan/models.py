@@ -185,9 +185,12 @@ class Terminal(BaseModel, frozen=True):
     # `name` is unique among live terminals; `where` is the Herdr app's "space / tab" label
     # when it shows one (hc only; other hosts leave it empty). `turn` counts the agent's
     # finished turns when the host reports it (0 for a session that has not answered yet).
+    # `title` is the terminal's title when the host reports it (hc's `get` does, its `ls`
+    # does not).
     address: str
     name: str | None = None
     where: str | None = None
+    title: str | None = None
     cwd: Path
     state: TerminalState
     agent: str | None = None
@@ -226,6 +229,8 @@ class SessionSummary(BaseModel, frozen=True):
     drift: bool = False
     # The last thing the session was asked, from its transcript when pan knows it.
     last_ask: str | None = None
+    # The Plannotator Inbox thread the session reports in, when pan knows it from its record.
+    inbox_thread_name: str | None = None
 
 
 class LaunchdJobState(BaseModel, frozen=True):

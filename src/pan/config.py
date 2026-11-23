@@ -87,6 +87,16 @@ PLANNOTATOR_INBOX_TOOL_MARKER = "plannotator_inbox"
 # `send` never hang on the Inbox.
 INBOX_LOOKUP_THREAD_LIMIT = 50
 INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
+# `to <selector>:` routing by Inbox thread name lists the open threads of the projects of at
+# most this many distinct folders among the live Claude sessions (one plannotator call each).
+INBOX_ROUTE_MAX_PROJECTS = 6
+# A `to` selector is at most this many words (`to pan with slack: <task>`), so a long sentence
+# that happens to start with "to" and hold a colon stays a plain task.
+TO_ROUTE_SELECTOR_MAX_WORDS = 6
+# Claude Code keeps each session's transcript at <projects folder>/<project>/<session id>.jsonl.
+# Finding a session's folder reads at most this many lines of it, looking for a `cwd`.
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+SESSION_TRANSCRIPT_CWD_MAX_LINES = 50
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -137,11 +147,13 @@ The commands above are terminal commands (pan <command>). From Slack, say these:
   <task>                     in a new thread, start a session in a new worktree;
                              in a tied thread, send it to the tied session
   new: <task>                start a new session even in a tied thread (the tie moves)
-  to <name>: <task>          send to the live session <name> (pan's or yours) if it is
-                             idle; tie this thread to it
+  to <name>: <task>          send to a live session (pan's or yours) if it is idle; tie
+                             this thread to it. <name> is its address, name or Herdr
+                             label, its Inbox thread's name or words (to pan with slack:),
+                             or words from what sessions shows
   check                      post the tied session's latest answer here
-  sessions                   list live sessions: name, idle or busy, last ask
-                             (--sessions works too)
+  sessions                   list live sessions: name, idle or busy, last ask, and
+                             Inbox thread when pan knows it (--sessions works too)
   forget                     untie this thread (the session keeps running)
   ... reply in slack ...     also post the session's answers here at every turn end
   --stream <name>            name a new session's terminal

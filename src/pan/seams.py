@@ -107,9 +107,23 @@ class TerminalHost(Protocol):
 
 class InboxDirectory(Protocol):
     # Read-only lookup of Plannotator Inbox threads, for sessions pan has no hooks in (desk
-    # sessions). Never sends anything. Returns None when no open thread of that name is found
-    # in the project, or when the Inbox cannot be read.
+    # sessions). Never sends anything. Best effort: when the Inbox cannot be read, a lookup
+    # returns None and a listing returns nothing.
+    #
+    # find_thread: the open thread of that name in the project, else None.
     def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None: ...
+
+    # The project's open (unresolved) threads, newest activity first.
+    def list_threads(self, project_path: Path) -> list[InboxThread]: ...
+
+    # The Claude session id of the newest agent message in the thread, else None.
+    def latest_agent_session(self, thread_id: str) -> str | None: ...
+
+
+class SessionFolders(Protocol):
+    # The folder a Claude session runs in, found from its transcript by session id. Read only
+    # and best effort: None when there is no transcript or it names no folder.
+    def folder_of(self, session_id: str) -> Path | None: ...
 
 
 class GitWorktreeAdapter(Protocol):

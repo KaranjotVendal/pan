@@ -103,15 +103,20 @@ It unties the thread and posts one line. It never stops the session.
 
     pan send --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack]
 
-Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.text` is sent verbatim — do not
-rewrite it. The session may be one pan started or one of the person's own desk sessions. `pan send`
-resolves the name against the live sessions, types the text only if the session is idle (with one
-line on top saying it came from Slack and naming its Inbox thread), ties this thread to that session
-(its previous thread is untied) and posts "Sent to desk-api · Inbox: ...". When it refuses — an
-unknown name (it lists close matches), an ambiguous one, a busy session ("<name> is busy; try
-again, or @pan check"), or a session waiting on a prompt — it posts the short reply itself, types
-nothing and exits non-zero (20, 21, 26 or 23). Do nothing more: never retry, never fall back to
-spawning or to the tie.
+Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.session` may be several words
+(`to pan with slack:`); pass it whole and quoted. `route.text` is sent verbatim — do not rewrite it.
+The session may be one pan started or one of the person's own desk sessions. `pan send` resolves the
+selector against the live sessions, first match wins: exact address, exact name, exact Herdr label
+or space, the Plannotator Inbox thread the session writes (exact name, else every word), then every
+word in the session's name, label, folder and title. It types the text only if the session is idle
+(with one line on top saying it came from Slack and naming its Inbox thread, or, for a desk session
+whose thread pan does not know, saying to use its existing thread or start one), ties this thread
+to that session (its previous thread is untied) and posts "Sent to desk-api · Inbox: ...". When it
+refuses — an unknown selector (it lists close matches), an ambiguous one (it posts a pick list), an
+Inbox thread whose session is not running, a busy session ("<name> is busy; try again, or @pan
+check"), or a session waiting on a prompt — it posts the short reply itself, types nothing and exits
+non-zero (20, 21, 26 or 23). Do nothing more: never retry, never fall back to spawning or to the
+tie.
 
 `to <name>:` from X is refused before it reaches you (the route is a notice): X may only start new
 sessions.

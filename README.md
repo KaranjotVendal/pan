@@ -195,9 +195,9 @@ first word after the mention, spelled exactly, in any letter case; anything else
 | --- | --- |
 | `<task>` | In a new or untied thread, start a new session in a new worktree. In a tied thread, send it to the tied session. |
 | `new: <task>` | Start a new session even in a tied thread; the tie moves to it, the old session keeps running. The colon is required ("new login page" is a plain task). |
-| `to <name>: <task>` | Send the task to the live session `<name>`, pan's own or one of your desk sessions, and tie the thread to it. An unknown name gets a reply listing close matches; a busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
+| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (up to six words) is tried in order: exact address, exact terminal name, exact Herdr label or space, the Plannotator Inbox thread the session writes (exact name, else every word: `to pan with slack:`), then every word in the session's name, label, folder and title. Several matches get a pick list of exact names; an unknown name gets a reply listing close matches; a busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
 | `check` | Post the tied session's latest answer here. The whole message must be just this word. |
-| `sessions` | List live sessions: name, idle or busy, last ask. Also `--sessions`. |
+| `sessions` | List live sessions: name, idle or busy, last ask, and the Inbox thread when pan knows it. Also `--sessions`. |
 | `forget` | Untie the thread; the session keeps running. |
 | `reply in slack` (anywhere) | Also post the session's answers here at every turn end. |
 | `--stream <name>` | Name a new session's terminal. |
@@ -209,7 +209,16 @@ first word after the mention, spelled exactly, in any letter case; anything else
 `to <name>:` reaches any live session, including desk sessions pan did not start. pan types the task
 only when the session is idle (busy, or a state pan cannot read, is refused; waiting on a prompt is
 refused too), with one line on top saying it came from Slack via pan and naming the Plannotator Inbox
-thread to use (`<name>: <short task>`, or the one pan named before). Follow-ups in the thread go to
+thread to use. When pan knows the session's thread (you routed by its name, or pan found it
+earlier) the line names it; otherwise it says to keep using the session's existing thread for this
+work, or to start one named `<name>: <short task>`.
+
+To reach a session by its Inbox thread, pan lists the open threads of the projects of the live
+Claude sessions (`plannotator inbox call read_thread`, read only, at most `INBOX_ROUTE_MAX_PROJECTS`
+projects), reads the matching thread's newest agent message for its Claude session id, finds that
+session's folder from the first lines of its transcript under `~/.claude/projects`, and sends to the
+live Claude session in that folder. When none runs there, pan replies that the session writing the
+thread is not running. Follow-ups in the thread go to
 the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
 only unties it, and when it has ended pan says so and suggests `new:` or `to <name>:`. Desk sessions
 have no pan hooks, so `check` looks their Inbox thread up by name (`plannotator inbox call

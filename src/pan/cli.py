@@ -12,6 +12,7 @@ from pydantic import SecretStr
 # Typer 0.27 vendors click; its exception base lives here (no standalone click dep).
 from typer._click.exceptions import ClickException
 
+from pan.adapters.claude_transcripts import ClaudeTranscriptFolders
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.adapters.launchd import build_service_manager
@@ -25,6 +26,7 @@ from pan.errors import (
     CredentialsError,
     GatedOpDeniedError,
     InboxError,
+    InboxThreadAmbiguousError,
     NotPanSessionError,
     PanError,
     ServiceError,
@@ -101,6 +103,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     GatedOpDeniedError: 18,
     TargetNotFoundError: 20,
     TargetAmbiguousError: 21,
+    InboxThreadAmbiguousError: 21,
     TerminalGoneError: 22,
     TargetBlockedError: 23,
     TerminalNameTakenError: 24,
@@ -508,6 +511,9 @@ def _render_sessions_table(summaries: list[SessionSummary]) -> str:
             f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift:<5} {last_ask}"
         )
         lines.append(row.rstrip())
+        if summary.inbox_thread_name:
+            # What to type after `to` to reach this session by its Inbox thread.
+            lines.append(f"{'':<9} inbox: {summary.inbox_thread_name}")
     return "\n".join(lines)
 
 
@@ -582,7 +588,13 @@ def send(
     thread: str = typer.Option(..., "--thread"),
     channel: str = typer.Option(..., "--channel"),
     to: str | None = typer.Option(
-        None, "--to", help="a live session's name or address; omit to send to the tied session"
+        None,
+        "--to",
+        help=(
+            "a live session: its address, name or Herdr label, the name or words of the Inbox "
+            "thread it writes, or words from what sessions shows; omit to send to the tied "
+            "session"
+        ),
     ),
     task: str = typer.Option(..., "--task"),
     requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
@@ -591,9 +603,12 @@ def send(
     ),
 ) -> None:
     """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
-    a notice naming its Inbox thread. Without --to, send a follow-up to the thread's tied
-    session. A busy, blocked, unknown or ambiguous session gets a short reply and nothing is
-    typed; a session pan did not start gets one line on top saying the text came from Slack."""
+    a notice naming its Inbox thread. --to tries, in order: exact address, exact name, exact
+    Herdr label or space, the Inbox thread the session writes (exact name, else every word),
+    then every word in the session's name, label, folder and title. Without --to, send a
+    follow-up to the thread's tied session. A busy, blocked, unknown or ambiguous session gets
+    a short reply and nothing is typed; a session pan did not start gets one line on top
+    saying the text came from Slack and which Inbox thread to use."""
     config = _config()
     clock = SystemClock()
     thread_map = FileThreadMap(config.paths.threads, clock)
@@ -618,6 +633,7 @@ def send(
         terminal_host=terminal_host,
         thread_map=thread_map,
         inbox_directory=ShellPlannotatorInboxAdapter(),
+        session_folders=ClaudeTranscriptFolders(),
         slack=_slack_adapter(config),
         clock=clock,
     )

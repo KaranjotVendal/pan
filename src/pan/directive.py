@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from pan.config import TO_ROUTE_SELECTOR_MAX_WORDS
 from pan.models import Agent, Directive, Route, RouteKind, TaskMode, ThreadSource
 
 _VALID_AGENTS = {member.value for member in Agent}
@@ -167,10 +168,15 @@ def parse_directive(raw_text: str) -> Directive:
 
 
 # Route words (session control). Strict: the route word is the first word after the mention,
-# spelled exactly, in any letter case; anything else is task text. `new:` and `to <name>:`
-# need the colon right after the word, so "new login page" stays a plain task.
+# spelled exactly, in any letter case; anything else is task text. `new:` and `to <selector>:`
+# need the colon right after the word, so "new login page" stays a plain task. A `to`
+# selector is one to TO_ROUTE_SELECTOR_MAX_WORDS words on the first line (`to pan with slack:`),
+# so a longer sentence that starts with "to" stays a plain task.
 _NEW_ROUTE = re.compile(r"^new:(?:\s+|$)", re.IGNORECASE)
-_TO_ROUTE = re.compile(r"^to\s+([^\s:]+):(?:\s+|$)", re.IGNORECASE)
+_TO_ROUTE = re.compile(
+    rf"^to[ \t]+([^\s:]+(?:[ \t]+[^\s:]+){{0,{TO_ROUTE_SELECTOR_MAX_WORDS - 1}}}):(?:\s+|$)",
+    re.IGNORECASE,
+)
 _WHOLE_MESSAGE_ROUTES = {
     "sessions": RouteKind.SESSIONS,
     "forget": RouteKind.FORGET,
