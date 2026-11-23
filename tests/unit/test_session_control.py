@@ -375,6 +375,70 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
     assert slack.texts() == ["Sent to desk-api · Inbox: https://inbox.example/threads/thr_9"]
 
 
+@pytest.mark.parametrize(
+    "earlier, terminal, expected_inbox_thread_name",
+    [
+        (
+            _record(terminal_name="desk-test", terminal_address="", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "desk-test: add the tests",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t10", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-old", terminal_address="t10", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "desk-test: add the tests",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9"),
+            make_terminal("t10", name="desk-test", cwd=Path("/tmp/wt/pan-7")),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9"),
+            make_terminal("t10", name="desk-test", cwd=Path("/tmp/elsewhere")),
+            "desk-test: add the tests",
+        ),
+    ],
+    ids=[
+        "legacy-record-without-address-joins-by-name",
+        "stale-record-of-a-killed-terminal",
+        "same-address-and-name",
+        "address-reused-by-another-name",
+        "pan-worker-back-at-a-new-address-in-its-worktree",
+        "pan-worker-name-outside-its-worktree",
+    ],
+)
+def test_send_joins_a_session_record_only_to_its_own_terminal(
+    tmp_path: Path,
+    earlier: ThreadRecord,
+    terminal: object,
+    expected_inbox_thread_name: str,
+) -> None:
+    # A joined record keeps its Inbox thread name; a new session gets one of its own.
+    thread_map = _thread_map(tmp_path, earlier)
+    terminal_host = _host(terminal)
+
+    _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
+
+    assert terminal_host.sent == [
+        ("t10", from_slack_text(expected_inbox_thread_name, "add the tests"))
+    ]
+    tied = thread_map.get(_NEW_THREAD)
+    assert tied is not None
+    assert tied.terminal_address == "t10"
+    assert tied.inbox_thread_name == expected_inbox_thread_name
+
+
 def test_send_to_a_blocked_session_types_nothing_and_ties_nothing(tmp_path: Path) -> None:
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7"))
@@ -439,6 +503,25 @@ def _check(
         slack=slack,
         screen_lines=50,
     )
+
+
+@pytest.mark.parametrize(
+    "live_terminal_name, expected_state",
+    [("pan-7", "pan-7 is idle."), ("pan-8", "pan-7 has ended.")],
+    ids=["same-terminal", "address-reused-by-another-name"],
+)
+def test_check_finds_the_session_terminal_by_address_only_when_names_agree(
+    tmp_path: Path, live_terminal_name: str, expected_state: str
+) -> None:
+    thread_map = _thread_map(
+        tmp_path, _record(transcript_path=_transcript_answering(tmp_path, "Done."))
+    )
+    terminal_host = _host(make_terminal("t7", name=live_terminal_name))
+    slack = RecordingSlack()
+
+    _check(thread_map, terminal_host, slack)
+
+    assert expected_state in slack.texts()[0]
 
 
 @pytest.mark.parametrize(

@@ -498,13 +498,21 @@ def test_read_recent_echoes_raw_history(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert terminal_host.reads == [("t5", cli.READ_RECENT_LINES)]
 
 
-def test_read_full_echoes_the_recorded_transcript(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "recorded_name, expects_transcript",
+    [("pan-backend", True), ("pan-task", False)],
+    ids=["same-terminal", "address-reused-by-another-name"],
+)
+def test_read_full_echoes_the_transcript_only_of_the_same_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorded_name: str, expects_transcript: bool
 ) -> None:
+    # hc can reuse an address for a terminal of another name; that record's transcript is
+    # not this session's, so the screen history is read instead.
     config = _use_config(monkeypatch, tmp_path)
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"type": "assistant", "message": {"content": "all done"}}\n')
     record = _record("t-1", terminal_address="t5")
+    record.terminal_name = recorded_name
     record.transcript_path = transcript
     FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
     terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
@@ -512,8 +520,8 @@ def test_read_full_echoes_the_recorded_transcript(
     result = runner.invoke(cli.app, ["read", "pan-backend", "--full"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "assistant: all done"
-    assert terminal_host.reads == []
+    assert (result.stdout.strip() == "assistant: all done") is expects_transcript
+    assert (terminal_host.reads == []) is expects_transcript
 
 
 def test_read_not_found_propagates_target_not_found(

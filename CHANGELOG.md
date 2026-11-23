@@ -9,6 +9,25 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Fixed
 
+- The inbox-link hook now records the Inbox link for a worker in Claude Code's code mode, which
+  calls the Inbox from inside its `REPL` tool. The worker's PostToolUse matcher is
+  `^(mcp__plannotator__plannotator_inbox|REPL)$` (built from `PLANNOTATOR_INBOX_TOOL_NAME` and
+  the new `REPL_TOOL_NAME`), and the hook skips, with a log line, any other tool name. A REPL
+  call counts only when its code holds `plannotator_inbox` (any accessor) or its result holds
+  the Inbox's send line. A REPL result yields a link only from a send line at the start of a
+  line of its top-level text ("Sent to the Plannotator Inbox (thread <id>, <url>)", also
+  "Already sent ..." and "... asking 1 question ..."), never from JSON or nested message
+  bodies, so a thread read or listing is never recorded. The direct tool reads its JSON result
+  first and the send line second. Send lines naming more than one thread record nothing. A
+  recorded link is kept unless the send names the record's own Inbox thread: the direct tool's
+  `thread` input, or for a REPL call an exact `thread: "<name>"` argument in its code.
+- A session record joins a live terminal only when it belongs to it, in one rule shared by
+  `to <name>:` (`_session_record_for`) and `pan sessions` (`_match_record`): by address only
+  when the names also agree (hc can reuse an address but cannot rename a terminal), and by name
+  only for a record with no address (legacy records) or a pan worker back at a new address in
+  its own worktree. The worktree fallback joins only records with no address. `check` and
+  `pan read --full` also require the names to agree at the recorded address. A desk session in
+  a new terminal named like a killed one no longer reuses the old record's Inbox thread name.
 - A trailing client signature such as "\n*Sent using* <@U0EXAMPLE|Claude>" (added by some Slack
   clients and connectors, any letter case, with optional `*`/`_` emphasis, `>` quote and `|label`)
   is stripped in `_clean_message` before route parsing, so `check`, `sessions` and `forget` match
@@ -16,9 +35,7 @@ as it works (see `AGENT_LOOP.md` step 9).
 - The inbox-link hook now finds the link in the Inbox's real send result, which is a prose line
   followed by the JSON result (it only parsed text that was JSON as a whole). Every early return
   of the hook entrypoints logs why (no cwd in the payload, or no record for `cwd=<path>`), and a
-  `~` in the cwd is expanded. A worker running Claude Code's experimental code mode calls the Inbox
-  from inside its REPL tool, so the PostToolUse hook does not run for those calls at all; `check`
-  still finds the thread by name.
+  `~` in the cwd is expanded.
 - The Notification hook no longer marks a thread blocked for Claude Code's idle reminder
   ("Claude is waiting for your input", `notification_type` `idle_prompt`). Only a prompt waiting
   on the person (`permission_prompt`, `elicitation_dialog`, or with no known type a message about

@@ -64,29 +64,62 @@ def _preferred(candidates: list[ThreadRecord]) -> ThreadRecord | None:
     return max(candidates, key=lambda record: record.updated_at) if candidates else None
 
 
+def _names_agree(record: ThreadRecord, terminal: Terminal) -> bool:
+    # A record's terminal name and a terminal's name agree unless both are set and differ.
+    return (
+        not record.terminal_name or terminal.name is None or record.terminal_name == terminal.name
+    )
+
+
+def _in_own_worktree(record: ThreadRecord, terminal: Terminal) -> bool:
+    # A pan worker's terminal running in the worker's worktree (resolved, symlink-safe,
+    # mirroring FileThreadMap.get_by_worktree). A desk session's record holds a folder pan
+    # does not own, so another terminal in that folder never qualifies.
+    return record.started_by_pan and record.worktree_path.resolve() == terminal.cwd.resolve()
+
+
+def joins_by_address(record: ThreadRecord, terminal: Terminal) -> bool:
+    # The terminal address recorded at spawn (or at a `to <name>:` tie), with names that
+    # agree: hc can reuse an address for a new terminal of another name. hc cannot rename a
+    # terminal, so a different name at the same address means a different terminal.
+    return (
+        bool(record.terminal_address)
+        and record.terminal_address == terminal.address
+        and _names_agree(record, terminal)
+    )
+
+
+def joins_by_name(record: ThreadRecord, terminal: Terminal) -> bool:
+    # The terminal name, for a record with no address (legacy records), or for a pan worker
+    # whose terminal came back at a new address (e.g. after a Herdr restart) in its own
+    # worktree. A record whose address names another terminal otherwise never joins by
+    # name: it belongs to an earlier terminal of the same name.
+    if terminal.name is None or record.terminal_name != terminal.name:
+        return False
+    return not record.terminal_address or _in_own_worktree(record, terminal)
+
+
+def joins_terminal(record: ThreadRecord, terminal: Terminal) -> bool:
+    return joins_by_address(record, terminal) or joins_by_name(record, terminal)
+
+
 def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
-    # The join to pan's records, most precise first: the terminal address recorded at spawn
-    # (or at a `to <name>:` tie), then the terminal name (the stream name), then, for pan's
-    # own workers only, the resolved worktree path against the terminal's launch folder
-    # (symlink-safe, mirroring FileThreadMap.get_by_worktree). A desk session's record holds
-    # a folder pan does not own, so another terminal in that folder never joins to it.
-    by_address = [
-        record
-        for record in records
-        if record.terminal_address and record.terminal_address == terminal.address
-    ]
+    # The join to pan's records, most precise first: by address, then by name (see
+    # joins_by_address / joins_by_name), then, for pan's own workers with no recorded address
+    # only, the worktree path against the terminal's launch folder. A record whose address
+    # names another terminal never joins by worktree alone, so a new, differently named
+    # terminal in a killed worker's worktree does not inherit its record.
+    by_address = [record for record in records if joins_by_address(record, terminal)]
     if by_address:
         return _preferred(by_address)
-    if terminal.name is not None:
-        by_name = [record for record in records if record.terminal_name == terminal.name]
-        if by_name:
-            return _preferred(by_name)
-    target_cwd = terminal.cwd.resolve()
+    by_name = [record for record in records if joins_by_name(record, terminal)]
+    if by_name:
+        return _preferred(by_name)
     return _preferred(
         [
             record
             for record in records
-            if record.started_by_pan and record.worktree_path.resolve() == target_cwd
+            if _in_own_worktree(record, terminal) and not record.terminal_address
         ]
     )
 

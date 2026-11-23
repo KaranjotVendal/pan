@@ -57,6 +57,13 @@ SESSION_LAST_ASK_MAX_LENGTH = 80
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.
 PLANNOTATOR_INBOX_TOOL_NAME = "mcp__plannotator__plannotator_inbox"
+# The Claude Code tool name of code mode's REPL tool. A worker in code mode calls the Inbox from
+# inside REPL code, so REPL is the top-level tool the inbox-link hook sees; it is matched too.
+REPL_TOOL_NAME = "REPL"
+# REPL code reaches the Inbox tool through an accessor that may be namespaced
+# (`tools.mcp__plannotator__plannotator_inbox`, `tools.plannotator.plannotator_inbox`, ...); code
+# holding this text counts as using the Inbox.
+PLANNOTATOR_INBOX_TOOL_MARKER = "plannotator_inbox"
 # Looking up a desk session's Inbox thread by name (`plannotator inbox call read_thread`) lists
 # this many of the project's open threads, and gives up after this many seconds so `check` and
 # `send` never hang on the Inbox.
