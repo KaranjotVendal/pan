@@ -55,6 +55,11 @@ class GatedOpDeniedError(PanError): ...
 class TargetNotFoundError(PanError): ...
 
 
+# `to <name>:` named a live session pan did not start; until pan can reach desk sessions,
+# only pan's own sessions are targeted.
+class NotPanSessionError(PanError): ...
+
+
 class TargetAmbiguousError(PanError):
     # Carries the ambiguous candidates so the CLI boundary and the orchestrator can list
     # each one's address, name and Herdr app label for the user to re-target by a precise

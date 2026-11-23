@@ -4,6 +4,8 @@ import re
 from collections.abc import Callable
 
 from pan.config import (
+    CODE_FENCE,
+    SLACK_MESSAGE_PART_MAX_LENGTH,
     SLACK_MRKDWN_PLACEHOLDER_TEMPLATE,
     SLACK_TABLE_COLUMN_SEPARATOR,
     SLACK_TABLE_PAD_CHAR,
@@ -145,3 +147,42 @@ def _convert_tables(text: str, stash: Callable[[str], str]) -> str:
             output_lines.append(header_line)
             index += 1
     return "\n".join(output_lines)
+
+
+def split_for_slack(text: str, max_length: int = SLACK_MESSAGE_PART_MAX_LENGTH) -> list[str]:
+    # Split a long message into parts of at most max_length characters, at line breaks where
+    # possible (a line longer than a part is cut). A code fence open at a split is closed at
+    # the end of its part and opened again at the start of the next, so every part renders.
+    if len(text) <= max_length:
+        return [text]
+    # Room for a closing fence on every part, and for a reopening fence before a cut line.
+    fence_line_length = len(CODE_FENCE) + 1
+    budget = max(max_length - fence_line_length, 1)
+    piece_length = max(budget - fence_line_length, 1)
+
+    parts: list[str] = []
+    current_lines: list[str] = []
+    current_length = 0
+    in_fence = False
+
+    def flush() -> None:
+        nonlocal current_lines, current_length
+        body = "\n".join(current_lines)
+        parts.append(f"{body}\n{CODE_FENCE}" if in_fence else body)
+        current_lines = [CODE_FENCE] if in_fence else []
+        current_length = len(CODE_FENCE) if in_fence else 0
+
+    for line in text.split("\n"):
+        pieces = [
+            line[start : start + piece_length] for start in range(0, len(line), piece_length)
+        ] or [""]
+        for piece in pieces:
+            if current_lines and current_length + 1 + len(piece) > budget:
+                flush()
+            current_length += len(piece) + (1 if current_lines else 0)
+            current_lines.append(piece)
+        if line.strip().startswith(CODE_FENCE):
+            in_fence = not in_fence
+    if current_lines:
+        parts.append("\n".join(current_lines))
+    return parts

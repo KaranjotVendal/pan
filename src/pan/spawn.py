@@ -12,6 +12,7 @@ from pan.config import (
     PAN_THREAD_LABEL,
     PLANNOTATOR_INBOX_TOOL_NAME,
     TERMINAL_NAME_MAX_LENGTH,
+    WORKER_BRIEF_TASK_MARKER,
     WORKER_NAME_PREFIX,
     WORKER_ROLE,
 )
@@ -96,7 +97,7 @@ def inbox_thread_name(terminal_name: str, task: str) -> str:
 
 def worker_brief(inbox_thread: str, task: str) -> str:
     preamble = _WORKER_BRIEF_PREAMBLE.format(inbox_thread_name=inbox_thread)
-    return f"{preamble}\n\nTask:\n{task}"
+    return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
 
 
 def start_notice(terminal_name: str, inbox_thread: str, reply_mode: ReplyMode) -> str:

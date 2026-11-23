@@ -17,6 +17,7 @@ from pan.errors import (
     CredentialsError,
     GatedOpDeniedError,
     InboxError,
+    NotPanSessionError,
     PanError,
     SlackPostError,
     SpawnError,
@@ -37,6 +38,8 @@ from pan.models import (
     InboxItem,
     PanConfig,
     ReplyMode,
+    Route,
+    RouteKind,
     SessionSummary,
     SlackCredentials,
     ThreadRecord,
@@ -116,6 +119,59 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert FileInboxStore(config.paths.inbox).drain() == []
 
 
+@pytest.mark.parametrize(
+    "item_route, raw_text, expected_route, expected_cleaned",
+    [
+        (
+            Route(kind=RouteKind.NEW, text="fix the login page --stream login"),
+            "<@U0TEST> something else entirely",
+            {
+                "kind": "new",
+                "session": None,
+                "text": "fix the login page --stream login",
+                "reply_in_slack": False,
+                "notice": None,
+            },
+            "fix the login page",
+        ),
+        (
+            None,
+            "<@U0TEST> new: fix it, reply in slack",
+            {
+                "kind": "new",
+                "session": None,
+                "text": "fix it, reply in slack",
+                "reply_in_slack": True,
+                "notice": None,
+            },
+            "fix it, reply in slack",
+        ),
+    ],
+    ids=["route-from-the-gateway", "older-item-parsed-at-drain"],
+)
+def test_inbox_drain_emits_the_route_and_a_directive_from_its_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    item_route: Route | None,
+    raw_text: str,
+    expected_route: dict[str, Any],
+    expected_cleaned: str,
+) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    item = _item("Ev1").model_copy(update={"raw_text": raw_text, "route": item_route})
+    FileInboxStore(config.paths.inbox).append(item)
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    (entry,) = json.loads(result.stdout)
+    assert entry["route"] == expected_route
+    assert "route" not in entry["item"]
+    assert entry["item"]["source"] == "slack"
+    assert entry["directive"]["cleaned_text"] == expected_cleaned
+
+
 def test_inbox_drain_names_the_tied_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -156,7 +212,7 @@ def test_inbox_drain_text_adds_the_tie_line_only_for_a_tied_thread(
     result = runner.invoke(cli.app, ["inbox", "drain"])
 
     lines = result.stdout.splitlines()
-    assert lines[0] == "Ev1 C1 1718000000.000200 delegate"
+    assert lines[0] == "Ev1 C1 1718000000.000200 task delegate"
     assert ("belongs to pan-task (spawning)" in result.stdout) is tied
     assert len(lines) == (2 if tied else 1)
 
@@ -368,7 +424,15 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
-    assert lines[0].split() == ["TERMINAL", "NAME", "AGENT", "OWNER", "PAN_STATUS", "DRIFT"]
+    assert lines[0].split() == [
+        "TERMINAL",
+        "NAME",
+        "AGENT",
+        "OWNER",
+        "PAN_STATUS",
+        "DRIFT",
+        "LAST_ASK",
+    ]
     assert lines[1].split() == ["t12", "pan-a", "working", "pan", "running", "DRIFT"]
     assert "my-app / 1" in lines[2]
     assert "external" in lines[2]
@@ -498,6 +562,7 @@ def test_stop_removes_the_terminal_and_marks_failed(
         (TerminalGoneError("x"), 22),
         (TargetBlockedError("x"), 23),
         (TerminalNameTakenError("x"), 24),
+        (NotPanSessionError("x"), 25),
         (PanError("x"), 1),
     ],
 )
@@ -729,3 +794,113 @@ def test_reopen_unknown_thread_raises(monkeypatch: pytest.MonkeyPatch, tmp_path:
     result = runner.invoke(cli.app, ["reopen", "--thread", "nope", "--task", "x"])
 
     assert isinstance(result.exception, ThreadNotFoundError)
+
+
+class _RecordingSlack:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, str, str]] = []
+
+    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
+        self.posts.append((channel, thread_ts, text))
+
+    def start(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+
+def _use_slack(monkeypatch: pytest.MonkeyPatch) -> _RecordingSlack:
+    slack = _RecordingSlack()
+    monkeypatch.setattr(cli, "_slack_adapter", lambda config: slack)
+    return slack
+
+
+def test_sessions_posts_the_table_to_a_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    summary = _summary().model_copy(update={"last_ask": "fix the login page"})
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [summary])
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(
+        cli.app, ["sessions", "--thread", "1700000000.000100", "--channel", "C0TEST"]
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    ((channel, thread_ts, text),) = slack.posts
+    assert (channel, thread_ts) == ("C0TEST", "1700000000.000100")
+    assert text.startswith("```\nTERMINAL")
+    assert text.endswith("fix the login page\n```")
+
+
+def test_check_command_posts_through_the_thread_map(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["check", "--thread", "t-1", "--channel", "C0TEST"])
+
+    assert result.exit_code == 0
+    assert slack.posts == [
+        ("C0TEST", "t-1", "this thread isn't tied to a session; @pan sessions lists them")
+    ]
+
+
+def test_forget_command_unties_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.tie(_record("t-1"))
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["forget", "--thread", "t-1", "--channel", "C0TEST"])
+
+    assert result.exit_code == 0
+    record = thread_map.get("t-1")
+    assert record is not None
+    assert record.tied is False
+    assert slack.posts == [
+        ("C0TEST", "t-1", "untied this thread from pan-task; the session was not stopped")
+    ]
+
+
+def test_send_command_wires_to_send_to_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "send",
+            "--thread",
+            "t-1",
+            "--channel",
+            "C0TEST",
+            "--to",
+            "pan-7",
+            "--task",
+            "add the tests",
+            "--requester",
+            "U0TEST",
+            "--reply-in-slack",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["thread_ts"] == "t-1"
+    assert captured["channel"] == "C0TEST"
+    assert captured["selector"] == "pan-7"
+    assert captured["text"] == "add the tests"
+    assert captured["requester"] == "U0TEST"
+    assert captured["reply_in_slack"] is True
+    assert captured["terminal_host"] is terminal_host
+    assert captured["slack"] is slack

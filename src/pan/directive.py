@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from pan.models import Agent, Directive, TaskMode
+from pan.models import Agent, Directive, Route, RouteKind, TaskMode
 
 _VALID_AGENTS = {member.value for member in Agent}
 
@@ -54,22 +54,20 @@ def _normalize_punctuation(text: str) -> str:
     return text.translate(_SMART_QUOTE_MAP)
 
 
+def _clean_message(raw_text: str) -> str:
+    # Phone punctuation repaired first, then a single leading Slack mention removed, so the
+    # first word is the one the person typed after `@pan`.
+    text = _normalize_punctuation(raw_text.strip())
+    return _LEADING_MENTION.sub("", text, count=1).strip()
+
+
 def parse_directive(raw_text: str) -> Directive:
-    stripped_text = raw_text.strip()
-
     # Repair phone smart-punctuation on the whole text BEFORE any verb/flag detection, so a
-    # phone-mangled `—sessions`/`—full` is recognized as `--sessions`/`--full` (INV-3).
-    stripped_text = _normalize_punctuation(stripped_text)
-
-    # Strip a single leading Slack mention before any verb/flag/mode detection, so the
-    # leading-verb check sees `relay`/`read` at position 0 and cleaned_text (worker briefs)
-    # never carries the stray mention. Only the leading one is removed; a mention inside a
-    # relay message body is preserved.
-    stripped_text = _LEADING_MENTION.sub("", stripped_text, count=1)
-
-    leading_bang_sync = stripped_text.startswith("!")
-    if leading_bang_sync:
-        stripped_text = stripped_text[1:].strip()
+    # phone-mangled `—sessions`/`—full` is recognized as `--sessions`/`--full` (INV-3). Strip
+    # a single leading Slack mention before any verb/flag/mode detection, so the leading-verb
+    # check sees `relay`/`read` at position 0 and cleaned_text (worker briefs) never carries
+    # the stray mention. A mention inside a relay message body is preserved.
+    stripped_text = _clean_message(raw_text)
 
     # Leading-verb grammar (checked before any flag scan, so the verb outranks every flag
     # and the sessions soft trigger — INV-3). The verb is recognized only in position 0;
@@ -105,10 +103,9 @@ def parse_directive(raw_text: str) -> Directive:
         # deeper in a task stays prose; it carries no target/message (cleaned_text="").
         return Directive(mode=TaskMode.SESSIONS, cleaned_text="")
 
-    has_sync_flag = leading_bang_sync
-    has_status_flag = False
+    # The retired --new / --status / --sync flags and the leading `!` are not parsed here:
+    # parse_route turns a message carrying one into a notice before any directive is used.
     has_sessions_flag = False
-    force_new = False
     target_stream: str | None = None
     agent: Agent | None = None
     prose_tokens: list[str] = []
@@ -117,14 +114,8 @@ def parse_directive(raw_text: str) -> Directive:
     token_index = 0
     while token_index < len(tokens):
         token = tokens[token_index]
-        if token == "--sync":
-            has_sync_flag = True
-        elif token == "--status":
-            has_status_flag = True
-        elif token == "--sessions":
+        if token == "--sessions":
             has_sessions_flag = True
-        elif token == "--new":
-            force_new = True
         elif token == "--stream":
             # Always strip the flag; consume the next token as the stream name only
             # when it is present and not itself another flag.
@@ -148,25 +139,80 @@ def parse_directive(raw_text: str) -> Directive:
     cleaned_text = " ".join(prose_tokens)
     cleaned_lower = cleaned_text.lower()
     soft_sessions_trigger = any(trigger in cleaned_lower for trigger in _SESSION_TRIGGERS)
-
-    # Precedence, deterministic (INV-3): an explicit --sessions / --status flag is
-    # authoritative (--sessions, the broader "list all", wins when both appear); the
-    # sessions soft trigger then outranks --sync / delegate but not an explicit --status.
-    if has_sessions_flag:
-        mode = TaskMode.SESSIONS
-    elif has_status_flag:
-        mode = TaskMode.STATUS
-    elif soft_sessions_trigger:
-        mode = TaskMode.SESSIONS
-    elif has_sync_flag:
-        mode = TaskMode.SYNC
-    else:
-        mode = TaskMode.DELEGATE
+    mode = TaskMode.SESSIONS if has_sessions_flag or soft_sessions_trigger else TaskMode.DELEGATE
 
     return Directive(
         mode=mode,
-        force_new=force_new,
         target_stream=target_stream,
         agent=agent,
         cleaned_text=cleaned_text,
     )
+
+
+# Route words (session control). Strict: the route word is the first word after the mention,
+# spelled exactly, in any letter case; anything else is task text. `new:` and `to <name>:`
+# need the colon right after the word, so "new login page" stays a plain task.
+_NEW_ROUTE = re.compile(r"^new:(?:\s+|$)", re.IGNORECASE)
+_TO_ROUTE = re.compile(r"^to\s+([^\s:]+):(?:\s+|$)", re.IGNORECASE)
+_WHOLE_MESSAGE_ROUTES = {
+    "sessions": RouteKind.SESSIONS,
+    "forget": RouteKind.FORGET,
+    "check": RouteKind.CHECK,
+}
+# The one-off verbs keep their own grammar; their message body is sent verbatim, so a
+# flag-looking token inside it is never read as a retired flag.
+_ONE_OFF_VERBS = frozenset({"relay", "read"})
+_RETIRED_FLAG_NOTICES = {
+    "--new": "--new is retired: start the message with new: instead, as in @pan new: <task>",
+    "--status": (
+        "--status is retired: @pan check posts this thread's latest answer, "
+        "and @pan sessions lists every session"
+    ),
+    "--sync": "--sync is retired: add reply in slack to the message instead",
+}
+_RETIRED_BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instead"
+_EMPTY_NEW_NOTICE = "new: needs a task after it, as in @pan new: <task>"
+
+
+def _retired_flag_notice(text: str) -> str | None:
+    if text.startswith("!"):
+        return _RETIRED_BANG_NOTICE
+    for token in text.split():
+        notice = _RETIRED_FLAG_NOTICES.get(token)
+        if notice is not None:
+            return notice
+    return None
+
+
+def parse_route(raw_text: str) -> Route:
+    # Pure string logic (INV-3), run by the gateway so the route travels on the inbox item.
+    text = _clean_message(raw_text)
+    reply_in_slack = wants_slack_reply(text)
+
+    whole_message_kind = _WHOLE_MESSAGE_ROUTES.get(text.lower())
+    if whole_message_kind is not None:
+        return Route(kind=whole_message_kind)
+
+    new_match = _NEW_ROUTE.match(text)
+    if new_match is not None:
+        task = text[new_match.end() :].strip()
+        if not task:
+            return Route(kind=RouteKind.NOTICE, notice=_EMPTY_NEW_NOTICE)
+        return Route(kind=RouteKind.NEW, text=task, reply_in_slack=reply_in_slack)
+
+    to_match = _TO_ROUTE.match(text)
+    if to_match is not None:
+        session = to_match.group(1)
+        task = text[to_match.end() :].strip()
+        if not task:
+            notice = f"to {session}: needs a task after it, as in @pan to {session}: <task>"
+            return Route(kind=RouteKind.NOTICE, session=session, notice=notice)
+        return Route(kind=RouteKind.TO, session=session, text=task, reply_in_slack=reply_in_slack)
+
+    first_word = text.split(maxsplit=1)[0] if text else ""
+    if first_word not in _ONE_OFF_VERBS:
+        notice = _retired_flag_notice(text)
+        if notice is not None:
+            return Route(kind=RouteKind.NOTICE, text=text, notice=notice)
+
+    return Route(kind=RouteKind.TASK, text=text, reply_in_slack=reply_in_slack)

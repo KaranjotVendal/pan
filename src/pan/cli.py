@@ -15,14 +15,15 @@ from typer._click.exceptions import ClickException
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.adapters.terminal_host import build_terminal_host
-from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_directive
+from pan.directive import parse_directive, parse_route
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
     InboxError,
+    NotPanSessionError,
     PanError,
     SlackPostError,
     SpawnError,
@@ -36,7 +37,7 @@ from pan.errors import (
     UnauthorizedSenderError,
 )
 from pan.gateway.app import BoltSlackAdapter
-from pan.gateway.slack_post import slack_post
+from pan.gateway.slack_post import slack_post, slack_post_parts
 from pan.hooks.inbox_link import inbox_link_hook
 from pan.hooks.notification import notification_hook
 from pan.hooks.session_start import session_start_hook
@@ -47,6 +48,7 @@ from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
 from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
+from pan.session_control import check_thread, forget_thread, send_to_session
 from pan.sessions import collect_sessions, worker_status_for
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.threadmap import FileThreadMap, tie_note
@@ -83,6 +85,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     TerminalGoneError: 22,
     TargetBlockedError: 23,
     TerminalNameTakenError: 24,
+    NotPanSessionError: 25,
 }
 
 
@@ -154,13 +157,15 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     config = _config()
     items = FileInboxStore(config.paths.inbox).drain()
     thread_map = FileThreadMap(config.paths.threads, SystemClock())
-    # Attach the deterministically-parsed directive to each item so the orchestrator
-    # reads the mode/cleaned_text from here (parse_directive runs in code) rather than
-    # re-deriving it by judgment — enforcing INV-3. The thread's tie is attached as a
-    # plain-words fact, read now because it can change after the gateway wrote the item.
+    # Attach the route the gateway parsed (parsed here for an item an older gateway wrote)
+    # and the directive parsed from the route's text, so the orchestrator reads them as
+    # facts (both pure code) rather than re-deriving them by judgment — enforcing INV-3. The
+    # thread's tie is attached as a plain-words fact, read now because it can change after
+    # the gateway wrote the item.
     if as_json:
         payload = []
         for item in items:
+            route = item.route if item.route is not None else parse_route(item.raw_text)
             record = thread_map.get(item.thread_ts)
             note = tie_note(record)
             tie = None
@@ -173,16 +178,20 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
                 }
             payload.append(
                 {
-                    "item": item.model_dump(mode="json"),
-                    "directive": parse_directive(item.raw_text).model_dump(mode="json"),
+                    "item": item.model_dump(mode="json", exclude={"route"}),
+                    "route": route.model_dump(mode="json"),
+                    "directive": parse_directive(route.text).model_dump(mode="json"),
                     "tie": tie,
                 }
             )
         typer.echo(json.dumps(payload))
         return
     for item in items:
-        directive = parse_directive(item.raw_text)
-        typer.echo(f"{item.id} {item.channel} {item.thread_ts} {directive.mode.value}")
+        route = item.route if item.route is not None else parse_route(item.raw_text)
+        directive = parse_directive(route.text)
+        typer.echo(
+            f"{item.id} {item.channel} {item.thread_ts} {route.kind.value} {directive.mode.value}"
+        )
         note = tie_note(thread_map.get(item.thread_ts))
         if note is not None:
             typer.echo(f"  {note}")
@@ -401,24 +410,34 @@ def status(thread: str = typer.Option(..., "--thread")) -> None:
 
 
 def _render_sessions_table(summaries: list[SessionSummary]) -> str:
-    header = f"{'TERMINAL':<9} {'NAME':<24} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} DRIFT"
+    header = (
+        f"{'TERMINAL':<9} {'NAME':<24} {'AGENT':<9} {'OWNER':<9} {'PAN_STATUS':<11} "
+        f"{'DRIFT':<5} LAST_ASK"
+    )
     lines = [header]
     for summary in summaries:
         owner = "pan" if summary.is_pan_owned else "external"
         pan_status = summary.pan_status.value if summary.pan_status is not None else "-"
         display_name = summary.name or summary.where or summary.cwd.name
         drift = "DRIFT" if summary.drift else ""
-        lines.append(
+        last_ask = summary.last_ask or ""
+        row = (
             f"{summary.address:<9} {display_name:<24} "
-            f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift}"
+            f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift:<5} {last_ask}"
         )
+        lines.append(row.rstrip())
     return "\n".join(lines)
 
 
 @app.command()
-def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
-    """List all live hc terminals, reconciled against the pan thread map, flagging status
-    drift. --json emits the SessionSummary list for the orchestrator."""
+def sessions(
+    as_json: bool = typer.Option(False, "--json"),
+    thread: str | None = typer.Option(None, "--thread", help="post the list to this thread"),
+    channel: str | None = typer.Option(None, "--channel", help="the thread's channel"),
+) -> None:
+    """List all live hc terminals with the last thing each was asked, reconciled against the
+    pan thread map, flagging status drift. --json emits the SessionSummary list; --thread and
+    --channel post the table to that Slack thread as is."""
     config = _config()
     summaries = collect_sessions(
         build_terminal_host(config.terminal_host),
@@ -427,7 +446,82 @@ def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
-    typer.echo(_render_sessions_table(summaries))
+    table = _render_sessions_table(summaries)
+    if thread is not None and channel is not None:
+        slack_post_parts(
+            _slack_adapter(config), channel, thread, f"{CODE_FENCE}\n{table}\n{CODE_FENCE}"
+        )
+        return
+    typer.echo(table)
+
+
+def _slack_adapter(config: PanConfig) -> BoltSlackAdapter:
+    credentials = load_credentials(config.paths.credentials)
+    return BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), SystemClock())
+
+
+@app.command()
+def check(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+) -> None:
+    """Post the thread's tied session's latest answer to the thread, as is: the last answer in
+    its transcript, or its recent screen lines. Names its Inbox thread and says if it is still
+    working or waiting on a prompt."""
+    config = _config()
+    check_thread(
+        thread_ts=thread,
+        channel=channel,
+        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
+        terminal_host=build_terminal_host(config.terminal_host),
+        slack=_slack_adapter(config),
+        screen_lines=READ_RECENT_LINES,
+    )
+
+
+@app.command()
+def forget(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+) -> None:
+    """Untie the thread from its session and say so in the thread. Never stops the session."""
+    config = _config()
+    forget_thread(
+        thread_ts=thread,
+        channel=channel,
+        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
+        slack=_slack_adapter(config),
+    )
+
+
+@app.command()
+def send(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+    to: str = typer.Option(..., "--to", help="the live session's name or address"),
+    task: str = typer.Option(..., "--task"),
+    requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
+    reply_in_slack: bool = typer.Option(
+        False, "--reply-in-slack", help="post the answer in Slack at every turn end"
+    ),
+) -> None:
+    """Send a task to a live session pan started and tie the thread to it; post a notice
+    naming its Inbox thread. An unknown, ambiguous, blocked or non-pan session gets a short
+    reply and nothing is sent."""
+    config = _config()
+    clock = SystemClock()
+    send_to_session(
+        thread_ts=thread,
+        channel=channel,
+        selector=to,
+        text=task,
+        requester=requester,
+        reply_in_slack=reply_in_slack,
+        terminal_host=build_terminal_host(config.terminal_host),
+        thread_map=FileThreadMap(config.paths.threads, clock),
+        slack=_slack_adapter(config),
+        clock=clock,
+    )
 
 
 _TARGET_HELP = "session selector: hc address | terminal name | Herdr app space label"

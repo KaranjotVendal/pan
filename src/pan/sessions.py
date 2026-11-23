@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pan.config import SESSION_LAST_ASK_MAX_LENGTH, WORKER_BRIEF_TASK_MARKER
 from pan.logging import initialise_logger
 from pan.models import (
     AgentStatus,
@@ -10,6 +11,7 @@ from pan.models import (
     WorkerStatus,
 )
 from pan.seams import TerminalHost, ThreadMap
+from pan.transcript import last_user_text
 
 logger = initialise_logger(__name__)
 
@@ -72,6 +74,22 @@ def _match_pan_record(terminal: Terminal, records: list[ThreadRecord]) -> Thread
     return None
 
 
+def last_ask_for(record: ThreadRecord | None) -> str | None:
+    # The last thing the session was asked, on one short line, when pan knows its transcript.
+    # A worker's first ask is its brief, so the Inbox preamble is cut off and only the task
+    # shows. Sessions pan has no transcript for show nothing.
+    if record is None or record.transcript_path is None:
+        return None
+    text = last_user_text(record.transcript_path)
+    if text is None:
+        return None
+    _preamble, marker, task = text.partition(WORKER_BRIEF_TASK_MARKER)
+    one_line = " ".join((task if marker else text).split())
+    if len(one_line) > SESSION_LAST_ASK_MAX_LENGTH:
+        one_line = one_line[: SESSION_LAST_ASK_MAX_LENGTH - 3].rstrip() + "..."
+    return one_line or None
+
+
 def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list[SessionSummary]:
     # Pure reconcile over the injected seams: enumerate every live terminal, join the
     # pan thread map to identify pan-owned ones, and flag status drift. Ownership comes
@@ -93,6 +111,7 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
                 pan_status=record.status if record is not None else None,
                 is_pan_owned=record is not None,
                 drift=record is not None and session_drift(record.status, terminal),
+                last_ask=last_ask_for(record),
             )
         )
     logger.info(f"sessions collected count={len(summaries)}")

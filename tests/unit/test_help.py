@@ -228,7 +228,20 @@ def test_render_does_not_mutate_the_shared_app() -> None:
 
 
 def test_directive_footer_documents_the_slack_only_grammar() -> None:
-    # These spellings live in parse_directive, never in Typer, so the generator
-    # cannot see them (R-1) — the footer is the only place they are documented.
-    for spelling in ("!", "--sync", "--status", "--sessions", "--new", "--stream"):
+    # These spellings live in parse_route and parse_directive, never in Typer, so the
+    # generator cannot see them (R-1) — the footer is the only place they are documented.
+    for spelling in (
+        "new: <task>",
+        "to <name>: <task>",
+        "check",
+        "sessions",
+        "forget",
+        "reply in slack",
+        "--sessions",
+        "--stream",
+        "relay",
+        "read",
+    ):
         assert spelling in SLACK_DIRECTIVE_FLAGS_FOOTER
+    # The retired flags are named once, so a user who types one learns what replaced it.
+    assert "--new, --status, --sync and a leading ! are retired" in SLACK_DIRECTIVE_FLAGS_FOOTER

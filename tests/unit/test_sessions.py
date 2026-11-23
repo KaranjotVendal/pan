@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
 from pan.sessions import collect_sessions, session_drift, worker_status_for
+from pan.spawn import worker_brief
 
 _FIXED_NOW = datetime(2026, 7, 19, 10, 0, 0, tzinfo=UTC)
 
@@ -172,3 +174,40 @@ def test_worker_status_for_a_gone_terminal(
 )
 def test_session_drift(pan_status: WorkerStatus, agent_status: AgentStatus, expected: bool) -> None:
     assert session_drift(pan_status, make_terminal("t5", agent_status=agent_status)) is expected
+
+
+def _transcript_asking(tmp_path: Path, ask: str) -> Path:
+    transcript = tmp_path / "session.jsonl"
+    entry = {"type": "user", "message": {"role": "user", "content": ask}}
+    transcript.write_text(json.dumps(entry) + "\n")
+    return transcript
+
+
+@pytest.mark.parametrize(
+    "ask, expected",
+    [
+        ("add the tests", "add the tests"),
+        (worker_brief("pan-a: fix the login page", "fix the\nlogin page"), "fix the login page"),
+        ("x" * 100, "x" * 77 + "..."),
+    ],
+    ids=["plain", "brief-cut-to-its-task", "truncated"],
+)
+def test_collect_sessions_shows_the_last_ask(tmp_path: Path, ask: str, expected: str) -> None:
+    record = _record("t-1", "pan-a", "t5", "/tmp/worktree")
+    record.transcript_path = _transcript_asking(tmp_path, ask)
+    terminal_host = _terminal_host_with(make_terminal("t5", name="pan-a"))
+
+    (summary,) = collect_sessions(terminal_host, FakeThreadMap([record]))
+
+    assert summary.last_ask == expected
+
+
+def test_collect_sessions_leaves_the_last_ask_blank_without_a_transcript() -> None:
+    terminal_host = _terminal_host_with(
+        make_terminal("t5", name="pan-a"), make_terminal("t6", name="desk-api")
+    )
+    records = [_record("t-1", "pan-a", "t5", "/tmp/worktree")]
+
+    summaries = collect_sessions(terminal_host, FakeThreadMap(records))
+
+    assert [summary.last_ask for summary in summaries] == [None, None]

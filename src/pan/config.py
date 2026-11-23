@@ -48,6 +48,12 @@ TERMINAL_NAME_MAX_LENGTH = 32
 # is cut to this many characters so the name stays one short line.
 INBOX_THREAD_TASK_MAX_LENGTH = 60
 
+# A worker's brief is the Inbox preamble, this marker, then the task. `pan sessions` cuts a
+# brief back to its task when it shows the session's last ask.
+WORKER_BRIEF_TASK_MARKER = "\n\nTask:\n"
+# `pan sessions` shows the last thing each session was asked on one line, cut to this length.
+SESSION_LAST_ASK_MAX_LENGTH = 80
+
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.
 PLANNOTATOR_INBOX_TOOL_NAME = "mcp__plannotator__plannotator_inbox"
@@ -60,6 +66,11 @@ SLACK_MRKDWN_PLACEHOLDER_TEMPLATE = "\x00SL{index}\x00"
 # left-justified with the pad char to its column width, columns joined by the separator.
 SLACK_TABLE_COLUMN_SEPARATOR = " | "
 SLACK_TABLE_PAD_CHAR = " "
+
+# A long message (a `check` answer, a long sessions list) is posted in parts of at most this many
+# characters. Slack shows a message whole up to about 4000 characters; the margin leaves room for
+# the part label and for mrkdwn escaping, which can lengthen the text.
+SLACK_MESSAGE_PART_MAX_LENGTH = 3500
 
 # `@pan help` tunables (Principle 7 — named here, not inlined in help.py / gateway/app.py).
 # The exact tokens that mean "show me the help", matched on lowercased whole tokens only, so a
@@ -77,6 +88,8 @@ HELP_ECHOED_COMMAND_MAX_LENGTH = 40
 # one by name (`help inbox`) still renders it, so nothing is hard-blocked.
 HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
     "sessions",
+    "check",
+    "forget",
     "relay",
     "read",
     "status",
@@ -86,22 +99,25 @@ HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
 # Slack renders a fenced block as monospace, and to_slack_mrkdwn passes a fence through verbatim,
 # so the generated help keeps its column alignment.
 CODE_FENCE = "```"
-# The Slack-only directive grammar lives in parse_directive, NOT in Typer, so the auto-generated
-# help cannot see it (help tech-spec R-1). This short block is the one hand-written piece and must
-# be updated whenever a directive flag changes.
+# The Slack-only grammar (route words in parse_route, directive flags in parse_directive) is NOT
+# in Typer, so the auto-generated help cannot see it (help tech-spec R-1). This short block is the
+# one hand-written piece and must be updated whenever a route word or directive flag changes.
 SLACK_DIRECTIVE_FLAGS_FOOTER = """
 The commands above are terminal commands (pan <command>). From Slack, say these:
-  <task>                     start a worker, or in its thread send it a follow-up;
-                             it reports in its Plannotator Inbox thread
-  ... reply in slack ...     also post its answers here at every turn end
-  !<task>  or  --sync        start a worker that posts its answers here
-  --status                   the live state of this thread's worker
-  --sessions                 list every live session (a bare "sessions" works too)
-  --new                      force a new worker instead of reusing this thread's
-  --stream <name>            name the worker's terminal
-  relay <target> <message>   send a message into a live session
+  <task>                     in a new thread, start a session in a new worktree;
+                             in a tied thread, send it to the tied session
+  new: <task>                start a new session even in a tied thread (the tie moves)
+  to <name>: <task>          send to the live pan session <name>; tie this thread to it
+  check                      post the tied session's latest answer here
+  sessions                   list live sessions: name, idle or busy, last ask
+                             (--sessions works too)
+  forget                     untie this thread (the session keeps running)
+  ... reply in slack ...     also post the session's answers here at every turn end
+  --stream <name>            name a new session's terminal
+  relay <target> <message>   send a one-off message into a live session (ties nothing)
   read <target> [--full]     read a live session's recent output (or all of it)
   help [command]             this help
+--new, --status, --sync and a leading ! are retired: use new:, check, and reply in slack.
 """.strip()
 
 

@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import parse_directive, wants_slack_reply
-from pan.models import Agent, TaskMode
+from pan.directive import parse_directive, parse_route, wants_slack_reply
+from pan.models import Agent, Route, RouteKind, TaskMode
 
 
 @pytest.mark.parametrize(
     "raw_text, expected_mode, expected_cleaned",
     [
-        ("--sync deploy the service", TaskMode.SYNC, "deploy the service"),
-        ("!deploy the service", TaskMode.SYNC, "deploy the service"),
-        ("  !fix the bug  ", TaskMode.SYNC, "fix the bug"),
-        ("--status", TaskMode.STATUS, ""),
         ("just build the feature", TaskMode.DELEGATE, "just build the feature"),
         ("", TaskMode.DELEGATE, ""),
     ],
@@ -28,18 +24,9 @@ def test_no_flags_is_delegate_with_no_extras() -> None:
     directive = parse_directive("build the thing")
 
     assert directive.mode is TaskMode.DELEGATE
-    assert directive.force_new is False
     assert directive.target_stream is None
     assert directive.agent is None
     assert directive.cleaned_text == "build the thing"
-
-
-def test_new_flag_sets_force_new_and_is_stripped() -> None:
-    directive = parse_directive("--new build the feature")
-
-    assert directive.force_new is True
-    assert directive.mode is TaskMode.DELEGATE
-    assert directive.cleaned_text == "build the feature"
 
 
 def test_stream_flag_captures_name_and_is_stripped() -> None:
@@ -62,38 +49,6 @@ def test_agent_flag_parsed_and_reserved(raw_text: str, expected_agent: Agent) ->
 
     assert directive.agent is expected_agent
     assert directive.cleaned_text == "refactor this"
-
-
-def test_flag_combination_and_precedence() -> None:
-    directive = parse_directive("--sync --new --stream feat-x ship the release")
-
-    assert directive.mode is TaskMode.SYNC
-    assert directive.force_new is True
-    assert directive.target_stream == "feat-x"
-    assert directive.cleaned_text == "ship the release"
-
-
-def test_flags_recognized_mid_text_and_prose_preserved() -> None:
-    directive = parse_directive("update the readme --new then run tests")
-
-    assert directive.force_new is True
-    assert directive.cleaned_text == "update the readme then run tests"
-
-
-def test_leading_bang_combines_with_other_flags() -> None:
-    directive = parse_directive("! --new --stream q ship it")
-
-    assert directive.mode is TaskMode.SYNC
-    assert directive.force_new is True
-    assert directive.target_stream == "q"
-    assert directive.cleaned_text == "ship it"
-
-
-def test_status_takes_precedence_over_sync() -> None:
-    directive = parse_directive("--sync --status")
-
-    assert directive.mode is TaskMode.STATUS
-    assert directive.cleaned_text == ""
 
 
 def test_bang_only_as_leading_shorthand_not_mid_text() -> None:
@@ -125,10 +80,10 @@ def test_agent_with_unknown_value_leaves_agent_none_and_drops_value() -> None:
 
 
 def test_value_flag_does_not_swallow_a_following_flag() -> None:
-    directive = parse_directive("--stream --new build the thing")
+    directive = parse_directive("--stream --agent codex build the thing")
 
     assert directive.target_stream is None
-    assert directive.force_new is True
+    assert directive.agent is Agent.CODEX
     assert directive.cleaned_text == "build the thing"
 
 
@@ -154,26 +109,11 @@ def test_sessions_flag_and_soft_triggers_yield_sessions_mode(
 
 
 def test_sessions_flag_combines_with_other_flags_and_is_stripped() -> None:
-    directive = parse_directive("--sessions --new tidy up")
+    directive = parse_directive("--sessions --stream q tidy up")
 
     assert directive.mode is TaskMode.SESSIONS
-    assert directive.force_new is True
+    assert directive.target_stream == "q"
     assert directive.cleaned_text == "tidy up"
-
-
-def test_sessions_flag_takes_precedence_over_status() -> None:
-    # Both are no-worker report modes; the broader "list all" sessions view wins.
-    directive = parse_directive("--status --sessions")
-
-    assert directive.mode is TaskMode.SESSIONS
-    assert directive.cleaned_text == ""
-
-
-def test_explicit_status_flag_beats_a_soft_sessions_trigger() -> None:
-    # An explicit mode flag is authoritative over the convenience soft trigger.
-    directive = parse_directive("--status list threads")
-
-    assert directive.mode is TaskMode.STATUS
 
 
 def test_ordinary_task_prose_does_not_trigger_sessions() -> None:
@@ -199,14 +139,6 @@ def test_relay_message_preserves_flag_looking_tokens() -> None:
     assert directive.mode is TaskMode.RELAY
     assert directive.target == "sra-codex"
     assert directive.message == "add the --json path"
-
-
-def test_relay_with_leading_bang_still_parses() -> None:
-    directive = parse_directive("!relay sra-codex ship it")
-
-    assert directive.mode is TaskMode.RELAY
-    assert directive.target == "sra-codex"
-    assert directive.message == "ship it"
 
 
 def test_relay_with_no_target_leaves_target_none() -> None:
@@ -236,14 +168,6 @@ def test_read_verb_sets_target_and_defaults_full_false() -> None:
 
 def test_read_verb_with_full_flag_sets_full() -> None:
     directive = parse_directive("read sra-codex --full")
-
-    assert directive.mode is TaskMode.READ
-    assert directive.target == "sra-codex"
-    assert directive.full is True
-
-
-def test_read_with_leading_bang_still_parses() -> None:
-    directive = parse_directive("!read sra-codex --full")
 
     assert directive.mode is TaskMode.READ
     assert directive.target == "sra-codex"
@@ -461,3 +385,108 @@ def test_curly_quotes_are_straightened(raw_text: str, expected_cleaned: str) -> 
 )
 def test_wants_slack_reply_matches_the_phrase_anywhere(raw_text: str, expected: bool) -> None:
     assert wants_slack_reply(raw_text) is expected
+
+
+_NEW_NOTICE = "--new is retired: start the message with new: instead, as in @pan new: <task>"
+_STATUS_NOTICE = (
+    "--status is retired: @pan check posts this thread's latest answer, "
+    "and @pan sessions lists every session"
+)
+_SYNC_NOTICE = "--sync is retired: add reply in slack to the message instead"
+_BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instead"
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_route",
+    [
+        # new: <task>
+        ("<@U0TEST> new: fix the login page", Route(kind=RouteKind.NEW, text="fix the login page")),
+        ("NEW: fix it", Route(kind=RouteKind.NEW, text="fix it")),
+        ("New:   fix it  ", Route(kind=RouteKind.NEW, text="fix it")),
+        (
+            "<@U0TEST> new: fix it, reply in slack",
+            Route(kind=RouteKind.NEW, text="fix it, reply in slack", reply_in_slack=True),
+        ),
+        ("new: --stream login fix it", Route(kind=RouteKind.NEW, text="--stream login fix it")),
+        ("new: fix\nthe two bugs", Route(kind=RouteKind.NEW, text="fix\nthe two bugs")),
+        ("new login page for the docs", Route(text="new login page for the docs")),
+        ("new:fix it", Route(text="new:fix it")),
+        ("new : fix it", Route(text="new : fix it")),
+        ("please new: fix it", Route(text="please new: fix it")),
+        (
+            "new:",
+            Route(
+                kind=RouteKind.NOTICE, notice="new: needs a task after it, as in @pan new: <task>"
+            ),
+        ),
+        # to <name>: <task>
+        (
+            "<@U0TEST> to pan-7: add the tests",
+            Route(kind=RouteKind.TO, session="pan-7", text="add the tests"),
+        ),
+        ("TO desk-api: run it", Route(kind=RouteKind.TO, session="desk-api", text="run it")),
+        (
+            "to pan-7: ship it, Reply In Slack",
+            Route(
+                kind=RouteKind.TO,
+                session="pan-7",
+                text="ship it, Reply In Slack",
+                reply_in_slack=True,
+            ),
+        ),
+        ("to pan-7 add the tests", Route(text="to pan-7 add the tests")),
+        ("to pan-7 : add the tests", Route(text="to pan-7 : add the tests")),
+        ("to pan-7:add the tests", Route(text="to pan-7:add the tests")),
+        ("to the moon: and back", Route(text="to the moon: and back")),
+        ("go to pan-7: add the tests", Route(text="go to pan-7: add the tests")),
+        (
+            "to pan-7:",
+            Route(
+                kind=RouteKind.NOTICE,
+                session="pan-7",
+                notice="to pan-7: needs a task after it, as in @pan to pan-7: <task>",
+            ),
+        ),
+        # whole-message words
+        ("<@U0TEST> sessions", Route(kind=RouteKind.SESSIONS)),
+        ("Sessions", Route(kind=RouteKind.SESSIONS)),
+        ("  check  ", Route(kind=RouteKind.CHECK)),
+        ("<@U0TEST>CHECK", Route(kind=RouteKind.CHECK)),
+        ("forget", Route(kind=RouteKind.FORGET)),
+        ("check the logs", Route(text="check the logs")),
+        ("check?", Route(text="check?")),
+        ("forget it", Route(text="forget it")),
+        ("sessions please", Route(text="sessions please")),
+        ("please check", Route(text="please check")),
+        # retired flags
+        (
+            "--new build the feature",
+            Route(kind=RouteKind.NOTICE, text="--new build the feature", notice=_NEW_NOTICE),
+        ),
+        (
+            "update the readme --new",
+            Route(kind=RouteKind.NOTICE, text="update the readme --new", notice=_NEW_NOTICE),
+        ),
+        (
+            "<@U0TEST> \u2014new fix it",
+            Route(kind=RouteKind.NOTICE, text="--new fix it", notice=_NEW_NOTICE),
+        ),
+        ("--status", Route(kind=RouteKind.NOTICE, text="--status", notice=_STATUS_NOTICE)),
+        ("--sync deploy", Route(kind=RouteKind.NOTICE, text="--sync deploy", notice=_SYNC_NOTICE)),
+        (
+            "!deploy the service",
+            Route(kind=RouteKind.NOTICE, text="!deploy the service", notice=_BANG_NOTICE),
+        ),
+        ("relay pan-7 use --sync here", Route(text="relay pan-7 use --sync here")),
+        ("read pan-7 --status", Route(text="read pan-7 --status")),
+        # plain tasks
+        ("<@U0TEST> fix the login page", Route(text="fix the login page")),
+        ("fix it, reply in slack", Route(text="fix it, reply in slack", reply_in_slack=True)),
+        ("run the script with args a!b", Route(text="run the script with args a!b")),
+        ("--sessions", Route(text="--sessions")),
+        ("relay pan-7 hello", Route(text="relay pan-7 hello")),
+        ("", Route()),
+    ],
+)
+def test_parse_route(raw_text: str, expected_route: Route) -> None:
+    assert parse_route(raw_text) == expected_route

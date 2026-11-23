@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 class TaskMode(StrEnum):
     DELEGATE = "delegate"
-    SYNC = "sync"
-    STATUS = "status"
     SESSIONS = "sessions"
     RELAY = "relay"  # send a message into a target terminal
     READ = "read"  # read a target session's output (recent | --full transcript)
@@ -78,9 +76,32 @@ class Agent(StrEnum):
     PI = "pi"
 
 
+class RouteKind(StrEnum):
+    # The route words at the start of a message (see directive.parse_route). TASK means no
+    # route word: the thread's tie decides. NOTICE means pan only replies with Route.notice
+    # (a retired flag, or a route word with no task) and does nothing else.
+    TASK = "task"
+    NEW = "new"
+    TO = "to"
+    SESSIONS = "sessions"
+    FORGET = "forget"
+    CHECK = "check"
+    NOTICE = "notice"
+
+
+class Route(BaseModel, frozen=True):
+    kind: RouteKind = RouteKind.TASK
+    # The live session named by `to <name>:`.
+    session: str | None = None
+    # The message with the mention and route word removed: the task, or the text to send.
+    text: str = ""
+    # "reply in slack" appears in the message.
+    reply_in_slack: bool = False
+    notice: str | None = None
+
+
 class Directive(BaseModel, frozen=True):
     mode: TaskMode = TaskMode.DELEGATE
-    force_new: bool = False
     target_stream: str | None = None
     agent: Agent | None = None
     # relay/read selector (hc address | terminal name | Herdr app space label) and the relay
@@ -101,6 +122,9 @@ class InboxItem(BaseModel, frozen=True):
     is_thread_reply: bool
     raw_text: str
     received_at: datetime
+    source: ThreadSource = ThreadSource.SLACK
+    # Parsed by the gateway; None on items an older gateway wrote (drain parses those).
+    route: Route | None = None
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -188,6 +212,8 @@ class SessionSummary(BaseModel, frozen=True):
     pan_status: WorkerStatus | None = None
     is_pan_owned: bool = False
     drift: bool = False
+    # The last thing the session was asked, from its transcript when pan knows it.
+    last_ask: str | None = None
 
 
 class SlackCredentials(BaseModel, frozen=True):

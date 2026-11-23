@@ -9,6 +9,33 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- Route words, parsed in code by `parse_route` (`src/pan/directive.py`): `new: <task>`,
+  `to <name>: <task>`, and the whole-message words `check`, `sessions` and `forget`. Strict: the
+  route word is the first word after the mention, spelled exactly, in any letter case, after the
+  phone-punctuation repair; anything else is task text. "reply in slack" anywhere sets
+  `reply_in_slack` on the route.
+- The gateway parses the route and writes it on the inbox item; `InboxItem` gains `source` and
+  `route`. INV-1 now reads: the gateway parses route words, and still decides nothing about the
+  work. `pan inbox drain --json` emits each item's `route` (parsed at drain for an item an older
+  gateway wrote) and the directive parsed from the route's text.
+- `pan check --thread … --channel …` posts the tied session's latest answer as is: the last answer
+  in its transcript, or its recent screen lines labelled as screen text. It names the Inbox thread
+  (link, or name before the link is known) and says when the session is still working, waiting on a
+  prompt at the terminal, or ended. Long answers are posted in labelled parts (`split_for_slack` in
+  `src/pan/slack_format.py`, `slack_post_parts` in `src/pan/gateway/slack_post.py`). An untied thread
+  gets "this thread isn't tied to a session; @pan sessions lists them".
+- `pan send --thread … --channel … --to <name> --task …` (the `to <name>:` route) sends the task to
+  a live session and ties the thread to it, posting "Sent to <name> · Inbox: …". An unknown name gets
+  a reply listing close matches, an ambiguous one lists the candidates, a blocked one says it is
+  waiting on a prompt; nothing is sent. For now only sessions pan started can be named; any other
+  live session gets "<name> is not a pan session; reaching your own sessions comes next"
+  (`NotPanSessionError`, exit 25).
+- `pan forget --thread … --channel …` unties the thread and says so; it never stops the session.
+- `pan sessions` shows the last thing each session was asked (`last_ask`, from its transcript when
+  pan knows it; a worker's brief is cut back to its task), and with `--thread` and `--channel` posts
+  the table to a Slack thread. `last_user_text` in `src/pan/transcript.py` reads it, skipping tool
+  results, meta and sidechain entries, and text Claude Code writes itself.
+
 - Thread records carry session-control fields: `source` (`slack`; room for `x`), `tied`,
   `started_by_pan`, `requester`, `reply_mode` (`on_demand` by default, or `slack`), and the
   session's Plannotator Inbox thread (`inbox_thread_name`, `inbox_thread_id`, `inbox_thread_url`).
@@ -25,6 +52,13 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- `--new`, `--status`, `--sync` and the leading `!` are retired. A message carrying one gets a short
+  reply naming what replaced it (`new:`, `check` / `sessions`, `reply in slack`) and nothing else
+  happens. `parse_directive` no longer reads them; `TaskMode` loses `sync` and `status` and
+  `Directive` loses `force_new`. `relay` and `read` stay as one-off actions that tie nothing.
+- The orchestrating skill acts on the route first: `check`, `sessions` and `forget` run the `pan`
+  command that posts its own reply; `to <name>:` runs `pan send`; `new:` spawns; with no route words
+  the tie decides as before. The Slack help footer and the README list the route words.
 - Replies to Slack are on demand. The Stop hook marks the thread `idle` (not `done`) and posts the
   last answer only in reply mode `slack`, where it posts at every turn end as before. The
   Notification hook only marks the thread `blocked`, posting the prompt only in reply mode `slack`.
