@@ -168,7 +168,8 @@ def parse_directive(raw_text: str) -> Directive:
 
 # Route words (session control). Strict: the route word is the first word after the mention,
 # spelled exactly, in any letter case; anything else is task text. `new:` and `to <name>:`
-# need the colon right after the word, so "new login page" stays a plain task.
+# need the colon right after the word, so "new login page" stays a plain task. The `to` name is
+# one token, so a sentence that starts with "to" and holds a colon stays a plain task.
 _NEW_ROUTE = re.compile(r"^new:(?:\s+|$)", re.IGNORECASE)
 _TO_ROUTE = re.compile(r"^to\s+([^\s:]+):(?:\s+|$)", re.IGNORECASE)
 _WHOLE_MESSAGE_ROUTES = {
@@ -249,3 +250,28 @@ def _parse_route_words(raw_text: str) -> Route:
             return Route(kind=RouteKind.NOTICE, text=text, notice=notice)
 
     return Route(kind=RouteKind.TASK, text=text, reply_in_slack=reply_in_slack)
+
+
+# A reply to pan's open question asking which session should get a task (`pan propose`):
+# the whole message is `yes` or `y` (any case) or a number from 1 to 3, or a decline (`no`,
+# `n`, `cancel`, `stop`), optionally after the mention and with a closing `.` or `!`. Whether a
+# question is open is not known here; `pan inbox drain` checks that before turning the reply
+# into a CONFIRM route.
+_CONFIRM_REPLY = re.compile(r"^(yes|y|[1-3]|no|n|cancel|stop)[.!]?$", re.IGNORECASE)
+CONFIRM_YES = "yes"
+CONFIRM_NO = "no"
+_YES_WORDS = frozenset({"yes", "y"})
+_NO_WORDS = frozenset({"no", "n", "cancel", "stop"})
+
+
+def parse_confirm_reply(raw_text: str) -> str | None:
+    # `yes` for yes or y, `no` for a decline, the digit for a number, else None.
+    reply_match = _CONFIRM_REPLY.match(_clean_message(raw_text))
+    if reply_match is None:
+        return None
+    reply = reply_match.group(1).lower()
+    if reply in _YES_WORDS:
+        return CONFIRM_YES
+    if reply in _NO_WORDS:
+        return CONFIRM_NO
+    return reply

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import X_TO_ROUTE_NOTICE, parse_directive, parse_route, wants_slack_reply
+from pan.directive import (
+    X_TO_ROUTE_NOTICE,
+    parse_confirm_reply,
+    parse_directive,
+    parse_route,
+    wants_slack_reply,
+)
 from pan.models import Agent, Route, RouteKind, TaskMode, ThreadSource
 
 
@@ -437,7 +443,13 @@ _BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instea
         ("to pan-7 add the tests", Route(text="to pan-7 add the tests")),
         ("to pan-7 : add the tests", Route(text="to pan-7 : add the tests")),
         ("to pan-7:add the tests", Route(text="to pan-7:add the tests")),
+        ("to pan with slack: add the tests", Route(text="to pan with slack: add the tests")),
         ("to the moon: and back", Route(text="to the moon: and back")),
+        ("to be clear: keep the old API", Route(text="to be clear: keep the old API")),
+        (
+            "To summarize the plan: ship it first",
+            Route(text="To summarize the plan: ship it first"),
+        ),
         ("go to pan-7: add the tests", Route(text="go to pan-7: add the tests")),
         (
             "to pan-7:",
@@ -567,3 +579,28 @@ def test_parse_route_from_x_never_reaches_an_existing_session(
     raw_text: str, expected_route: Route
 ) -> None:
     assert parse_route(raw_text, ThreadSource.X) == expected_route
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_choice",
+    [
+        ("yes", "yes"),
+        ("YES", "yes"),
+        ("y", "yes"),
+        ("<@U0TEST> Yes.", "yes"),
+        ("1", "1"),
+        ("<@U0TEST> 3!", "3"),
+        ("4", None),
+        ("no", "no"),
+        ("N", "no"),
+        ("<@U0TEST> Cancel.", "no"),
+        ("STOP!", "no"),
+        ("no thanks", None),
+        ("stop the build", None),
+        ("yes please", None),
+        ("yes, send it to the other one", None),
+        ("", None),
+    ],
+)
+def test_parse_confirm_reply(raw_text: str, expected_choice: str | None) -> None:
+    assert parse_confirm_reply(raw_text) == expected_choice

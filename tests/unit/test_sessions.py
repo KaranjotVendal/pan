@@ -288,3 +288,31 @@ def test_collect_sessions_leaves_the_last_ask_blank_without_a_transcript() -> No
     summaries = collect_sessions(terminal_host, FakeThreadMap(records))
 
     assert [summary.last_ask for summary in summaries] == [None, None]
+
+
+@pytest.mark.parametrize(
+    "started_by_pan, inbox_thread_id, expected",
+    [
+        (True, None, "pan-a: fix the build"),
+        (False, "thr_1", "pan-a: fix the build"),
+        (False, None, None),
+    ],
+    ids=["pan-named-it", "found-for-a-desk-session", "only-suggested-to-a-desk-session"],
+)
+def test_collect_sessions_shows_the_inbox_thread_pan_knows(
+    started_by_pan: bool, inbox_thread_id: str | None, expected: str | None
+) -> None:
+    record = _record("t-1", "pan-a", "t12", "/tmp/worktree").model_copy(
+        update={
+            "started_by_pan": started_by_pan,
+            "inbox_thread_name": "pan-a: fix the build",
+            "inbox_thread_id": inbox_thread_id,
+        }
+    )
+
+    (summary,) = collect_sessions(
+        _terminal_host_with(make_terminal("t12", name="pan-a", cwd=Path("/tmp/worktree"))),
+        FakeThreadMap([record]),
+    )
+
+    assert summary.inbox_thread_name == expected

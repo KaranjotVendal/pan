@@ -8,9 +8,11 @@ from pan.models import (
     InboxItem,
     InboxThread,
     LaunchdJobState,
+    PendingConfirmation,
     Terminal,
     TerminalRead,
     ThreadRecord,
+    ThreadSource,
     WorkerStatus,
 )
 
@@ -110,6 +112,19 @@ class InboxDirectory(Protocol):
     # sessions). Never sends anything. Returns None when no open thread of that name is found
     # in the project, or when the Inbox cannot be read.
     def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None: ...
+
+
+class PendingConfirmations(Protocol):
+    # pan's open questions asking the person which session should get a task, one per thread
+    # (see PendingConfirmation). `put` replaces the thread's question; `clear` is a no-op when
+    # there is none. Reads never fail: an unreadable store counts as holding no questions.
+    def get(self, source: ThreadSource, thread_ts: str) -> PendingConfirmation | None: ...
+
+    def all_pending(self) -> list[PendingConfirmation]: ...
+
+    def put(self, pending: PendingConfirmation) -> None: ...
+
+    def clear(self, source: ThreadSource, thread_ts: str) -> None: ...
 
 
 class GitWorktreeAdapter(Protocol):

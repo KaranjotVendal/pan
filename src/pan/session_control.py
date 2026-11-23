@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import difflib
 import re
 
 from pan.config import CHECK_SCREEN_MAX_LINES, CLAUDE_AGENT_NAMES, WORKER_BRIEF_TASK_MARKER
 from pan.errors import (
+    NoExactMatchError,
     SessionBusyError,
     TargetAmbiguousError,
     TargetBlockedError,
@@ -18,6 +18,7 @@ from pan.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
 from pan.logging import initialise_logger
 from pan.models import (
     AgentStatus,
+    InboxThread,
     ReplyMode,
     Terminal,
     TerminalState,
@@ -26,24 +27,35 @@ from pan.models import (
     WorkerStatus,
 )
 from pan.seams import Clock, InboxDirectory, SlackAdapter, TerminalHost, ThreadMap
-from pan.sessions import joins_by_address, joins_terminal, worker_status_for
+from pan.sessions import (
+    inbox_thread_known,
+    joins_by_address,
+    joins_terminal,
+    worker_status_for,
+)
 from pan.spawn import desk_session_ended_reply, inbox_thread_name, slack_reply_sentence
 from pan.transcript import last_assistant_text
 
 logger = initialise_logger(__name__)
 
 UNTIED_THREAD_REPLY = "this thread isn't tied to a session; @pan sessions lists them"
-# The line on top of text typed into a session from Slack (see from_slack_text).
+# The line on top of text typed into a session from Slack (see from_slack_text), when pan
+# knows the session's Inbox thread.
 FROM_SLACK_HEADER = (
     "From Slack via pan. Put questions and progress in the Plannotator Inbox thread named "
     '"{inbox_thread_name}". {slack_reply_sentence}'
+)
+# The same line for a session pan did not start and whose Inbox thread pan does not know yet:
+# it may already report this work in a thread of its own.
+FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER = (
+    "From Slack via pan. Put questions and progress in your existing Plannotator Inbox thread "
+    'for this work if you already have one; otherwise start one named "{inbox_thread_name}". '
+    "{slack_reply_sentence}"
 )
 # The agent states in which a session is waiting for input, so text can be typed into it. Any
 # other state (working, an error, no status, an unknown one) counts as busy, except a fresh
 # Claude session (see _is_ready).
 _READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
-_CLOSE_MATCH_LIMIT = 3
-_CLOSE_MATCH_CUTOFF = 0.6
 # A screen line made only of box-drawing characters (Claude Code's dividers and banner frame),
 # ASCII rule characters and whitespace carries nothing worth posting.
 _DIVIDER_LINE = re.compile(r"[\s\u2500-\u259f\-=_]*")
@@ -60,12 +72,14 @@ _STATE_SENTENCES: dict[WorkerStatus, str] = {
 
 
 def inbox_reference(record: ThreadRecord) -> str | None:
-    # The session's Inbox thread: its link once the inbox-link hook captured it, else the
-    # name pan gave it.
+    # The session's Inbox thread: its link once captured, else its name; a name pan only
+    # suggested to a desk session is shown as the alternative it is.
     if record.inbox_thread_url:
         return f"Inbox: {record.inbox_thread_url}"
-    if record.inbox_thread_name:
+    if record.inbox_thread_name and inbox_thread_known(record):
         return f'Inbox thread: "{record.inbox_thread_name}"'
+    if record.inbox_thread_name:
+        return f'Inbox thread: its existing one, or "{record.inbox_thread_name}"'
     return None
 
 
@@ -84,29 +98,6 @@ def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> Thre
     return max(matches, key=lambda record: record.updated_at) if matches else None
 
 
-def _not_found_reply(selector: str, terminals: list[Terminal]) -> str:
-    names = [_session_name(terminal) for terminal in terminals]
-    close = [name for name in names if selector.lower() in name.lower()]
-    for name in difflib.get_close_matches(
-        selector, names, n=_CLOSE_MATCH_LIMIT, cutoff=_CLOSE_MATCH_CUTOFF
-    ):
-        if name not in close:
-            close.append(name)
-    if close:
-        return f"no live session named {selector}; close matches: {', '.join(close[:_CLOSE_MATCH_LIMIT])}"
-    return f"no live session named {selector}; @pan sessions lists them"
-
-
-def _ambiguous_reply(selector: str, candidates: list[Terminal]) -> str:
-    labels = ", ".join(
-        f"{_session_name(candidate)} ({candidate.where})"
-        if candidate.where
-        else _session_name(candidate)
-        for candidate in candidates
-    )
-    return f"{selector} matches more than one session: {labels}; name one exactly"
-
-
 def sent_notice(record: ThreadRecord) -> str:
     notice = f"Sent to {record.terminal_name}"
     reference = inbox_reference(record)
@@ -117,22 +108,28 @@ def sent_notice(record: ThreadRecord) -> str:
     return notice
 
 
-def from_slack_text(inbox_thread: str, text: str, reply_mode: ReplyMode) -> str:
+def from_slack_text(
+    inbox_thread: str, text: str, reply_mode: ReplyMode, *, thread_known: bool = True
+) -> str:
     # The text typed into a session, under one line saying where it came from, which Inbox
-    # thread to report in and who replies in Slack. The brief's task marker separates them, so
-    # `pan sessions` shows only the task as the session's last ask.
-    header = FROM_SLACK_HEADER.format(
+    # thread to report in and who replies in Slack. When pan does not know the session's
+    # thread, the line says to keep using its existing one, else to start `inbox_thread`. The
+    # brief's task marker separates them, so `pan sessions` shows only the task as the
+    # session's last ask.
+    template = FROM_SLACK_HEADER if thread_known else FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER
+    header = template.format(
         inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
     )
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
 
 
-def _busy_reply(name: str) -> str:
-    return f"{name} is busy; try again, or @pan check"
+def _busy_reply(name: str, retry_hint: str | None = None) -> str:
+    return f"{name} is busy; {retry_hint or 'try again, or @pan check'}"
 
 
-def _blocked_reply(name: str) -> str:
-    return f"{name} is waiting on a prompt at the terminal; nothing was sent"
+def _blocked_reply(name: str, retry_hint: str | None = None) -> str:
+    reply = f"{name} is waiting on a prompt at the terminal; nothing was sent"
+    return f"{reply}; {retry_hint}" if retry_hint else reply
 
 
 def _is_ready(terminal: Terminal) -> bool:
@@ -157,22 +154,24 @@ def _deliver(
     slack: SlackAdapter,
     channel: str,
     thread_ts: str,
+    retry_hint: str | None = None,
 ) -> None:
     # Type the text only into a session that is ready for it. Busy, or a state pan cannot
     # read, is refused (typing could land in the middle of someone's work there); waiting on
     # a person is refused too, by pan here or by the host at the send. A refusal posts a
-    # short reply and raises, with nothing typed.
+    # short reply and raises, with nothing typed; `retry_hint`, when given, is what that reply
+    # tells the person to do next.
     name = _session_name(terminal)
     if terminal.agent_status is AgentStatus.BLOCKED:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name))
+        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
         raise TargetBlockedError(f"{terminal.address} is waiting on a person")
     if not _is_ready(terminal):
-        slack_post(slack, channel, thread_ts, _busy_reply(name))
+        slack_post(slack, channel, thread_ts, _busy_reply(name, retry_hint))
         raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
     try:
         terminal_host.send(terminal.address, text)
     except TargetBlockedError:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name))
+        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
         raise
 
 
@@ -200,6 +199,20 @@ def _with_inbox_link(
     )
 
 
+def _with_found_thread(record: ThreadRecord, found_thread: InboxThread) -> ThreadRecord:
+    # The Inbox thread found under the name pan suggested is the one the session reports in:
+    # record its name and id, keeping a known link only when it is the same thread.
+    same_thread = record.inbox_thread_id == found_thread.thread_id
+    return record.model_copy(
+        update={
+            "inbox_thread_name": found_thread.name,
+            "inbox_thread_id": found_thread.thread_id,
+            "inbox_thread_url": found_thread.url
+            or (record.inbox_thread_url if same_thread else None),
+        }
+    )
+
+
 def send_to_session(
     *,
     thread_ts: str,
@@ -213,36 +226,51 @@ def send_to_session(
     inbox_directory: InboxDirectory,
     slack: SlackAdapter,
     clock: Clock,
+    retry_hint: str | None = None,
 ) -> ThreadRecord:
-    # `to <name>: <task>`: send the task to the live session under that name, pan's own or a
-    # desk session, and tie the thread to it (the session's previous thread is untied). The
-    # task goes under the "from Slack" line naming its Inbox thread. Every refusal (unknown,
-    # ambiguous, busy, waiting on a prompt) posts a short reply and raises, with nothing sent.
+    # `to <selector>: <task>`: send the task to the live session the selector names exactly
+    # (address, name, or Herdr label or space; see resolve_target), pan's own or a desk
+    # session, and tie the thread to it (the session's previous thread is untied). The task
+    # goes under the "from Slack" line naming its Inbox thread. With no exact match, or a label
+    # several sessions share, nothing is sent or posted: NoExactMatchError tells the
+    # orchestrator to propose a session for the person to confirm (`pan propose`). A busy
+    # session or one waiting on a prompt gets a short reply and raises, with nothing sent.
     terminals = terminal_host.list_terminals()
     try:
         target = resolve_target(selector, terminals)
-    except TargetNotFoundError:
-        slack_post(slack, channel, thread_ts, _not_found_reply(selector, terminals))
-        raise
-    except TargetAmbiguousError as error:
-        slack_post(slack, channel, thread_ts, _ambiguous_reply(selector, error.candidates))
-        raise
+    except (TargetNotFoundError, TargetAmbiguousError) as error:
+        logger.info(f"no exact match for selector={selector} thread={thread_ts}")
+        raise NoExactMatchError(f"no session matches '{selector}' exactly") from error
 
     name = _session_name(target)
     session_record = _session_record_for(target, thread_map.records())
-    inbox_thread = (
-        session_record.inbox_thread_name
-        if session_record is not None and session_record.inbox_thread_name
-        else inbox_thread_name(name, text)
-    )
+    found_thread: InboxThread | None = None
+    looked_up_name: str | None = None
+    if (
+        session_record is not None
+        and session_record.inbox_thread_name
+        and not inbox_thread_known(session_record)
+    ):
+        # A name pan suggested earlier: if the session created that thread, it is now known.
+        looked_up_name = session_record.inbox_thread_name
+        found_thread = inbox_directory.find_thread(target.cwd, looked_up_name)
+    if found_thread is not None:
+        inbox_thread, thread_known = found_thread.name, True
+    elif session_record is not None and session_record.inbox_thread_name:
+        inbox_thread = session_record.inbox_thread_name
+        thread_known = inbox_thread_known(session_record)
+    else:
+        inbox_thread = inbox_thread_name(name, text)
+        thread_known = session_record is not None and inbox_thread_known(session_record)
     reply_mode = ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND
     _deliver(
         terminal_host,
         target,
-        from_slack_text(inbox_thread, text, reply_mode),
+        from_slack_text(inbox_thread, text, reply_mode, thread_known=thread_known),
         slack=slack,
         channel=channel,
         thread_ts=thread_ts,
+        retry_hint=retry_hint,
     )
 
     now = clock.now()
@@ -282,8 +310,12 @@ def send_to_session(
             updates["status"] = WorkerStatus.RUNNING
             updates["worktree_path"] = target.cwd
         tied_record = session_record.model_copy(update=updates)
+    if found_thread is not None:
+        tied_record = _with_found_thread(tied_record, found_thread)
     thread_map.tie(tied_record)
-    tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
+    if looked_up_name is None or tied_record.inbox_thread_name != looked_up_name:
+        # Not looked up yet in this send (a lookup that just missed would miss again).
+        tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
     slack_post(slack, channel, thread_ts, sent_notice(tied_record))
     logger.info(
         f"sent to session terminal={target.address} thread={thread_ts} "
@@ -319,7 +351,9 @@ def follow_up_to_session(
     typed = text
     if not record.started_by_pan:
         inbox_thread = record.inbox_thread_name or inbox_thread_name(record.terminal_name, text)
-        typed = from_slack_text(inbox_thread, text, record.reply_mode)
+        typed = from_slack_text(
+            inbox_thread, text, record.reply_mode, thread_known=inbox_thread_known(record)
+        )
     _deliver(terminal_host, terminal, typed, slack=slack, channel=channel, thread_ts=thread_ts)
     if not record.started_by_pan:
         thread_map.update_status(thread_ts, WorkerStatus.RUNNING, session_name=record.terminal_name)

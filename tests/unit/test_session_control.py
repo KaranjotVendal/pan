@@ -5,14 +5,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from inbox_fakes import FakeInboxDirectory
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import (
+    NoExactMatchError,
     PanError,
     SessionBusyError,
-    TargetAmbiguousError,
     TargetBlockedError,
-    TargetNotFoundError,
     TerminalGoneError,
     ThreadNotFoundError,
 )
@@ -63,17 +63,6 @@ class RecordingSlack:
 
     def texts(self) -> list[str]:
         return [text for _channel, _thread, text in self.posts]
-
-
-class FakeInboxDirectory:
-    # Finds the threads it was given, by (project folder, thread name); records each lookup.
-    def __init__(self, threads: dict[tuple[Path, str], InboxThread] | None = None) -> None:
-        self._threads = threads or {}
-        self.lookups: list[tuple[Path, str]] = []
-
-    def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None:
-        self.lookups.append((project_path, thread_name))
-        return self._threads.get((project_path, thread_name))
 
 
 def _record(
@@ -185,37 +174,6 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
     "selector, terminals, records, expected_error, expected_reply",
     [
         (
-            "pan-8",
-            [make_terminal("t7", name="pan-7"), make_terminal("t9", name="desk-api")],
-            [_record()],
-            TargetNotFoundError,
-            "no live session named pan-8; close matches: pan-7",
-        ),
-        (
-            "nothing-like-it",
-            [make_terminal("t7", name="pan-7")],
-            [_record()],
-            TargetNotFoundError,
-            "no live session named nothing-like-it; @pan sessions lists them",
-        ),
-        (
-            "web",
-            [
-                make_terminal("t3", where="web / one"),
-                make_terminal("t4", where="web / two"),
-            ],
-            [],
-            TargetAmbiguousError,
-            "web matches more than one session: t3 (web / one), t4 (web / two); name one exactly",
-        ),
-        (
-            "desk-ap",
-            [make_terminal("t9", name="desk-api")],
-            [],
-            TargetNotFoundError,
-            "no live session named desk-ap; close matches: desk-api",
-        ),
-        (
             "pan-7",
             [make_terminal("t7", name="pan-7", agent_status=AgentStatus.WORKING)],
             [_record()],
@@ -270,10 +228,6 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
         ),
     ],
     ids=[
-        "unknown-close-match",
-        "unknown-no-match",
-        "ambiguous",
-        "desk-session-close-match",
         "busy-pan-session",
         "busy-desk-session",
         "no-status-after-a-turn-counts-as-busy",
@@ -331,9 +285,18 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     _send(terminal_host, thread_map, slack, "desk-api")
 
     assert terminal_host.sent == [
-        ("t9", from_slack_text("desk-api: add the tests", "add the tests", ReplyMode.ON_DEMAND))
+        (
+            "t9",
+            from_slack_text(
+                "desk-api: add the tests",
+                "add the tests",
+                ReplyMode.ON_DEMAND,
+                thread_known=False,
+            ),
+        )
     ]
     assert terminal_host.sent[0][1].startswith("From Slack via pan.")
+    assert "existing Plannotator Inbox thread" in terminal_host.sent[0][1]
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
     assert tied.tied is True
@@ -342,7 +305,45 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     assert tied.terminal_address == "t9"
     assert tied.worktree_path == desk_folder
     assert tied.inbox_thread_name == "desk-api: add the tests"
-    assert slack.texts() == ['Sent to desk-api · Inbox thread: "desk-api: add the tests"']
+    assert slack.texts() == [
+        'Sent to desk-api · Inbox thread: its existing one, or "desk-api: add the tests"'
+    ]
+
+
+@pytest.mark.parametrize(
+    "started_by_pan, inbox_thread_id, expected_thread_known",
+    [(True, None, True), (False, "thr_9", True), (False, None, False)],
+    ids=["pan-worker", "desk-session-with-a-found-thread", "desk-session-thread-unknown"],
+)
+def test_send_to_a_session_whose_record_has_no_thread_name_uses_the_shared_known_rule(
+    tmp_path: Path,
+    started_by_pan: bool,
+    inbox_thread_id: str | None,
+    expected_thread_known: bool,
+) -> None:
+    earlier = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=started_by_pan,
+        inbox_thread_name=None,
+        inbox_thread_id=inbox_thread_id,
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    terminal_host = _host(make_terminal("t9", name="desk-api"))
+
+    _send(terminal_host, thread_map, RecordingSlack(), "desk-api")
+
+    assert terminal_host.sent == [
+        (
+            "t9",
+            from_slack_text(
+                "desk-api: add the tests",
+                "add the tests",
+                ReplyMode.ON_DEMAND,
+                thread_known=expected_thread_known,
+            ),
+        )
+    ]
 
 
 def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found_link(
@@ -385,37 +386,43 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
 
 
 @pytest.mark.parametrize(
-    "earlier, terminal, expected_inbox_thread_name",
+    "earlier, terminal, expected_inbox_thread_name, expected_thread_known",
     [
         (
             _record(terminal_name="desk-test", terminal_address="", started_by_pan=False),
             make_terminal("t10", name="desk-test"),
             "pan-7: fix the login page",
+            False,
         ),
         (
             _record(terminal_name="desk-test", terminal_address="t9", started_by_pan=False),
             make_terminal("t10", name="desk-test"),
             "desk-test: add the tests",
+            False,
         ),
         (
             _record(terminal_name="desk-test", terminal_address="t10", started_by_pan=False),
             make_terminal("t10", name="desk-test"),
             "pan-7: fix the login page",
+            False,
         ),
         (
             _record(terminal_name="desk-old", terminal_address="t10", started_by_pan=False),
             make_terminal("t10", name="desk-test"),
             "desk-test: add the tests",
+            False,
         ),
         (
             _record(terminal_name="desk-test", terminal_address="t9"),
             make_terminal("t10", name="desk-test", cwd=Path("/tmp/wt/pan-7")),
             "pan-7: fix the login page",
+            True,
         ),
         (
             _record(terminal_name="desk-test", terminal_address="t9"),
             make_terminal("t10", name="desk-test", cwd=Path("/tmp/elsewhere")),
             "desk-test: add the tests",
+            False,
         ),
     ],
     ids=[
@@ -432,6 +439,7 @@ def test_send_joins_a_session_record_only_to_its_own_terminal(
     earlier: ThreadRecord,
     terminal: object,
     expected_inbox_thread_name: str,
+    expected_thread_known: bool,
 ) -> None:
     # A joined record keeps its Inbox thread name; a new session gets one of its own.
     thread_map = _thread_map(tmp_path, earlier)
@@ -440,7 +448,15 @@ def test_send_joins_a_session_record_only_to_its_own_terminal(
     _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
 
     assert terminal_host.sent == [
-        ("t10", from_slack_text(expected_inbox_thread_name, "add the tests", ReplyMode.ON_DEMAND))
+        (
+            "t10",
+            from_slack_text(
+                expected_inbox_thread_name,
+                "add the tests",
+                ReplyMode.ON_DEMAND,
+                thread_known=expected_thread_known,
+            ),
+        )
     ]
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
@@ -632,7 +648,7 @@ def test_check_on_an_untied_thread_replies_one_line(
             ),
             "desk-api · Inbox: https://inbox.example/threads/thr_9",
         ),
-        (None, 'desk-api · Inbox thread: "desk-api: fix the build"'),
+        (None, 'desk-api · Inbox thread: its existing one, or "desk-api: fix the build"'),
     ],
     ids=["found-without-link", "found-with-link", "not-found"],
 )
@@ -727,7 +743,9 @@ def _follow_up(
                 inbox_thread_name="desk-api: fix the build",
             ),
             make_terminal("t9", name="desk-api", agent_status=AgentStatus.DONE),
-            from_slack_text("desk-api: fix the build", "and the docs", ReplyMode.ON_DEMAND),
+            from_slack_text(
+                "desk-api: fix the build", "and the docs", ReplyMode.ON_DEMAND, thread_known=False
+            ),
         ),
     ],
     ids=["pan-session-verbatim", "desk-session-with-from-slack-line"],
@@ -855,7 +873,12 @@ def test_follow_up_to_a_desk_session_in_slack_mode_says_pan_posts_the_answer(
     )
 
     assert terminal_host.sent == [
-        ("t9", from_slack_text("desk-api: fix the build", "and the docs", ReplyMode.SLACK))
+        (
+            "t9",
+            from_slack_text(
+                "desk-api: fix the build", "and the docs", ReplyMode.SLACK, thread_known=False
+            ),
+        )
     ]
 
 
@@ -913,3 +936,80 @@ def test_check_without_a_transcript_posts_cleaned_screen_text(tmp_path: Path) ->
         "pan-7 is idle.\n\n"
         f"Screen text (no transcript yet):\n```\n{INCOMPLETE_READ_NOTICE}\nlast screen lines\n```"
     ]
+
+
+def test_send_to_a_desk_session_whose_suggested_thread_exists_names_it(tmp_path: Path) -> None:
+    desk_folder = Path("/tmp/desk/api")
+    earlier = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=False,
+        worktree_path=desk_folder,
+        inbox_thread_name="desk-api: fix the build",
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    terminal_host = _host(make_terminal("t9", name="desk-api", cwd=desk_folder))
+    found = InboxThread(thread_id="thr_9", name="desk-api: fix the build")
+
+    _send(
+        terminal_host,
+        thread_map,
+        RecordingSlack(),
+        "desk-api",
+        inbox_directory=FakeInboxDirectory({(desk_folder, "desk-api: fix the build"): found}),
+    )
+
+    assert terminal_host.sent == [
+        ("t9", from_slack_text("desk-api: fix the build", "add the tests", ReplyMode.ON_DEMAND))
+    ]
+    tied = thread_map.get(_NEW_THREAD)
+    assert tied is not None
+    assert tied.inbox_thread_id == "thr_9"
+
+
+@pytest.mark.parametrize(
+    "selector, terminals",
+    [
+        ("pan-8", [make_terminal("t7", name="pan-7")]),
+        ("fix the login bug", [make_terminal("t7", name="pan-7")]),
+        ("web", [make_terminal("t3", where="web / one"), make_terminal("t4", where="web / two")]),
+    ],
+    ids=["unknown-name", "sentence", "label-several-sessions-share"],
+)
+def test_send_without_an_exact_match_sends_and_posts_nothing(
+    tmp_path: Path, selector: str, terminals: list[object]
+) -> None:
+    thread_map = _thread_map(tmp_path)
+    terminal_host = _host(*terminals)
+    slack = RecordingSlack()
+
+    with pytest.raises(NoExactMatchError):
+        _send(terminal_host, thread_map, slack, selector)
+
+    assert terminal_host.sent == []
+    assert terminal_host.runs == []
+    assert thread_map.get(_NEW_THREAD) is None
+    assert slack.texts() == []
+
+
+def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
+    desk_folder = Path("/tmp/desk/api")
+    earlier = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=False,
+        worktree_path=desk_folder,
+        inbox_thread_name="desk-api: fix the build",
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    inbox_directory = FakeInboxDirectory()
+
+    _send(
+        _host(make_terminal("t9", name="desk-api", cwd=desk_folder)),
+        thread_map,
+        RecordingSlack(),
+        "desk-api",
+        inbox_directory=inbox_directory,
+    )
+
+    assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]

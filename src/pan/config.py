@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -87,6 +88,12 @@ PLANNOTATOR_INBOX_TOOL_MARKER = "plannotator_inbox"
 # `send` never hang on the Inbox.
 INBOX_LOOKUP_THREAD_LIMIT = 50
 INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
+# `to <selector>:` with no exact match asks the person to confirm a proposed session in the
+# Slack thread (`pan propose`); a question left unanswered this long is dropped, and the next
+# reply in the thread is handled as usual.
+CONFIRMATION_TIMEOUT = timedelta(minutes=30)
+# A proposal names at most this many sessions, numbered 1 to this.
+CONFIRMATION_MAX_CANDIDATES = 3
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -137,11 +144,13 @@ The commands above are terminal commands (pan <command>). From Slack, say these:
   <task>                     in a new thread, start a session in a new worktree;
                              in a tied thread, send it to the tied session
   new: <task>                start a new session even in a tied thread (the tie moves)
-  to <name>: <task>          send to the live session <name> (pan's or yours) if it is
-                             idle; tie this thread to it
+  to <name>: <task>          send to a live session (pan's or yours) if it is idle; tie
+                             this thread to it. <name> is its address, name or Herdr
+                             label; with no exact match pan proposes the likely session
+                             (or up to 3) and sends only when you reply yes or 1-3
   check                      post the tied session's latest answer here
-  sessions                   list live sessions: name, idle or busy, last ask
-                             (--sessions works too)
+  sessions                   list live sessions: name, idle or busy, last ask, and
+                             Inbox thread when pan knows it (--sessions works too)
   forget                     untie this thread (the session keeps running)
   ... reply in slack ...     also post the session's answers here at every turn end
   --stream <name>            name a new session's terminal

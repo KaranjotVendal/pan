@@ -66,6 +66,48 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `to <name>:` with no exact match asks before sending. The name stays one token, so a sentence
+  such as "to be clear: ..." is still a plain task. `pan send --to` still sends at once to an exact
+  match (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits
+  28 (`NoExactMatchError`; a label several sessions share counts as no exact match and no longer
+  posts a pick list, and the close-matches not-found reply is gone). The orchestrator then reads the
+  message and `pan sessions --json` and proposes the likely session, up to 3, or none, with the new
+  `pan propose --thread --channel --to --task [--requester] [--reply-in-slack] --candidate <address>
+  ...`. It keeps only live terminal addresses (unknown or repeated ones are dropped, at most
+  `CONFIRMATION_MAX_CANDIDATES`, 3), stores the question per thread in `confirmations.json` next to
+  the thread map (`PendingConfirmation`, seam `PendingConfirmations`; not on `ThreadRecord`, because
+  a `to` in a new thread has no record) and posts "Send this to stream-pan (work / 1, folder pan)?
+  Reply yes.", or "Which session? Reply 1, 2 or 3:" with a numbered list; with no candidate it posts
+  'no session matches "<selector>"; to start new work send `@pan new: <your text>`' and stores
+  nothing. Nothing is typed into a session until the person replies.
+- Replies to that question are decided in code. `pan inbox drain` turns a `yes`, `y` or 1-3 reply
+  (`directive.parse_confirm_reply`, any case, optional mention) in a thread with a question younger
+  than `CONFIRMATION_TIMEOUT` (30 minutes) into the new route kind `confirm` (`Route.choice`), and
+  turns a decline (`no`, `n`, `cancel`, `stop`) into `confirm` with choice `no`, which
+  `pan confirm --cancel` (or `--choice no`) answers with "Not sent." and nothing more, so a "no" in
+  an untied thread never starts a session; it marks any other message there
+  `cancels_confirmation`; the questions are read before the inbox is drained, an unreadable `confirmations.json` counts as none (no item is ever lost to it), and once
+  an item answers or cancels a thread's question, later items in the same batch see none. A plain
+  `yes` with no open question is unchanged (it still goes to the tied session). The new
+  `pan confirm --choice <yes|y|n>` (read like a reply: any case, spaces trimmed) sends the stored
+  task to the chosen session through the `to` send path and ties the thread, after checking it is
+  still the same live terminal (same address and name, or for an unnamed session the same folder
+  and Herdr label, kept on `ConfirmationCandidate`); the question is cleared only once the send
+  succeeds. A busy session or one waiting on a prompt keeps the question open ("stream-pan is busy;
+  reply yes again later, or anything else to cancel."); a chosen session no longer running clears
+  it. `yes` to several or an out-of-range number asks again and keeps the question; a question that
+  expired is cleared with "Not sent: that question expired."; with no question at all nothing is
+  posted. `pan confirm --cancel` clears the
+  question and posts "Not sent.", and the message is then handled as usual. The orchestrating skill
+  states this as the one bounded exception to INV-3.
+- A session pan did not start is told to use its existing Plannotator Inbox thread for the work if it
+  has one, otherwise to start one named `<session>: <task>`, unless pan knows its thread (found
+  earlier, including by a lookup of the suggested name just before typing; that lookup is not
+  repeated after the tie). A thread found that way is recorded on the thread record (name and id) so
+  `check` uses it. pan's own workers are unchanged. Whether pan knows a session's thread is one rule,
+  `sessions.inbox_thread_known`, shared with `pan sessions`.
+- `pan sessions` shows each session's Inbox thread under its row when pan knows it
+  (`SessionSummary.inbox_thread_name`), which also helps the orchestrator propose a session.
 - `pan service install|uninstall|status`: pan starts by itself after a login or reboot on macOS.
   `install` renders the gateway, watcher and up LaunchAgents into
   `~/Library/LaunchAgents/com.pan.<name>.plist` (home directory and the absolute path of the

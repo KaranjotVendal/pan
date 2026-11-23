@@ -18,13 +18,28 @@ from pan.adapters.launchd import build_service_manager
 from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.adapters.terminal_host import build_terminal_host
 from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.confirmations import (
+    FilePendingConfirmations,
+    OpenQuestions,
+    cancel_confirmation,
+    confirm_session,
+    confirmations_path,
+    propose_sessions,
+)
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_directive, parse_route, route_for_source
+from pan.directive import (
+    CONFIRM_NO,
+    parse_confirm_reply,
+    parse_directive,
+    parse_route,
+    route_for_source,
+)
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
     InboxError,
+    NoExactMatchError,
     NotPanSessionError,
     PanError,
     ServiceError,
@@ -107,6 +122,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     NotPanSessionError: 25,
     SessionBusyError: 26,
     ServiceError: 27,
+    NoExactMatchError: 28,
 }
 
 
@@ -213,21 +229,37 @@ def _item_route(item: InboxItem) -> Route:
     return route_for_source(route, item.source)
 
 
+def _confirmations(config: PanConfig) -> FilePendingConfirmations:
+    return FilePendingConfirmations(confirmations_path(config.paths.threads))
+
+
 @inbox_app.command("drain")
 def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
     config = _config()
+    # The open questions are read before the drain, and reading them never fails, so a bad
+    # confirmations file can never cost drained items.
+    open_questions = OpenQuestions(_confirmations(config).all_pending())
+    clock = SystemClock()
     items = FileInboxStore(config.paths.inbox).drain()
-    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, clock)
+
     # Attach the route the gateway parsed (parsed here for an item an older gateway wrote)
     # and the directive parsed from the route's text, so the orchestrator reads them as
     # facts (both pure code) rather than re-deriving them by judgment — enforcing INV-3. The
     # thread's tie is attached as a plain-words fact, read now because it can change after
-    # the gateway wrote the item.
+    # the gateway wrote the item. So is pan's open question in the thread (`pan propose`): a
+    # `yes`/1-3 reply to it becomes a `confirm` route, and any other message is marked
+    # `cancels_confirmation`.
+    def routed(item: InboxItem) -> tuple[Route, bool]:
+        return open_questions.route(
+            _item_route(item), item.source, item.thread_ts, item.raw_text, clock.now()
+        )
+
     if as_json:
         payload = []
         for item in items:
-            route = _item_route(item)
+            route, cancels_confirmation = routed(item)
             record = thread_map.get(item.thread_ts)
             note = tie_note(record)
             tie = None
@@ -244,16 +276,19 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
                     "route": route.model_dump(mode="json"),
                     "directive": parse_directive(route.text).model_dump(mode="json"),
                     "tie": tie,
+                    "cancels_confirmation": cancels_confirmation,
                 }
             )
         typer.echo(json.dumps(payload))
         return
     for item in items:
-        route = _item_route(item)
+        route, cancels_confirmation = routed(item)
         directive = parse_directive(route.text)
         typer.echo(
             f"{item.id} {item.channel} {item.thread_ts} {route.kind.value} {directive.mode.value}"
         )
+        if cancels_confirmation:
+            typer.echo("  cancels the open confirmation question in this thread")
         note = tie_note(thread_map.get(item.thread_ts))
         if note is not None:
             typer.echo(f"  {note}")
@@ -508,6 +543,9 @@ def _render_sessions_table(summaries: list[SessionSummary]) -> str:
             f"{summary.agent_status.value:<9} {owner:<9} {pan_status:<11} {drift:<5} {last_ask}"
         )
         lines.append(row.rstrip())
+        if summary.inbox_thread_name:
+            # The Inbox thread the session reports in, when pan knows it.
+            lines.append(f"{'':<9} inbox: {summary.inbox_thread_name}")
     return "\n".join(lines)
 
 
@@ -582,7 +620,12 @@ def send(
     thread: str = typer.Option(..., "--thread"),
     channel: str = typer.Option(..., "--channel"),
     to: str | None = typer.Option(
-        None, "--to", help="a live session's name or address; omit to send to the tied session"
+        None,
+        "--to",
+        help=(
+            "a live session's exact address, name or Herdr label (or its space); omit to "
+            "send to the tied session"
+        ),
     ),
     task: str = typer.Option(..., "--task"),
     requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
@@ -591,9 +634,12 @@ def send(
     ),
 ) -> None:
     """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
-    a notice naming its Inbox thread. Without --to, send a follow-up to the thread's tied
-    session. A busy, blocked, unknown or ambiguous session gets a short reply and nothing is
-    typed; a session pan did not start gets one line on top saying the text came from Slack."""
+    a notice naming its Inbox thread. --to must name one session exactly: its address, name, or
+    Herdr label or space. With no exact match (or a label several sessions share) nothing is
+    sent or posted and it exits 28: propose a session with pan propose. Without --to, send a
+    follow-up to the thread's tied session. A busy or blocked session gets a short reply and
+    nothing is typed; a session pan did not start gets one line on top saying the text came
+    from Slack and which Inbox thread to use."""
     config = _config()
     clock = SystemClock()
     thread_map = FileThreadMap(config.paths.threads, clock)
@@ -618,6 +664,85 @@ def send(
         terminal_host=terminal_host,
         thread_map=thread_map,
         inbox_directory=ShellPlannotatorInboxAdapter(),
+        slack=_slack_adapter(config),
+        clock=clock,
+    )
+
+
+@app.command()
+def propose(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+    to: str = typer.Option(..., "--to", help="the selector the person wrote after to"),
+    task: str = typer.Option(..., "--task"),
+    candidate: list[str] = typer.Option(
+        [],
+        "--candidate",
+        help="a proposed session's terminal address; repeat for up to 3, most likely first",
+    ),
+    requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
+    reply_in_slack: bool = typer.Option(
+        False, "--reply-in-slack", help="post the answer in Slack at every turn end"
+    ),
+) -> None:
+    """Ask the person to confirm where a to <name>: task goes when pan send found no exact
+    match. One candidate: "Send this to <session>? Reply yes."; several: a numbered list to
+    pick 1-3 from. Nothing is typed into any session until they reply. Candidates that are not
+    live terminal addresses are dropped; with none left it says no session matches."""
+    config = _config()
+    propose_sessions(
+        thread_ts=thread,
+        channel=channel,
+        selector=to,
+        task=task,
+        requester=requester,
+        reply_in_slack=reply_in_slack,
+        candidate_addresses=candidate,
+        terminal_host=build_terminal_host(config.terminal_host),
+        confirmations=_confirmations(config),
+        slack=_slack_adapter(config),
+        clock=SystemClock(),
+    )
+
+
+@app.command()
+def confirm(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+    choice: str | None = typer.Option(
+        None, "--choice", help="the reply to the open question: yes, 1 to 3, or no"
+    ),
+    cancel: bool = typer.Option(
+        False, "--cancel", help="drop the open question and post Not sent."
+    ),
+) -> None:
+    """Act on the person's reply to the thread's open question from pan propose. --choice sends
+    the stored task to the chosen session (busy and prompt refusals still apply) and ties the
+    thread to it; --cancel (or --choice no) drops the question and posts Not sent."""
+    if cancel == (choice is not None):
+        raise typer.BadParameter("pass exactly one of --choice or --cancel")
+    # The same reading as a Slack reply: any case, surrounding spaces, y for yes, n for no.
+    normalized_choice = parse_confirm_reply(choice) if choice is not None else None
+    if choice is not None and normalized_choice is None:
+        raise typer.BadParameter("--choice must be yes, y, a number from 1 to 3, or no")
+    config = _config()
+    clock = SystemClock()
+    if normalized_choice is None or normalized_choice == CONFIRM_NO:
+        cancel_confirmation(
+            thread_ts=thread,
+            channel=channel,
+            confirmations=_confirmations(config),
+            slack=_slack_adapter(config),
+        )
+        return
+    confirm_session(
+        thread_ts=thread,
+        channel=channel,
+        choice=normalized_choice,
+        terminal_host=build_terminal_host(config.terminal_host),
+        thread_map=FileThreadMap(config.paths.threads, clock),
+        inbox_directory=ShellPlannotatorInboxAdapter(),
+        confirmations=_confirmations(config),
         slack=_slack_adapter(config),
         clock=clock,
     )
