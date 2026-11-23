@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from git_worktree_fakes import FakeGitWorktree
 from pydantic import SecretStr
 from service_manager_fakes import FakeServiceManager
 from terminal_host_fakes import FakeTerminalHost, make_terminal
@@ -20,6 +21,7 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
+    GitWorktreeError,
     InboxError,
     NoExactMatchError,
     NotPanSessionError,
@@ -36,6 +38,7 @@ from pan.errors import (
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
+    UnsavedWorkError,
 )
 from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
@@ -55,6 +58,7 @@ from pan.models import (
     ThreadRecord,
     ThreadSource,
     WorkerStatus,
+    WorktreeStatus,
 )
 from pan.threadmap import FileThreadMap
 
@@ -143,6 +147,7 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "reply_in_slack": False,
                 "notice": None,
                 "choice": None,
+                "discard": False,
             },
             "fix the login page",
         ),
@@ -156,6 +161,7 @@ def test_inbox_drain_json_emits_items(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "reply_in_slack": True,
                 "notice": None,
                 "choice": None,
+                "discard": False,
             },
             "fix it, reply in slack",
         ),
@@ -638,6 +644,8 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (SessionBusyError("x"), 26),
         (ServiceError("x"), 27),
         (NoExactMatchError("x"), 28),
+        (UnsavedWorkError("x"), 29),
+        (GitWorktreeError("x"), 30),
         (PanError("x"), 1),
     ],
 )
@@ -1004,6 +1012,67 @@ def test_forget_command_unties_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert record.tied is False
     assert slack.posts == [
         ("C0TEST", "t-1", "untied this thread from pan-task; the session was not stopped")
+    ]
+
+
+@pytest.mark.parametrize("discard_args, expected_discard", [([], False), (["--discard"], True)])
+def test_done_command_wires_to_done_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    discard_args: list[str],
+    expected_discard: bool,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    _use_slack(monkeypatch)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "done_thread", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(
+        cli.app, ["done", "--thread", "t-1", "--channel", "C0TEST", *discard_args]
+    )
+
+    assert result.exit_code == 0
+    assert captured["thread_ts"] == "t-1"
+    assert captured["channel"] == "C0TEST"
+    assert captured["discard"] is expected_discard
+    assert captured["worktree_base"] == config.orchestrator.worktree_base
+
+
+def test_done_command_keeps_a_worktree_with_unsaved_work(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    worktree_path = config.orchestrator.worktree_base / "pan-task"
+    worktree_path.mkdir(parents=True)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.tie(_record("t-1", worktree_path=worktree_path))
+    terminal_host = _use_terminal_host(
+        monkeypatch, _terminal_host_with(make_terminal("t12", name="pan-task"))
+    )
+    git = FakeGitWorktree(
+        status=WorktreeStatus(
+            main_repo=tmp_path / "repo",
+            is_main_worktree=False,
+            branch="pan-task",
+            changed_paths=["app.py"],
+        )
+    )
+    monkeypatch.setattr(cli, "ShellGitWorktreeAdapter", lambda: git)
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["done", "--thread", "t-1", "--channel", "C0TEST"])
+
+    assert isinstance(result.exception, UnsavedWorkError)
+    assert cli._exit_code_for(result.exception) == 29
+    assert terminal_host.removed == []
+    assert slack.posts == [
+        (
+            "C0TEST",
+            "t-1",
+            "pan-task has 1 uncommitted file; kept it. "
+            "Push or commit them, or send `@pan done --discard`.",
+        )
     ]
 
 

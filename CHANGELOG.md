@@ -66,6 +66,19 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `@pan done` closes the thread's session. New route word `done` (`RouteKind.DONE`), the whole
+  message like `check` and `forget`, and `done --discard` (`Route.discard`; a phone's `—discard`
+  works too). New `pan done --thread --channel [--discard]` (`session_control.done_thread`) and
+  orchestrator step (r5) (the later steps are now (r6) to (r9)). An untied thread gets "This thread
+  has no session."; a session pan did not start is only untied. For pan's own session it refuses
+  while the session is working (exit 26) and keeps everything while the worktree holds unsaved
+  work (new `UnsavedWorkError`, exit 29): uncommitted or untracked files other than the
+  `.claude/settings.json` pan writes at spawn (`WORKER_SETTINGS_RELATIVE_PATH`), or commits the
+  upstream lacks (with no upstream: merged into neither `origin/HEAD` nor the main checkout's
+  branch), unless `--discard`. Otherwise it removes the terminal, the worktree and the branch,
+  marks the record DONE and unties the thread. The `GitWorktreeAdapter` seam gains a read-only
+  `worktree_status` (`WorktreeStatus`) and `delete_branch`, and `remove_worktree` now takes
+  `force`; their git failures raise the new `GitWorktreeError` (exit 30). `pan stop` is unchanged.
 - `to <name>:` with no exact match asks before sending. The name stays one token, so a sentence
   such as "to be clear: ..." is still a plain task. `pan send --to` still sends at once to an exact
   match (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits

@@ -176,7 +176,12 @@ _WHOLE_MESSAGE_ROUTES = {
     "sessions": RouteKind.SESSIONS,
     "forget": RouteKind.FORGET,
     "check": RouteKind.CHECK,
+    "done": RouteKind.DONE,
 }
+# `done --discard` (the whole message, words separated by any spaces) closes the session even
+# when that throws away uncommitted files or unpushed commits. A phone's em-dash `—discard` is
+# read as `--discard` (see _normalize_punctuation).
+_DONE_DISCARD_WORDS = ("done", "--discard")
 # The one-off verbs keep their own grammar; their message body is sent verbatim, so a
 # flag-looking token inside it is never read as a retired flag.
 _ONE_OFF_VERBS = frozenset({"relay", "read"})
@@ -226,6 +231,8 @@ def _parse_route_words(raw_text: str) -> Route:
     whole_message_kind = _WHOLE_MESSAGE_ROUTES.get(text.lower())
     if whole_message_kind is not None:
         return Route(kind=whole_message_kind)
+    if tuple(text.lower().split()) == _DONE_DISCARD_WORDS:
+        return Route(kind=RouteKind.DONE, discard=True)
 
     new_match = _NEW_ROUTE.match(text)
     if new_match is not None:

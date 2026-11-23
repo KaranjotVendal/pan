@@ -63,6 +63,10 @@ CLAUDE_AGENT_NAMES: frozenset[str] = frozenset({"claude-code", "claude"})
 WORKER_NAME_PREFIX = "pan-"
 TERMINAL_NAME_MAX_LENGTH = 32
 
+# The Claude Code settings file (the worker's hooks) pan writes into every worker's worktree,
+# relative to the worktree. `done` does not count it as the worker's uncommitted work.
+WORKER_SETTINGS_RELATIVE_PATH = ".claude/settings.json"
+
 # A worker's Plannotator Inbox thread is named `<terminal name>: <short task>`; the task part
 # is cut to this many characters so the name stays one short line.
 INBOX_THREAD_TASK_MAX_LENGTH = 60
@@ -127,6 +131,7 @@ HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
     "sessions",
     "check",
     "forget",
+    "done",
     "relay",
     "read",
     "status",
@@ -152,6 +157,10 @@ The commands above are terminal commands (pan <command>). From Slack, say these:
   sessions                   list live sessions: name, idle or busy, last ask, and
                              Inbox thread when pan knows it (--sessions works too)
   forget                     untie this thread (the session keeps running)
+  done [--discard]           close pan's session for this thread and remove its
+                             worktree and branch; kept if it has uncommitted files or
+                             unpushed commits, unless --discard; a session you
+                             started yourself is only untied
   ... reply in slack ...     also post the session's answers here at every turn end
   --stream <name>            name a new session's terminal
   relay <target> <message>   send a one-off message into a live session (ties nothing)

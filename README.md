@@ -7,7 +7,7 @@ appends the request to an on-disk inbox. A filesystem watcher nudges a persisten
 session, which drains the inbox, follows the route, and runs each new task as its own
 Claude session in an isolated git worktree and its own herdr-core (`hc`) terminal. Each Slack thread
 is tied to the session it started, so follow-ups in that thread go to the same session; route words
-(`new:`, `to <name>:`, `check`, `sessions`, `forget`) let you choose otherwise. When a session starts,
+(`new:`, `to <name>:`, `check`, `sessions`, `forget`, `done`) let you choose otherwise. When a session starts,
 Slack gets one notice naming it and its Plannotator Inbox thread; the session then asks questions and
 reports progress in the Inbox. Slack hears more when you write `@pan check`, or when the request said
 "reply in slack" (its answer is then posted at every turn end).
@@ -180,6 +180,7 @@ runs once the actuation lands.
 | `pan propose --thread … --channel … --to … --task … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
 | `pan confirm --thread … --channel … --choice <yes\|n>` / `--cancel` | Act on the reply to that question: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
+| `pan done --thread … --channel … [--discard]` | Close the thread's session: remove its terminal, its worktree and its branch, mark it done and untie the thread. Keeps everything (exit 29) while the worktree has uncommitted files or unpushed commits, and refuses while the session is working (exit 26), unless `--discard`. A session pan did not start is only untied. See [Closing a session](#closing-a-session). |
 | `pan relay <target> <message>` | Send a message into a live terminal (address, name, or Herdr app label). |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal and mark the thread FAILED. Refuses for a session pan did not start: it only unties the thread. |
@@ -201,10 +202,35 @@ first word after the mention, spelled exactly, in any letter case; anything else
 | `check` | Post the tied session's latest answer here. The whole message must be just this word. |
 | `sessions` | List live sessions: name, idle or busy, last ask, and the Inbox thread when pan knows it. Also `--sessions`. |
 | `forget` | Untie the thread; the session keeps running. |
+| `done` / `done --discard` | Close the thread's session and remove its worktree and branch; see [Closing a session](#closing-a-session). The whole message must be just this (`--discard` may be typed as a phone's `—discard`). |
 | `reply in slack` (anywhere) | Also post the session's answers here at every turn end. |
 | `--stream <name>` | Name a new session's terminal. |
 | `relay <target> <message>` | Send a one-off message into any live session; ties nothing. |
 | `read <target> [--full]` | Read a live session's recent output (or all of it); ties nothing. |
+
+### Closing a session
+
+`@pan done` in a thread closes the session tied to it, once its work is saved:
+
+- In a thread with no tied session, pan replies "This thread has no session." and does nothing.
+- A session pan did not start (one of your desk sessions) is only untied: "Untied this thread from
+  desk-x; pan never closes sessions it didn't start."
+- A session pan started that is still working is refused: "pan-7 is still working; send `@pan done`
+  when it finishes, or `@pan done --discard` to stop it now."
+- pan then looks at the session's worktree (read-only). Work counts as unsaved when the worktree has
+  uncommitted or untracked files (ignored files and the `.claude/settings.json` pan writes there at
+  spawn do not count), or commits its branch's upstream lacks; with no upstream, commits merged into
+  neither the repo's default branch (`origin/HEAD`) nor the branch the main checkout is on (the one
+  pan created the worktree from). With unsaved work pan keeps everything: "pan-7 has 2 uncommitted
+  files and 1 unpushed commit; kept it. Push or commit them, or send `@pan done --discard`."
+- Otherwise pan removes the session's terminal (if it is still there), removes the worktree (forced
+  only with `--discard` or when pan's settings file is all that is left) and deletes the branch
+  (`git branch -D` only with `--discard` or when it has no commits outside the base branches, else
+  `-d`), marks the thread's record done and unties it: "Closed pan-7 and removed its worktree and
+  branch." If the worktree folder is already gone, it closes the session and says so.
+
+`done --discard` skips the working and unsaved-work checks. `pan stop` is still the kill switch: it
+marks the thread failed and leaves the worktree alone.
 
 ### Your own sessions
 
