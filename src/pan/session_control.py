@@ -37,7 +37,7 @@ from pan.spawn import (
     desk_session_ended_reply,
     inbox_thread_name,
     slack_reply_sentence,
-    upgrade_reply_mode,
+    upgraded_reply_mode,
 )
 from pan.transcript import last_assistant_text
 
@@ -344,9 +344,9 @@ def follow_up_to_session(
     # pan's own sessions already know their Inbox thread from their brief. When the session
     # has ended: for pan's own, nothing is posted and TerminalGoneError tells the caller to
     # reopen it; a desk session is never reopened, so pan says it ended.
-    # `reply_in_slack` switches the thread to the reply-in-Slack mode before anything is
-    # typed, so the Stop hook posts this answer; without it the mode is left as it is (a
-    # follow-up never switches a thread back to on demand).
+    # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved right after the
+    # text is typed, so the Stop hook posts this answer; a busy or blocked refusal leaves the
+    # record unchanged. Without it the mode is left as it is (never back to on demand).
     record = thread_map.get(thread_ts)
     if record is None or not record.tied:
         slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
@@ -356,15 +356,19 @@ def follow_up_to_session(
         if not record.started_by_pan:
             slack_post(slack, channel, thread_ts, desk_session_ended_reply(record.terminal_name))
         raise TerminalGoneError(f"the session {record.terminal_name} has ended")
-    record = upgrade_reply_mode(thread_map, record, reply_in_slack=reply_in_slack)
+    reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
 
     typed = text
     if not record.started_by_pan:
         inbox_thread = record.inbox_thread_name or inbox_thread_name(record.terminal_name, text)
         typed = from_slack_text(
-            inbox_thread, text, record.reply_mode, thread_known=inbox_thread_known(record)
+            inbox_thread, text, reply_mode, thread_known=inbox_thread_known(record)
         )
     _deliver(terminal_host, terminal, typed, slack=slack, channel=channel, thread_ts=thread_ts)
+    if reply_mode is not record.reply_mode:
+        thread_map.set_reply_mode(thread_ts, reply_mode, session_name=record.terminal_name)
+        logger.info(f"reply mode set to {reply_mode} thread={thread_ts}")
+        record = record.model_copy(update={"reply_mode": reply_mode})
     if not record.started_by_pan:
         thread_map.update_status(thread_ts, WorkerStatus.RUNNING, session_name=record.terminal_name)
     logger.info(f"follow-up sent terminal={terminal.address} thread={thread_ts} len={len(text)}")

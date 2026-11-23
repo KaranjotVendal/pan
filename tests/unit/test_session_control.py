@@ -1075,3 +1075,29 @@ def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
     )
 
     assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]
+
+
+@pytest.mark.parametrize(
+    ("agent_status", "expected_error"),
+    [(AgentStatus.WORKING, SessionBusyError), (AgentStatus.BLOCKED, TargetBlockedError)],
+    ids=["busy", "blocked"],
+)
+@pytest.mark.parametrize("started_by_pan", [True, False], ids=["pan-session", "desk-session"])
+def test_refused_follow_up_with_reply_in_slack_leaves_the_mode_unchanged(
+    tmp_path: Path,
+    agent_status: AgentStatus,
+    expected_error: type[PanError],
+    started_by_pan: bool,
+) -> None:
+    name, address = ("pan-7", "t7") if started_by_pan else ("desk-api", "t9")
+    record = _record(terminal_name=name, terminal_address=address, started_by_pan=started_by_pan)
+    thread_map = _thread_map(tmp_path, record)
+    terminal_host = _host(make_terminal(address, name=name, agent_status=agent_status))
+
+    with pytest.raises(expected_error):
+        _follow_up(terminal_host, thread_map, RecordingSlack(), reply_in_slack=True)
+
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.reply_mode is ReplyMode.ON_DEMAND
+    assert terminal_host.sent == []

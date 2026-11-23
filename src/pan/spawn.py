@@ -305,16 +305,11 @@ def spawn_worker(
     return record
 
 
-def upgrade_reply_mode(
-    thread_map: ThreadMap, record: ThreadRecord, *, reply_in_slack: bool
-) -> ThreadRecord:
-    # Switch the record to the reply-in-Slack mode when asked and it is not in it yet, and
-    # return the record as it now stands. Never switches back to on demand.
-    if not reply_in_slack or record.reply_mode is ReplyMode.SLACK:
-        return record
-    thread_map.set_reply_mode(record.thread_ts, ReplyMode.SLACK, session_name=record.terminal_name)
-    logger.info(f"reply mode set to slack thread={record.thread_ts} session={record.terminal_name}")
-    return record.model_copy(update={"reply_mode": ReplyMode.SLACK})
+def upgraded_reply_mode(record: ThreadRecord, *, reply_in_slack: bool) -> ReplyMode:
+    # The thread's reply mode once a follow-up or reopen is delivered: the reply-in-Slack mode
+    # when asked, else the record's own. Never back to on demand. Callers save it only after
+    # the delivery succeeds, so a refused or failed one leaves the record as it was.
+    return ReplyMode.SLACK if reply_in_slack else record.reply_mode
 
 
 def reopen_worker(
@@ -333,13 +328,14 @@ def reopen_worker(
     # same name continues the worktree's last Claude conversation with the follow-up task.
     # The binding stays the same thread record (INV-7), tied again; only its terminal and
     # status change. A session pan did not start is never reopened: its folder is not pan's.
-    # `reply_in_slack` switches the thread to the reply-in-Slack mode before the launch, so
-    # the Stop hook posts the answer; without it the mode is left as it is.
+    # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved with the tie once
+    # the launch succeeds, so the Stop hook posts the answer; without it the mode is left as
+    # it is, and a failed reopen changes nothing.
     name = record.terminal_name
     if not record.started_by_pan:
         slack_post(slack, record.channel, record.thread_ts, desk_session_ended_reply(name))
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
-    record = upgrade_reply_mode(thread_map, record, reply_in_slack=reply_in_slack)
+    reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
     try:
         if not record.worktree_path.is_dir():
             raise SpawnError(f"worktree missing for stream {name}")
@@ -364,6 +360,7 @@ def reopen_worker(
             "terminal_address": terminal.address,
             "status": WorkerStatus.SPAWNING,
             "updated_at": clock.now(),
+            "reply_mode": reply_mode,
         }
     )
     thread_map.tie(reopened)

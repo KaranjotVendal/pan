@@ -273,9 +273,9 @@ for it.
       pan send --thread <thread_ts> --channel <channel> --task '<cleaned_text>' [--reply-in-slack]
 
   Pass `--reply-in-slack` under the same rule as everywhere else (step 2, "Reply in Slack by
-  meaning"; a follow-up such as "reply back with the link" or "post it here" counts). It switches
-  the thread's reply mode to Slack before the text is typed, so the session's answer is posted to
-  the thread. With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
+  meaning"; a follow-up such as "reply back with the link" or "post it here" counts). Once the text
+  is typed it switches the thread's reply mode to Slack, so the session's answer is posted to the
+  thread; a refused send leaves the mode as it was. With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
   the `:eyes:` reaction already acknowledged the message. A busy session (exit 26) or one waiting on
   a prompt (exit 23) gets a short reply from `pan send` itself, and nothing is typed: do nothing
   more. Exit 22 means the session has ended: when `pan threads get` shows `started_by_pan` true,

@@ -76,10 +76,12 @@ as it works (see `AGENT_LOOP.md` step 9).
   and `to` sends are unchanged.
 - A follow-up can turn on replies in Slack. `pan send` without `--to` (`follow_up_to_session`) and
   `pan reopen` (`reopen_worker`) take `--reply-in-slack`: it sets the thread record's reply mode to
-  slack (the new `ThreadMap.set_reply_mode`, via `upgrade_reply_mode`) before anything is typed or
-  launched, so the Stop hook posts the session's answer to the thread, and the mode stays for the
-  thread. Without the flag the mode is left as it is; it never goes back to on demand. A desk
-  session's typed "from Slack" line uses the mode as it now stands. SKILL.md step (b) passes the
+  slack (`upgraded_reply_mode`), saved only once the delivery succeeds: right after the text is
+  typed (the new `ThreadMap.set_reply_mode`), or with the reopened record's tie after the launch.
+  The Stop hook then posts the session's answer to the thread, and the mode stays for the thread.
+  A busy or blocked refusal, or a failed reopen, leaves the record unchanged. Without the flag the
+  mode is left as it is; it never goes back to on demand. A desk session's typed "from Slack" line
+  uses the new mode. SKILL.md step (b) passes the
   flag on follow-ups and reopens under the same "reply in Slack by meaning" rule ("reply back with
   the link", "post it here"). Before, a follow-up such as "reply back with the link" in a thread
   started without it reached the session but its answer stayed in the terminal.
