@@ -29,16 +29,18 @@ def notification_hook(
     slack: SlackAdapter,
     *,
     stdin: TextIO = sys.stdin,
+    session_name: str | None = None,
 ) -> None:
     # Questions go to the session's Inbox thread, so this only marks the thread BLOCKED; it
-    # posts the prompt to Slack only when the thread asked for replies in Slack.
+    # posts the prompt to Slack only when the thread, still tied to this session, asked for
+    # replies in Slack. `session_name` picks this session's record in the thread.
     payload = NotificationHookPayload.model_validate_json(stdin.read())
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(thread_ts, session_name=session_name)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
 
-    if record.reply_mode is ReplyMode.SLACK:
+    if record.tied and record.reply_mode is ReplyMode.SLACK:
         question = payload.message or _DEFAULT_QUESTION
         slack_post(slack, channel, thread_ts, question)
-    thread_map.update_status(thread_ts, WorkerStatus.BLOCKED)
+    thread_map.update_status(thread_ts, WorkerStatus.BLOCKED, session_name=record.terminal_name)
     logger.info(f"notification hook thread={thread_ts} status=blocked")

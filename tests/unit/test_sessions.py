@@ -79,6 +79,25 @@ def test_collect_sessions_joins_pan_owned_terminals(terminal: object, record: Th
     assert summary.drift is False
 
 
+def test_collect_sessions_shows_a_tied_desk_session_as_external_with_its_thread() -> None:
+    terminal = make_terminal("t9", name="desk-api", cwd=Path("/tmp/desk/api"))
+    desk_record = _record("t-1", "desk-api", "t9", "/tmp/desk/api").model_copy(
+        update={"started_by_pan": False}
+    )
+    other_terminal = make_terminal("t10", cwd=Path("/tmp/desk/api"))
+
+    desk_summary, other_summary = collect_sessions(
+        _terminal_host_with(terminal, other_terminal), FakeThreadMap([desk_record])
+    )
+
+    assert desk_summary.is_pan_owned is False
+    assert desk_summary.thread_ts == "t-1"
+    assert desk_summary.pan_status is None
+    assert desk_summary.drift is False
+    # Another terminal in the desk session's folder is not joined to its record.
+    assert other_summary.thread_ts is None
+
+
 def test_collect_sessions_marks_external_terminal() -> None:
     terminal = make_terminal(
         "t2",

@@ -17,7 +17,13 @@ from pan.config import (
     WORKER_ROLE,
 )
 from pan.directive import wants_slack_reply
-from pan.errors import SpawnError, TerminalGoneError, TerminalHostError, TerminalNameTakenError
+from pan.errors import (
+    NotPanSessionError,
+    SpawnError,
+    TerminalGoneError,
+    TerminalHostError,
+    TerminalNameTakenError,
+)
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import (
@@ -105,6 +111,13 @@ def start_notice(terminal_name: str, inbox_thread: str, reply_mode: ReplyMode) -
     if reply_mode is ReplyMode.SLACK:
         notice = f"{notice} · answers will also be posted here"
     return notice
+
+
+def desk_session_ended_reply(name: str) -> str:
+    return (
+        f"{name} has ended, and pan does not reopen sessions it did not start; "
+        "start one with @pan new: <task>, or send to another with @pan to <name>: <task>"
+    )
 
 
 def worker_labels(thread_ts: str, channel: str, app_space: str | None) -> dict[str, str]:
@@ -254,8 +267,11 @@ def reopen_worker(
     # Reopen a finished or lost worker in its existing worktree: a new terminal under the
     # same name continues the worktree's last Claude conversation with the follow-up task.
     # The binding stays the same thread record (INV-7), tied again; only its terminal and
-    # status change.
+    # status change. A session pan did not start is never reopened: its folder is not pan's.
     name = record.terminal_name
+    if not record.started_by_pan:
+        slack_post(slack, record.channel, record.thread_ts, desk_session_ended_reply(name))
+        raise NotPanSessionError(f"{name} was not started by pan; not reopened")
     try:
         if not record.worktree_path.is_dir():
             raise SpawnError(f"worktree missing for stream {name}")

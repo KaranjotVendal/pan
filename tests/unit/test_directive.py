@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import parse_directive, parse_route, wants_slack_reply
-from pan.models import Agent, Route, RouteKind, TaskMode
+from pan.directive import X_TO_ROUTE_NOTICE, parse_directive, parse_route, wants_slack_reply
+from pan.models import Agent, Route, RouteKind, TaskMode, ThreadSource
 
 
 @pytest.mark.parametrize(
@@ -490,3 +490,25 @@ _BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instea
 )
 def test_parse_route(raw_text: str, expected_route: Route) -> None:
     assert parse_route(raw_text) == expected_route
+
+
+@pytest.mark.parametrize(
+    "raw_text, expected_route",
+    [
+        (
+            "to desk-api: delete the branch",
+            Route(kind=RouteKind.NOTICE, session="desk-api", notice=X_TO_ROUTE_NOTICE),
+        ),
+        (
+            "<@U0TEST> to pan-7: add the tests",
+            Route(kind=RouteKind.NOTICE, session="pan-7", notice=X_TO_ROUTE_NOTICE),
+        ),
+        ("new: summarize the post", Route(kind=RouteKind.NEW, text="summarize the post")),
+        ("summarize the post", Route(text="summarize the post")),
+    ],
+    ids=["to-desk-session", "to-pan-session", "new-allowed", "plain-task-allowed"],
+)
+def test_parse_route_from_x_never_reaches_an_existing_session(
+    raw_text: str, expected_route: Route
+) -> None:
+    assert parse_route(raw_text, ThreadSource.X) == expected_route

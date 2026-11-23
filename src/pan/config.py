@@ -57,6 +57,11 @@ SESSION_LAST_ASK_MAX_LENGTH = 80
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.
 PLANNOTATOR_INBOX_TOOL_NAME = "mcp__plannotator__plannotator_inbox"
+# Looking up a desk session's Inbox thread by name (`plannotator inbox call read_thread`) lists
+# this many of the project's open threads, and gives up after this many seconds so `check` and
+# `send` never hang on the Inbox.
+INBOX_LOOKUP_THREAD_LIMIT = 50
+INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -107,7 +112,8 @@ The commands above are terminal commands (pan <command>). From Slack, say these:
   <task>                     in a new thread, start a session in a new worktree;
                              in a tied thread, send it to the tied session
   new: <task>                start a new session even in a tied thread (the tie moves)
-  to <name>: <task>          send to the live pan session <name>; tie this thread to it
+  to <name>: <task>          send to the live session <name> (pan's or yours) if it is
+                             idle; tie this thread to it
   check                      post the tied session's latest answer here
   sessions                   list live sessions: name, idle or busy, last ask
                              (--sessions works too)

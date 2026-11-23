@@ -13,6 +13,21 @@ from pan.seams import Clock
 logger = initialise_logger(__name__)
 
 
+def record_key(record: ThreadRecord) -> str:
+    # One record per (thread, session): a thread may hold several records (only one tied),
+    # so a session that loses its thread to `new:` or `to <name>:` keeps its record, untied,
+    # and its hooks still find it. The source keeps a Slack thread and an X post apart.
+    return f"{record.source.value}:{record.thread_ts}:{record.terminal_name}"
+
+
+def _current(candidates: list[ThreadRecord]) -> ThreadRecord | None:
+    # The tied record wins; otherwise the most recently updated one.
+    for record in candidates:
+        if record.tied:
+            return record
+    return max(candidates, key=lambda record: record.updated_at) if candidates else None
+
+
 class FileThreadMap:
     def __init__(self, threads_path: Path, clock: Clock) -> None:
         self._threads_path = threads_path
@@ -24,28 +39,52 @@ class FileThreadMap:
         # routing — validate each record individually and skip the ones that fail.
         # Skipped records are dropped on the next _write_all; that is acceptable
         # because they are invalid/legacy and can no longer be routed to anyway.
+        # Keys are rebuilt from each record (record_key), so a file written when records
+        # were keyed by thread alone migrates on its next write.
         if not self._threads_path.exists():
             return {}
         raw_records = json.loads(self._threads_path.read_text())
         records: dict[str, ThreadRecord] = {}
-        for thread_ts, record in raw_records.items():
+        for stored_key, record in raw_records.items():
             try:
-                records[thread_ts] = ThreadRecord.model_validate(record)
+                parsed = ThreadRecord.model_validate(record)
             except ValidationError:
-                logger.warning(f"threadmap skipping unparseable record thread={thread_ts}")
+                logger.warning(f"threadmap skipping unparseable record key={stored_key}")
+                continue
+            records[record_key(parsed)] = parsed
         return records
 
     def _write_all(self, records: dict[str, ThreadRecord]) -> None:
-        payload = {
-            thread_ts: record.model_dump(mode="json") for thread_ts, record in records.items()
-        }
+        payload = {key: record.model_dump(mode="json") for key, record in records.items()}
         self._threads_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self._threads_path.with_name(self._threads_path.name + ".tmp")
         temp_path.write_text(json.dumps(payload))
         temp_path.replace(self._threads_path)
 
-    def get(self, thread_ts: str) -> ThreadRecord | None:
-        return self._read_all().get(thread_ts)
+    def _select(
+        self, records: dict[str, ThreadRecord], thread_ts: str, session_name: str | None
+    ) -> ThreadRecord | None:
+        # The thread's record of the session `session_name` when named, else the thread's current record.
+        return _current(
+            [
+                record
+                for record in records.values()
+                if record.thread_ts == thread_ts
+                and (session_name is None or record.terminal_name == session_name)
+            ]
+        )
+
+    def _require(
+        self, records: dict[str, ThreadRecord], thread_ts: str, session_name: str | None
+    ) -> ThreadRecord:
+        record = self._select(records, thread_ts, session_name)
+        if record is None:
+            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+        return record
+
+    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None:
+        # The thread's tied record (else its newest), or the thread's record of `session_name`.
+        return self._select(self._read_all(), thread_ts, session_name)
 
     def records(self) -> list[ThreadRecord]:
         # All current bindings, for the reconcile view (collect_sessions) to left-join
@@ -57,41 +96,42 @@ class FileThreadMap:
         # map stays the single source of truth (INV-7). Compare RESOLVED paths so a
         # symlinked prefix between the stored path and the hook's cwd still matches
         # (on macOS /tmp -> /private/tmp). Resolving both sides here keeps the CLI hook
-        # boundary free of path normalization. A tied record wins over an untied one (a
-        # session tied elsewhere leaves its old thread untied); otherwise first match wins.
+        # boundary free of path normalization. Only sessions pan started run pan's hooks, so
+        # desk-session records (whose folder is not pan's) never match. A tied record wins;
+        # otherwise the newest.
         target = worktree_path.resolve()
-        matches = [
-            record
-            for record in self._read_all().values()
-            if record.worktree_path.resolve() == target
-        ]
-        for record in matches:
-            if record.tied:
-                return record
-        return matches[0] if matches else None
+        return _current(
+            [
+                record
+                for record in self._read_all().values()
+                if record.started_by_pan and record.worktree_path.resolve() == target
+            ]
+        )
 
     def put(self, record: ThreadRecord) -> None:
         records = self._read_all()
-        records[record.thread_ts] = record
+        records[record_key(record)] = record
         self._write_all(records)
         logger.info(f"threadmap put thread={record.thread_ts} status={record.status}")
 
     def tie(self, record: ThreadRecord) -> None:
-        # Store the record as its thread's tie. One thread per session: any other thread
-        # still tied to the same session (same terminal name) is untied, and keeps its
-        # record so its history stays readable.
+        # Store the record as its thread's tie. One thread per session and one session per
+        # thread: any other thread tied to the same session (same terminal name) is untied,
+        # and so is the thread's previous session. Both keep their records, so their history
+        # stays readable and their hooks still find them.
         records = self._read_all()
         now = self._clock.now()
-        for thread_ts, other in records.items():
-            if (
-                thread_ts != record.thread_ts
-                and other.tied
-                and other.terminal_name == record.terminal_name
-            ):
+        key = record_key(record)
+        for other_key, other in records.items():
+            if other_key == key or not other.tied:
+                continue
+            if other.terminal_name == record.terminal_name or other.thread_ts == record.thread_ts:
                 other.tied = False
                 other.updated_at = now
-                logger.info(f"threadmap untie thread={thread_ts} session moved")
-        records[record.thread_ts] = record.model_copy(update={"tied": True})
+                logger.info(
+                    f"threadmap untie thread={other.thread_ts} session={other.terminal_name}"
+                )
+        records[key] = record.model_copy(update={"tied": True})
         self._write_all(records)
         logger.info(f"threadmap tie thread={record.thread_ts} status={record.status}")
 
@@ -99,52 +139,59 @@ class FileThreadMap:
         # The thread stops routing follow-ups to its session. The session itself is never
         # touched.
         records = self._read_all()
-        record = records.get(thread_ts)
-        if record is None:
-            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
-
-        record.tied = False
-        record.updated_at = self._clock.now()
+        self._require(records, thread_ts, None)
+        now = self._clock.now()
+        for record in records.values():
+            if record.thread_ts == thread_ts and record.tied:
+                record.tied = False
+                record.updated_at = now
         self._write_all(records)
         logger.info(f"threadmap untie thread={thread_ts}")
 
-    def record_inbox_thread(self, thread_ts: str, inbox_thread_id: str, url: str) -> None:
-        # Written by the worker's inbox-link hook once its first Inbox send returns.
+    def record_inbox_thread(
+        self,
+        thread_ts: str,
+        inbox_thread_id: str,
+        url: str | None,
+        *,
+        session_name: str | None = None,
+    ) -> None:
+        # Written by the worker's inbox-link hook once its first Inbox send returns, or by a
+        # lookup by name (a desk session has no hooks); a lookup may find no link.
         records = self._read_all()
-        record = records.get(thread_ts)
-        if record is None:
-            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
-
+        record = self._require(records, thread_ts, session_name)
         record.inbox_thread_id = inbox_thread_id
-        record.inbox_thread_url = url
+        if url is not None:
+            record.inbox_thread_url = url
         record.updated_at = self._clock.now()
         self._write_all(records)
         logger.info(f"threadmap inbox thread recorded thread={thread_ts}")
 
-    def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
+    def update_status(
+        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None:
         records = self._read_all()
-        record = records.get(thread_ts)
-        if record is None:
-            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
-
+        record = self._require(records, thread_ts, session_name)
         record.status = status
         record.updated_at = self._clock.now()
-        records[thread_ts] = record
         self._write_all(records)
         logger.info(f"threadmap update thread={thread_ts} status={status}")
 
-    def record_session(self, thread_ts: str, session_id: str, transcript_path: Path | None) -> None:
+    def record_session(
+        self,
+        thread_ts: str,
+        session_id: str,
+        transcript_path: Path | None,
+        *,
+        session_name: str | None = None,
+    ) -> None:
         # Written by the worker's SessionStart hook: the Claude session id and transcript
         # path that `pan read --full` renders. A resumed or cleared session overwrites them.
         records = self._read_all()
-        record = records.get(thread_ts)
-        if record is None:
-            raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
-
+        record = self._require(records, thread_ts, session_name)
         record.claude_session_id = session_id
         record.transcript_path = transcript_path
         record.updated_at = self._clock.now()
-        records[thread_ts] = record
         self._write_all(records)
         logger.info(f"threadmap session thread={thread_ts}")
 

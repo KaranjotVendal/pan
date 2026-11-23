@@ -25,7 +25,9 @@ class FakeThreadMap:
         self.records: dict[str, ThreadRecord] = {}
         self.status_updates: list[tuple[str, WorkerStatus]] = []
         self.sessions: list[tuple[str, str, Path | None]] = []
-        self.inbox_threads: list[tuple[str, str, str]] = []
+        self.inbox_threads: list[tuple[str, str, str | None]] = []
+        # The session name each update named, so a test can see which record was picked.
+        self.updated_session_names: list[str | None] = []
         if seed_thread is not None:
             now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
             self.records[seed_thread] = ThreadRecord(
@@ -40,20 +42,42 @@ class FakeThreadMap:
                 inbox_thread_name="pan-task: do the thing",
             )
 
-    def get(self, thread_ts: str) -> ThreadRecord | None:
-        return self.records.get(thread_ts)
+    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None:
+        record = self.records.get(thread_ts)
+        if record is None or (session_name is not None and record.terminal_name != session_name):
+            return None
+        return record
 
     def put(self, record: ThreadRecord) -> None:  # pragma: no cover
         self.records[record.thread_ts] = record
 
-    def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
+    def update_status(
+        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None:
         self.status_updates.append((thread_ts, status))
+        self.updated_session_names.append(session_name)
 
-    def record_session(self, thread_ts: str, session_id: str, transcript_path: Path | None) -> None:
+    def record_session(
+        self,
+        thread_ts: str,
+        session_id: str,
+        transcript_path: Path | None,
+        *,
+        session_name: str | None = None,
+    ) -> None:
         self.sessions.append((thread_ts, session_id, transcript_path))
+        self.updated_session_names.append(session_name)
 
-    def record_inbox_thread(self, thread_ts: str, inbox_thread_id: str, url: str) -> None:
+    def record_inbox_thread(
+        self,
+        thread_ts: str,
+        inbox_thread_id: str,
+        url: str | None,
+        *,
+        session_name: str | None = None,
+    ) -> None:
         self.inbox_threads.append((thread_ts, inbox_thread_id, url))
+        self.updated_session_names.append(session_name)
         record = self.records[thread_ts]
         self.records[thread_ts] = record.model_copy(
             update={"inbox_thread_id": inbox_thread_id, "inbox_thread_url": url}
@@ -95,6 +119,35 @@ def test_stop_hook_in_reply_in_slack_mode_posts_and_marks_idle() -> None:
 
     assert slack.posts == [("C1", _THREAD, "Worker finished.")]
     assert thread_map.status_updates == [(_THREAD, WorkerStatus.IDLE)]
+
+
+@pytest.mark.parametrize(
+    "hook, payload",
+    [
+        (stop_hook, {"hook_event_name": "Stop", "transcript_path": None}),
+        (notification_hook, {"hook_event_name": "Notification", "message": "q"}),
+    ],
+    ids=["stop", "notification"],
+)
+def test_hook_of_a_session_whose_thread_moved_on_only_updates_its_own_record(
+    hook: object, payload: dict
+) -> None:
+    # The thread was tied to another session (new: or to <name>:), so this session's record
+    # is untied: its hooks still reach it by session name but post nothing to the thread.
+    thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
+    thread_map.records[_THREAD] = thread_map.records[_THREAD].model_copy(update={"tied": False})
+
+    hook(  # type: ignore[operator]
+        _THREAD,
+        "C1",
+        thread_map,
+        slack,
+        stdin=io.StringIO(json.dumps(payload)),
+        session_name="pan-task",
+    )
+
+    assert slack.posts == []
+    assert thread_map.updated_session_names == ["pan-task"]
 
 
 def test_stop_hook_falls_back_to_default_when_transcript_missing(tmp_path: Path) -> None:

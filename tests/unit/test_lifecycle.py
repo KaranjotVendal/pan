@@ -36,8 +36,12 @@ class FakeThreadMap:
     def records(self) -> list[ThreadRecord]:
         return list(self._records.values())
 
-    def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
-        self._records[thread_ts].status = status
+    def update_status(
+        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None:
+        record = self._records[thread_ts]
+        assert session_name == record.terminal_name
+        record.status = status
 
     def status_of(self, thread_ts: str) -> WorkerStatus:
         return self._records[thread_ts].status

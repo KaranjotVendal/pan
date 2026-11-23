@@ -14,10 +14,11 @@ from typer._click.exceptions import ClickException
 
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
+from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.adapters.terminal_host import build_terminal_host
 from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_directive, parse_route
+from pan.directive import parse_directive, parse_route, route_for_source
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -25,6 +26,7 @@ from pan.errors import (
     InboxError,
     NotPanSessionError,
     PanError,
+    SessionBusyError,
     SlackPostError,
     SpawnError,
     TargetAmbiguousError,
@@ -46,9 +48,14 @@ from pan.inbox import FileInboxStore
 from pan.interface import read_session, relay_to_session
 from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
-from pan.models import PanConfig, SessionSummary, SlackCredentials, WorkerStatus
+from pan.models import InboxItem, PanConfig, Route, SessionSummary, SlackCredentials, WorkerStatus
 from pan.seams import SlackAdapter, ThreadMap
-from pan.session_control import check_thread, forget_thread, send_to_session
+from pan.session_control import (
+    check_thread,
+    follow_up_to_session,
+    forget_thread,
+    send_to_session,
+)
 from pan.sessions import collect_sessions, worker_status_for
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.threadmap import FileThreadMap, tie_note
@@ -86,6 +93,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     TargetBlockedError: 23,
     TerminalNameTakenError: 24,
     NotPanSessionError: 25,
+    SessionBusyError: 26,
 }
 
 
@@ -151,6 +159,13 @@ def config_show() -> None:
     typer.echo(credentials.model_dump_json())
 
 
+def _item_route(item: InboxItem) -> Route:
+    # The route the gateway parsed (parsed here for an item an older gateway wrote), held to
+    # the routes the item's source may use.
+    route = item.route if item.route is not None else parse_route(item.raw_text, item.source)
+    return route_for_source(route, item.source)
+
+
 @inbox_app.command("drain")
 def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit the items (JSON for the orchestrator)."""
@@ -165,7 +180,7 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     if as_json:
         payload = []
         for item in items:
-            route = item.route if item.route is not None else parse_route(item.raw_text)
+            route = _item_route(item)
             record = thread_map.get(item.thread_ts)
             note = tie_note(record)
             tie = None
@@ -187,7 +202,7 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
         typer.echo(json.dumps(payload))
         return
     for item in items:
-        route = item.route if item.route is not None else parse_route(item.raw_text)
+        route = _item_route(item)
         directive = parse_directive(route.text)
         typer.echo(
             f"{item.id} {item.channel} {item.thread_ts} {route.kind.value} {directive.mode.value}"
@@ -333,6 +348,7 @@ def _dispatch_completion_hook(
         thread_map,
         slack,
         stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
     )
 
 
@@ -356,7 +372,12 @@ def hook_session_start() -> None:
     if record is None:
         logger.warning("session-start hook: no thread record for cwd")
         return
-    session_start_hook(record.thread_ts, thread_map, stdin=io.StringIO(raw_stdin))
+    session_start_hook(
+        record.thread_ts,
+        thread_map,
+        stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
+    )
 
 
 @hook_app.command("stop")
@@ -377,7 +398,12 @@ def _dispatch_inbox_link_hook(raw_stdin: str, thread_map: ThreadMap) -> None:
     if record is None:
         logger.warning("inbox-link hook: no thread record for cwd")
         return
-    inbox_link_hook(record.thread_ts, thread_map, stdin=io.StringIO(raw_stdin))
+    inbox_link_hook(
+        record.thread_ts,
+        thread_map,
+        stdin=io.StringIO(raw_stdin),
+        session_name=record.terminal_name,
+    )
 
 
 @hook_app.command("inbox-link")
@@ -466,14 +492,15 @@ def check(
     channel: str = typer.Option(..., "--channel"),
 ) -> None:
     """Post the thread's tied session's latest answer to the thread, as is: the last answer in
-    its transcript, or its recent screen lines. Names its Inbox thread and says if it is still
-    working or waiting on a prompt."""
+    its transcript, or its recent screen lines. Names its Inbox thread (looked up by name for a
+    session pan did not start) and says if it is still working or waiting on a prompt."""
     config = _config()
     check_thread(
         thread_ts=thread,
         channel=channel,
         thread_map=FileThreadMap(config.paths.threads, SystemClock()),
         terminal_host=build_terminal_host(config.terminal_host),
+        inbox_directory=ShellPlannotatorInboxAdapter(),
         slack=_slack_adapter(config),
         screen_lines=READ_RECENT_LINES,
     )
@@ -498,18 +525,33 @@ def forget(
 def send(
     thread: str = typer.Option(..., "--thread"),
     channel: str = typer.Option(..., "--channel"),
-    to: str = typer.Option(..., "--to", help="the live session's name or address"),
+    to: str | None = typer.Option(
+        None, "--to", help="a live session's name or address; omit to send to the tied session"
+    ),
     task: str = typer.Option(..., "--task"),
     requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
 ) -> None:
-    """Send a task to a live session pan started and tie the thread to it; post a notice
-    naming its Inbox thread. An unknown, ambiguous, blocked or non-pan session gets a short
-    reply and nothing is sent."""
+    """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
+    a notice naming its Inbox thread. Without --to, send a follow-up to the thread's tied
+    session. A busy, blocked, unknown or ambiguous session gets a short reply and nothing is
+    typed; a session pan did not start gets one line on top saying the text came from Slack."""
     config = _config()
     clock = SystemClock()
+    thread_map = FileThreadMap(config.paths.threads, clock)
+    terminal_host = build_terminal_host(config.terminal_host)
+    if to is None:
+        follow_up_to_session(
+            thread_ts=thread,
+            channel=channel,
+            text=task,
+            terminal_host=terminal_host,
+            thread_map=thread_map,
+            slack=_slack_adapter(config),
+        )
+        return
     send_to_session(
         thread_ts=thread,
         channel=channel,
@@ -517,8 +559,9 @@ def send(
         text=task,
         requester=requester,
         reply_in_slack=reply_in_slack,
-        terminal_host=build_terminal_host(config.terminal_host),
-        thread_map=FileThreadMap(config.paths.threads, clock),
+        terminal_host=terminal_host,
+        thread_map=thread_map,
+        inbox_directory=ShellPlannotatorInboxAdapter(),
         slack=_slack_adapter(config),
         clock=clock,
     )
@@ -566,15 +609,23 @@ def read(
 
 @app.command()
 def stop(thread: str = typer.Option(..., "--thread")) -> None:
-    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED."""
+    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED.
+    Refuses for a session pan did not start: it only unties the thread and never stops it."""
     config = _config()
     thread_map = FileThreadMap(config.paths.threads, SystemClock())
     record = thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
+    if not record.started_by_pan:
+        if record.tied:
+            thread_map.untie(thread)
+        raise NotPanSessionError(
+            f"{record.terminal_name} was not started by pan, so pan never stops it; "
+            "this thread is untied from it"
+        )
     if record.terminal_address:
         build_terminal_host(config.terminal_host).remove(record.terminal_address)
-    thread_map.update_status(thread, WorkerStatus.FAILED)
+    thread_map.update_status(thread, WorkerStatus.FAILED, session_name=record.terminal_name)
     typer.echo(f"stopped {thread}")
 
 

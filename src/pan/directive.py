@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from pan.models import Agent, Directive, Route, RouteKind, TaskMode
+from pan.models import Agent, Directive, Route, RouteKind, TaskMode, ThreadSource
 
 _VALID_AGENTS = {member.value for member in Agent}
 
@@ -172,6 +172,9 @@ _RETIRED_FLAG_NOTICES = {
 }
 _RETIRED_BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instead"
 _EMPTY_NEW_NOTICE = "new: needs a task after it, as in @pan new: <task>"
+# Text from X is someone else's text, so it must never steer a session that already exists:
+# until the X safety gate (MOB-87) is in place, X may only start new sessions.
+X_TO_ROUTE_NOTICE = "messages from X cannot use to <name>: yet; they can only start new sessions"
 
 
 def _retired_flag_notice(text: str) -> str | None:
@@ -184,8 +187,21 @@ def _retired_flag_notice(text: str) -> str | None:
     return None
 
 
-def parse_route(raw_text: str) -> Route:
+def route_for_source(route: Route, source: ThreadSource) -> Route:
+    # The routes a front door may use. X may not use `to <name>:` (see X_TO_ROUTE_NOTICE).
+    # Applied at parse time and again at drain, so a route an older gateway wrote is held to
+    # the same rule.
+    if source is ThreadSource.X and route.kind is RouteKind.TO:
+        return Route(kind=RouteKind.NOTICE, session=route.session, notice=X_TO_ROUTE_NOTICE)
+    return route
+
+
+def parse_route(raw_text: str, source: ThreadSource = ThreadSource.SLACK) -> Route:
     # Pure string logic (INV-3), run by the gateway so the route travels on the inbox item.
+    return route_for_source(_parse_route_words(raw_text), source)
+
+
+def _parse_route_words(raw_text: str) -> Route:
     text = _clean_message(raw_text)
     reply_in_slack = wants_slack_reply(text)
 

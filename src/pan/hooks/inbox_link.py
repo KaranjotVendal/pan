@@ -71,7 +71,13 @@ def _sent_thread_name(raw_payload: str) -> str | None:
     return thread_name if isinstance(thread_name, str) else None
 
 
-def inbox_link_hook(thread_ts: str, thread_map: ThreadMap, *, stdin: TextIO = sys.stdin) -> None:
+def inbox_link_hook(
+    thread_ts: str,
+    thread_map: ThreadMap,
+    *,
+    stdin: TextIO = sys.stdin,
+    session_name: str | None = None,
+) -> None:
     # Record the worker's Inbox thread id and link on its thread record. Never posts to
     # Slack: the link is shown later by `check`. The first link wins, unless a later send
     # names the record's own Inbox thread (the worker may also write in other threads).
@@ -80,7 +86,7 @@ def inbox_link_hook(thread_ts: str, thread_map: ThreadMap, *, stdin: TextIO = sy
     if link is None:
         logger.info(f"inbox-link hook found no thread link thread={thread_ts}")
         return
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(thread_ts, session_name=session_name)
     if record is None:
         logger.warning(f"inbox-link hook: no thread record thread={thread_ts}")
         return
@@ -91,5 +97,7 @@ def inbox_link_hook(thread_ts: str, thread_map: ThreadMap, *, stdin: TextIO = sy
     if record.inbox_thread_id is not None and not names_own_thread:
         logger.info(f"inbox-link hook kept the recorded link thread={thread_ts}")
         return
-    thread_map.record_inbox_thread(thread_ts, link.thread_id, link.url)
+    thread_map.record_inbox_thread(
+        thread_ts, link.thread_id, link.url, session_name=record.terminal_name
+    )
     logger.info(f"inbox-link hook recorded the Inbox thread thread={thread_ts}")

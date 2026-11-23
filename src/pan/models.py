@@ -139,6 +139,8 @@ class ThreadRecord(BaseModel):
     terminal_name: str
     terminal_address: str = ""
     channel: str
+    # The worker's worktree; for a session pan did not start (started_by_pan False), the
+    # session's own folder, which pan never removes.
     worktree_path: Path
     agent: Agent = Agent.CLAUDE
     # Recorded by the worker's SessionStart hook; used by `pan read --full`.
@@ -189,6 +191,14 @@ class Terminal(BaseModel, frozen=True):
     state: TerminalState
     agent: str | None = None
     agent_status: AgentStatus
+
+
+class InboxThread(BaseModel, frozen=True):
+    # One Plannotator Inbox thread found by name. `url` is None when the Inbox listing
+    # carries no link for it.
+    thread_id: str
+    name: str
+    url: str | None = None
 
 
 class TerminalRead(BaseModel, frozen=True):

@@ -19,6 +19,7 @@ from pan.errors import (
     InboxError,
     NotPanSessionError,
     PanError,
+    SessionBusyError,
     SlackPostError,
     SpawnError,
     TargetAmbiguousError,
@@ -43,6 +44,7 @@ from pan.models import (
     SessionSummary,
     SlackCredentials,
     ThreadRecord,
+    ThreadSource,
     WorkerStatus,
 )
 from pan.threadmap import FileThreadMap
@@ -544,6 +546,37 @@ def test_stop_removes_the_terminal_and_marks_failed(
     assert stopped.status is WorkerStatus.FAILED
 
 
+def test_stop_never_stops_a_session_pan_did_not_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    desk_record = _record("t-1", terminal_address="t9").model_copy(
+        update={"terminal_name": "desk-api", "started_by_pan": False, "status": WorkerStatus.IDLE}
+    )
+    thread_map.tie(desk_record)
+    terminal_host = _use_terminal_host(
+        monkeypatch, _terminal_host_with(make_terminal("t9", name="desk-api"))
+    )
+
+    result = runner.invoke(cli.app, ["stop", "--thread", "t-1"])
+
+    assert isinstance(result.exception, NotPanSessionError)
+    assert terminal_host.removed == []
+    assert "t9" in terminal_host.terminals
+    kept = thread_map.get("t-1")
+    assert kept is not None
+    assert kept.tied is False
+    assert kept.status is WorkerStatus.IDLE
+
+
+def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
+    terminal_host = FakeTerminalHost()
+    for terminal in terminals:
+        terminal_host.add(terminal)
+    return terminal_host
+
+
 @pytest.mark.parametrize(
     "error, expected_code",
     [
@@ -563,6 +596,7 @@ def test_stop_removes_the_terminal_and_marks_failed(
         (TargetBlockedError("x"), 23),
         (TerminalNameTakenError("x"), 24),
         (NotPanSessionError("x"), 25),
+        (SessionBusyError("x"), 26),
         (PanError("x"), 1),
     ],
 )
@@ -584,8 +618,12 @@ class _HookThreadMap:
         self._record = record
         self.status_updates: list[tuple[str, WorkerStatus]] = []
 
-    def get(self, thread_ts: str) -> ThreadRecord | None:
-        return self._record if thread_ts == self._record.thread_ts else None
+    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None:
+        if thread_ts != self._record.thread_ts:
+            return None
+        if session_name is not None and session_name != self._record.terminal_name:
+            return None
+        return self._record
 
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
         return self._record if worktree_path == self._record.worktree_path else None
@@ -593,7 +631,9 @@ class _HookThreadMap:
     def put(self, record: ThreadRecord) -> None:  # pragma: no cover
         raise NotImplementedError
 
-    def update_status(self, thread_ts: str, status: WorkerStatus) -> None:
+    def update_status(
+        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None:
         self.status_updates.append((thread_ts, status))
 
 
@@ -904,3 +944,47 @@ def test_send_command_wires_to_send_to_session(
     assert captured["reply_in_slack"] is True
     assert captured["terminal_host"] is terminal_host
     assert captured["slack"] is slack
+
+
+def test_send_command_without_a_session_name_follows_up_to_the_tied_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "follow_up_to_session", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: pytest.fail("not a to-route"))
+
+    result = runner.invoke(
+        cli.app, ["send", "--thread", "t-1", "--channel", "C0TEST", "--task", "and the docs"]
+    )
+
+    assert result.exit_code == 0
+    assert captured["thread_ts"] == "t-1"
+    assert captured["text"] == "and the docs"
+    assert captured["terminal_host"] is terminal_host
+    assert captured["slack"] is slack
+
+
+def test_inbox_drain_refuses_a_to_route_from_x(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    item = _item("Ev1").model_copy(
+        update={
+            "source": ThreadSource.X,
+            "raw_text": "to desk-api: delete the branch",
+            "route": Route(kind=RouteKind.TO, session="desk-api", text="delete the branch"),
+        }
+    )
+    FileInboxStore(config.paths.inbox).append(item)
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    (entry,) = json.loads(result.stdout)
+    assert entry["route"]["kind"] == "notice"
+    assert entry["route"]["notice"] == (
+        "messages from X cannot use to <name>: yet; they can only start new sessions"
+    )

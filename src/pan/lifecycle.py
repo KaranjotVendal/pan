@@ -74,7 +74,9 @@ def reconcile_lost_workers(terminal_host: TerminalHost, thread_map: ThreadMap) -
     # Mark FAILED every record that expects a live worker whose terminal is gone (killed,
     # crashed, or lost to a reboot: the host recovers no worker, since hc workers run
     # without --keep). A later follow-up in the thread reopens in the same worktree. Nothing
-    # is posted to Slack here; reporting stuck states belongs to the planned heartbeat.
+    # is posted to Slack here; reporting stuck states belongs to the planned heartbeat. This
+    # only rewrites records: no terminal is ever stopped or removed, so a desk session whose
+    # terminal is gone is just marked FAILED.
     lost: list[str] = []
     for record in thread_map.records():
         if record.status not in _LIVE_STATUSES:
@@ -84,7 +86,9 @@ def reconcile_lost_workers(terminal_host: TerminalHost, thread_map: ThreadMap) -
         )
         if terminal is not None and terminal.state is TerminalState.LIVE:
             continue
-        thread_map.update_status(record.thread_ts, WorkerStatus.FAILED)
+        thread_map.update_status(
+            record.thread_ts, WorkerStatus.FAILED, session_name=record.terminal_name
+        )
         lost.append(record.thread_ts)
     if lost:
         logger.info(f"reconcile marked lost workers failed count={len(lost)}")

@@ -31,17 +31,19 @@ def stop_hook(
     slack: SlackAdapter,
     *,
     stdin: TextIO = sys.stdin,
+    session_name: str | None = None,
 ) -> None:
     # Runs at the end of every turn, not only at the end of the work, so it marks the
     # session IDLE (live, waiting for a follow-up), never DONE. Replies are on demand: the
     # turn's answer is posted only when the thread asked for replies in Slack, and then at
-    # every turn end.
+    # every turn end. `session_name` picks this session's record in the thread; once the
+    # thread moved to another session (untied), nothing is posted there any more.
     payload = StopHookPayload.model_validate_json(stdin.read())
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(thread_ts, session_name=session_name)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
 
-    if record.reply_mode is ReplyMode.SLACK:
+    if record.tied and record.reply_mode is ReplyMode.SLACK:
         summary = _DEFAULT_SUMMARY
         if payload.transcript_path is not None:
             extracted = last_assistant_text(payload.transcript_path)
@@ -49,5 +51,5 @@ def stop_hook(
                 summary = extracted
         slack_post(slack, channel, thread_ts, summary)
 
-    thread_map.update_status(thread_ts, WorkerStatus.IDLE)
+    thread_map.update_status(thread_ts, WorkerStatus.IDLE, session_name=record.terminal_name)
     logger.info(f"stop hook thread={thread_ts} status=idle reply_mode={record.reply_mode}")

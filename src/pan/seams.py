@@ -4,7 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from pan.models import InboxItem, Terminal, TerminalRead, ThreadRecord, WorkerStatus
+from pan.models import (
+    InboxItem,
+    InboxThread,
+    Terminal,
+    TerminalRead,
+    ThreadRecord,
+    WorkerStatus,
+)
 
 # Every seam Protocol lives here for a single import point.
 
@@ -32,25 +39,43 @@ class InboxStore(Protocol):
 
 
 class ThreadMap(Protocol):
-    def get(self, thread_ts: str) -> ThreadRecord | None: ...
+    # Records are kept per (thread, session). A thread lookup returns the thread's tied
+    # record, else its newest; `session_name` (a terminal name) picks that session's record
+    # in the thread instead, which is how a session's own hooks reach it after it was untied.
+    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None: ...
 
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None: ...
 
     def put(self, record: ThreadRecord) -> None: ...
 
-    # Store the record as its thread's tie, untying any other thread tied to the same session.
+    # Store the record as its thread's tie, untying any other thread tied to the same session
+    # and the thread's previous session.
     def tie(self, record: ThreadRecord) -> None: ...
 
     def untie(self, thread_ts: str) -> None: ...
 
-    def record_inbox_thread(self, thread_ts: str, inbox_thread_id: str, url: str) -> None: ...
+    def record_inbox_thread(
+        self,
+        thread_ts: str,
+        inbox_thread_id: str,
+        url: str | None,
+        *,
+        session_name: str | None = None,
+    ) -> None: ...
 
-    def update_status(self, thread_ts: str, status: WorkerStatus) -> None: ...
+    def update_status(
+        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+    ) -> None: ...
 
     def records(self) -> list[ThreadRecord]: ...
 
     def record_session(
-        self, thread_ts: str, session_id: str, transcript_path: Path | None
+        self,
+        thread_ts: str,
+        session_id: str,
+        transcript_path: Path | None,
+        *,
+        session_name: str | None = None,
     ) -> None: ...
 
 
@@ -77,6 +102,13 @@ class TerminalHost(Protocol):
 
     # Kill then remove; a terminal that is already gone counts as removed.
     def remove(self, terminal: str) -> None: ...
+
+
+class InboxDirectory(Protocol):
+    # Read-only lookup of Plannotator Inbox threads, for sessions pan has no hooks in (desk
+    # sessions). Never sends anything. Returns None when no open thread of that name is found
+    # in the project, or when the Inbox cannot be read.
+    def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None: ...
 
 
 class GitWorktreeAdapter(Protocol):

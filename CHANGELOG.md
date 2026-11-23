@@ -9,6 +9,28 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- Reaching sessions pan did not start ("desk sessions"). `to <name>:` (`pan send --to`) now reaches
+  any live session. A desk session gets a thread record with `started_by_pan` false and its own
+  folder as `worktree_path`, tied to the thread (one thread per session still holds).
+- Busy sessions are refused. Before typing into any existing session (`to <name>:` or a follow-up),
+  pan reads its state from the terminal host: idle (or done) is typed into; busy, an error, no
+  status or an unknown state is refused with "<name> is busy; try again, or @pan check"
+  (`SessionBusyError`, exit 26); waiting on a prompt keeps the blocked reply. Nothing is typed on a
+  refusal.
+- `pan send` without `--to` sends a follow-up to the thread's tied session (`follow_up_to_session`)
+  with the same checks. When the session has ended it exits 22: the orchestrator reopens pan's own
+  sessions; for a desk session pan says it ended and suggests `new:` or `to <name>:`.
+- Text typed into a session from `to <name>:`, and every follow-up to a desk session, gets one line
+  on top: "From Slack via pan", the Plannotator Inbox thread to use (`<name>: <short task>`, or the
+  one pan named before), and that Slack hears back only when asked (`from_slack_text`).
+- The `InboxDirectory` seam and `ShellPlannotatorInboxAdapter` (`src/pan/adapters/plannotator_inbox.py`)
+  look an Inbox thread up by name with `plannotator inbox call read_thread` (`asked_by: "anyone"`,
+  the session's folder as `project_path`). Read only, never sends; any failure returns nothing.
+  `check` and the "Sent to …" notice use it for sessions whose Inbox thread id is unknown; the
+  listing carries no link, so usually only the name is shown. Needs a live check.
+- Messages from X may not use `to <name>:` until the X safety gate (MOB-87): `parse_route` takes the
+  source and `route_for_source` turns such a route into a notice, at parse time and again at drain.
+
 - Route words, parsed in code by `parse_route` (`src/pan/directive.py`): `new: <task>`,
   `to <name>: <task>`, and the whole-message words `check`, `sessions` and `forget`. Strict: the
   route word is the first word after the mention, spelled exactly, in any letter case, after the
@@ -52,6 +74,19 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- Thread records are kept per (thread, session) instead of per thread (`record_key`). `new:` in a
+  tied thread, or `to <name>:` naming another session, no longer overwrites the old session's
+  record: it stays, untied, and its hooks still find it by worktree. `FileThreadMap.get` returns the
+  thread's tied record (else its newest); `get`, `update_status`, `record_session` and
+  `record_inbox_thread` take `session_name` to pick one session's record. Files keyed by thread
+  alone load as before and are rewritten in the new shape on the next write.
+- The Stop and Notification hooks of a session whose thread moved to another session only update
+  its own record; they post nothing to that thread.
+- `pan stop` refuses for a session pan did not start (`NotPanSessionError`, exit 25): it unties the
+  thread and never stops the session. `pan reopen` refuses such a session too. `pan sessions`
+  shows a tied desk session as external, with its thread.
+- `to <name>:` no longer refuses sessions pan did not start (the slice B notice "<name> is not a
+  pan session; reaching your own sessions comes next" is gone).
 - `--new`, `--status`, `--sync` and the leading `!` are retired. A message carrying one gets a short
   reply naming what replaced it (`new:`, `check` / `sessions`, `reply in slack`) and nothing else
   happens. `parse_directive` no longer reads them; `TaskMode` loses `sync` and `status` and

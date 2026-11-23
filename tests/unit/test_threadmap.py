@@ -371,3 +371,91 @@ def test_tie_note_is_none_for_an_untied_thread(tied: bool | None) -> None:
     record = None if tied is None else _record("t1").model_copy(update={"tied": tied})
 
     assert tie_note(record) is None
+
+
+def test_a_new_session_in_a_tied_thread_keeps_the_old_sessions_record(tmp_path: Path) -> None:
+    # `new:` in a tied thread (or `to <name>:` naming another session) ties the thread to
+    # another session. The old session's record stays, untied, and its hooks still reach it.
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t1", worktree_path=Path("/wt/pan-7"), terminal_name="pan-7"))
+    clock.set(datetime(2026, 7, 16, 11, 0, 0, tzinfo=UTC))
+
+    thread_map.tie(_record("t1", worktree_path=Path("/wt/pan-8"), terminal_name="pan-8"))
+
+    current = thread_map.get("t1")
+    assert current is not None
+    assert current.terminal_name == "pan-8"
+    old = thread_map.get("t1", session_name="pan-7")
+    assert old is not None
+    assert old.tied is False
+    found_by_hooks = thread_map.get_by_worktree(Path("/wt/pan-7"))
+    assert found_by_hooks is not None
+    assert found_by_hooks.terminal_name == "pan-7"
+
+    thread_map.update_status("t1", WorkerStatus.IDLE, session_name="pan-7")
+
+    still_current = thread_map.get("t1")
+    assert still_current is not None
+    assert still_current.terminal_name == "pan-8"
+    assert still_current.status is WorkerStatus.SPAWNING
+    updated_old = thread_map.get("t1", session_name="pan-7")
+    assert updated_old is not None
+    assert updated_old.status is WorkerStatus.IDLE
+
+
+def test_a_file_keyed_by_thread_alone_loads_and_migrates_on_write(tmp_path: Path) -> None:
+    threads_path = tmp_path / "threads.json"
+    older_file = {"t1": _record("t1").model_dump(mode="json")}
+    threads_path.write_text(json.dumps(older_file))
+    thread_map = FileThreadMap(threads_path, FakeClock(datetime(2026, 7, 16, tzinfo=UTC)))
+
+    loaded = thread_map.get("t1")
+    thread_map.update_status("t1", WorkerStatus.IDLE)
+
+    assert loaded is not None
+    assert loaded.terminal_name == "pan-task-3"
+    assert list(json.loads(threads_path.read_text())) == ["slack:t1:pan-task-3"]
+    reloaded = thread_map.get("t1")
+    assert reloaded is not None
+    assert reloaded.status is WorkerStatus.IDLE
+
+
+def test_get_falls_back_to_the_newest_record_of_an_untied_thread(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t1", terminal_name="pan-7"))
+    clock.set(datetime(2026, 7, 16, 11, 0, 0, tzinfo=UTC))
+    thread_map.tie(_record("t1", terminal_name="pan-8"))
+    clock.set(datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC))
+
+    thread_map.untie("t1")
+
+    newest = thread_map.get("t1")
+    assert newest is not None
+    assert newest.terminal_name == "pan-8"
+    assert [record.tied for record in thread_map.records()] == [False, False]
+
+
+def test_get_by_worktree_ignores_records_of_sessions_pan_did_not_start(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+    desk_record = _record("t1", worktree_path=Path("/desk/api"), terminal_name="desk-api")
+    thread_map.tie(desk_record.model_copy(update={"started_by_pan": False}))
+
+    assert thread_map.get_by_worktree(Path("/desk/api")) is None
+
+
+def test_record_inbox_thread_without_a_link_keeps_the_known_one(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, tzinfo=UTC))
+    )
+    thread_map.tie(_record("t1").model_copy(update={"inbox_thread_url": "https://inbox.example/a"}))
+
+    thread_map.record_inbox_thread("t1", "thr_1", None)
+
+    loaded = thread_map.get("t1")
+    assert loaded is not None
+    assert loaded.inbox_thread_id == "thr_1"
+    assert loaded.inbox_thread_url == "https://inbox.example/a"

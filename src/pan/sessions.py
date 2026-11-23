@@ -56,22 +56,39 @@ def session_drift(recorded: WorkerStatus, terminal: Terminal) -> bool:
     return implied is not recorded
 
 
-def _match_pan_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
-    # Pan-ownership join, most precise first: the terminal address recorded at spawn, then
-    # the terminal name (the stream name), then the resolved worktree path against the
-    # terminal's launch folder (symlink-safe, mirroring FileThreadMap.get_by_worktree).
-    for record in records:
-        if record.terminal_address and record.terminal_address == terminal.address:
+def _preferred(candidates: list[ThreadRecord]) -> ThreadRecord | None:
+    # A tied record wins (a session keeps untied records of threads it left), then the newest.
+    for record in candidates:
+        if record.tied:
             return record
+    return max(candidates, key=lambda record: record.updated_at) if candidates else None
+
+
+def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
+    # The join to pan's records, most precise first: the terminal address recorded at spawn
+    # (or at a `to <name>:` tie), then the terminal name (the stream name), then, for pan's
+    # own workers only, the resolved worktree path against the terminal's launch folder
+    # (symlink-safe, mirroring FileThreadMap.get_by_worktree). A desk session's record holds
+    # a folder pan does not own, so another terminal in that folder never joins to it.
+    by_address = [
+        record
+        for record in records
+        if record.terminal_address and record.terminal_address == terminal.address
+    ]
+    if by_address:
+        return _preferred(by_address)
     if terminal.name is not None:
-        for record in records:
-            if record.terminal_name == terminal.name:
-                return record
+        by_name = [record for record in records if record.terminal_name == terminal.name]
+        if by_name:
+            return _preferred(by_name)
     target_cwd = terminal.cwd.resolve()
-    for record in records:
-        if record.worktree_path.resolve() == target_cwd:
-            return record
-    return None
+    return _preferred(
+        [
+            record
+            for record in records
+            if record.started_by_pan and record.worktree_path.resolve() == target_cwd
+        ]
+    )
 
 
 def last_ask_for(record: ThreadRecord | None) -> str | None:
@@ -98,7 +115,10 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
     records = thread_map.records()
     summaries: list[SessionSummary] = []
     for terminal in terminal_host.list_terminals():
-        record = _match_pan_record(terminal, records)
+        record = _match_record(terminal, records)
+        # A desk session (a record with started_by_pan False) is not pan's: it has a thread
+        # but no pan status, since no pan hooks report its turns.
+        pan_record = record if record is not None and record.started_by_pan else None
         summaries.append(
             SessionSummary(
                 address=terminal.address,
@@ -108,9 +128,9 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
                 agent=terminal.agent,
                 agent_status=terminal.agent_status,
                 thread_ts=record.thread_ts if record is not None else None,
-                pan_status=record.status if record is not None else None,
-                is_pan_owned=record is not None,
-                drift=record is not None and session_drift(record.status, terminal),
+                pan_status=pan_record.status if pan_record is not None else None,
+                is_pan_owned=pan_record is not None,
+                drift=pan_record is not None and session_drift(pan_record.status, terminal),
                 last_ask=last_ask_for(record),
             )
         )

@@ -55,9 +55,14 @@ class GatedOpDeniedError(PanError): ...
 class TargetNotFoundError(PanError): ...
 
 
-# `to <name>:` named a live session pan did not start; until pan can reach desk sessions,
-# only pan's own sessions are targeted.
+# The session was not started by pan (a desk session): pan never stops, removes or reopens
+# it.
 class NotPanSessionError(PanError): ...
+
+
+# The session is busy (working, or in a state pan cannot read), so nothing was typed into
+# it: typing could land in the middle of what someone is doing there.
+class SessionBusyError(PanError): ...
 
 
 class TargetAmbiguousError(PanError):

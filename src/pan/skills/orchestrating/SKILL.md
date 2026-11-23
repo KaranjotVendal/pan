@@ -104,12 +104,17 @@ It unties the thread and posts one line. It never stops the session.
     pan send --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack]
 
 Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.text` is sent verbatim — do not
-rewrite it. `pan send` resolves the name against the live sessions, sends the text, ties this thread
-to that session (its previous thread is untied) and posts "Sent to pan-7 · Inbox: ...". When it
-refuses — an unknown name (it lists close matches), an ambiguous one, a session pan did not start
-(reaching your own desk sessions comes in a later version), or a session waiting on a prompt — it
-posts the short reply itself, sends nothing and exits non-zero (20, 21, 25 or 23). Do nothing more:
-never fall back to spawning or to the tie.
+rewrite it. The session may be one pan started or one of the person's own desk sessions. `pan send`
+resolves the name against the live sessions, types the text only if the session is idle (with one
+line on top saying it came from Slack and naming its Inbox thread), ties this thread to that session
+(its previous thread is untied) and posts "Sent to desk-api · Inbox: ...". When it refuses — an
+unknown name (it lists close matches), an ambiguous one, a busy session ("<name> is busy; try
+again, or @pan check"), or a session waiting on a prompt — it posts the short reply itself, types
+nothing and exits non-zero (20, 21, 26 or 23). Do nothing more: never retry, never fall back to
+spawning or to the tie.
+
+`to <name>:` from X is refused before it reaches you (the route is a notice): X may only start new
+sessions.
 
 ### (r6) `route.kind == "new"` — start a new session even in a tied thread
 
@@ -190,17 +195,20 @@ the user to re-target by a precise address or name. Do not spawn or relay — a 
 The thread's work belongs to `tie.session`. Send the follow-up there; never spawn a second session
 for it.
 
-- `tie.status` is `spawning`, `running`, `idle` or `blocked`: relay `cleaned_text` into the tied
-  session through pan (never shell hc yourself):
+- `tie.status` is `spawning`, `running`, `idle` or `blocked`: send `cleaned_text` to the tied
+  session through pan (never shell hc yourself, and never use `pan relay` for this):
 
-      pan relay '<tie.terminal_address>' '<cleaned_text>'
+      pan send --thread <thread_ts> --channel <channel> --task '<cleaned_text>'
 
-  No new Slack notice is needed: the `:eyes:` reaction already acknowledged the message. If it exits
-  23 (`TargetBlockedError`), handle it as in (a3). If it exits 20 (`TargetNotFoundError`), the
-  session's terminal is gone (stopped, crashed, or lost to a reboot): mark the thread failed with
-  `pan threads set --thread <thread_ts> --status failed` and reopen it as below.
-- `tie.status` is `done` or `failed`: the session ended but its worktree is still there, so reopen
-  it. That is the same session, not a new one:
+  With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
+  the `:eyes:` reaction already acknowledged the message. A busy session (exit 26) or one waiting on
+  a prompt (exit 23) gets a short reply from `pan send` itself, and nothing is typed: do nothing
+  more. Exit 22 means the session has ended: when `pan threads get` shows `started_by_pan` true,
+  mark the thread failed with `pan threads set --thread <thread_ts> --status failed` and reopen it as
+  below; for a session pan did not start, `pan send` already said it ended, so do nothing more.
+- `tie.status` is `done` or `failed`: the session ended. When pan started it (`started_by_pan` in
+  `pan threads get`) and its worktree is still there, reopen it. That is the same session, not a
+  new one. A session pan did not start is never reopened: `pan reopen` refuses it with a reply.
 
       pan reopen --thread <thread_ts> --task '<cleaned_text>'
 

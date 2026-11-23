@@ -8,10 +8,12 @@ import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.adapters.hc import HcError
-from pan.errors import SpawnError, TerminalHostError, TerminalNameTakenError
+from pan.errors import NotPanSessionError, SpawnError, TerminalHostError, TerminalNameTakenError
 from pan.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
+from pan.slack_format import to_slack_mrkdwn
 from pan.spawn import (
     ClaudeLauncher,
+    desk_session_ended_reply,
     inbox_thread_name,
     reopen_worker,
     spawn_worker,
@@ -424,3 +426,17 @@ def test_reopen_failure_posts_and_leaves_the_record(
     assert terminal_host.runs == []
     assert thread_map.records == {}
     assert slack.posts == [("C1", _THREAD, expected_notice)]
+
+
+def test_reopen_never_restarts_a_session_pan_did_not_start(tmp_path: Path) -> None:
+    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    record = _finished_record(tmp_path).model_copy(
+        update={"terminal_name": "desk-api", "started_by_pan": False}
+    )
+
+    with pytest.raises(NotPanSessionError):
+        _reopen(record, terminal_host, thread_map, slack)
+
+    assert terminal_host.runs == []
+    assert thread_map.records == {}
+    assert slack.posts == [("C1", _THREAD, to_slack_mrkdwn(desk_session_ended_reply("desk-api")))]
