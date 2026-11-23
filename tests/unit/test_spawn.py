@@ -5,9 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hc_fakes import FakeHc, make_terminal
+from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.errors import HcError, SpawnError, TerminalNameTakenError
+from pan.adapters.hc import HcError
+from pan.errors import SpawnError, TerminalHostError, TerminalNameTakenError
 from pan.models import TerminalState, ThreadRecord, WorkerStatus
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker, worker_terminal_name
 
@@ -68,7 +69,7 @@ class FakeIdGen:
 def _spawn(
     *,
     base: Path,
-    hc: FakeHc,
+    terminal_host: FakeTerminalHost,
     git: FakeGit,
     thread_map: FakeThreadMap | None = None,
     slack: FakeSlack | None = None,
@@ -84,8 +85,8 @@ def _spawn(
         stream=stream,
         app_space=app_space,
         git=git,
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map if thread_map is not None else FakeThreadMap(),
         slack=slack if slack is not None else FakeSlack(),
         clock=FakeClock(),
@@ -94,14 +95,16 @@ def _spawn(
 
 
 def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path: Path) -> None:
-    hc = FakeHc()
-    git = FakeGit(hc.timeline)
+    terminal_host = FakeTerminalHost()
+    git = FakeGit(terminal_host.timeline)
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
-    record = _spawn(base=tmp_path, hc=hc, git=git, thread_map=thread_map, slack=slack)
+    record = _spawn(
+        base=tmp_path, terminal_host=terminal_host, git=git, thread_map=thread_map, slack=slack
+    )
 
-    assert hc.timeline == ["worktree", "run"]
-    (run,) = hc.runs
+    assert terminal_host.timeline == ["worktree", "run"]
+    (run,) = terminal_host.runs
     assert run.name == "pan-backend"
     assert run.cwd == tmp_path / "pan-backend"
     # The brief is one argv element after `claude`: never parsed as shell text.
@@ -119,11 +122,16 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
 
 
 def test_spawn_worker_labels_into_the_app_space_only_when_configured(tmp_path: Path) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
-    _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline), app_space="sp42")
+    _spawn(
+        base=tmp_path,
+        terminal_host=terminal_host,
+        git=FakeGit(terminal_host.timeline),
+        app_space="sp42",
+    )
 
-    assert hc.runs[0].labels["herdr.space"] == "sp42"
+    assert terminal_host.runs[0].labels["herdr.space"] == "sp42"
 
 
 @pytest.mark.parametrize(
@@ -145,9 +153,9 @@ def test_worker_terminal_name_follows_hc_name_rules(stream: str | None, expected
 
 
 def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
-    record = _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline))
+    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
 
     settings = json.loads((record.worktree_path / ".claude" / "settings.json").read_text())
     commands = {
@@ -162,14 +170,20 @@ def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) 
 
 
 def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Path) -> None:
-    hc = FakeHc()
-    hc.add(make_terminal("t5", name="pan-backend"))
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t5", name="pan-backend"))
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
     with pytest.raises(SpawnError, match="stream name in use"):
-        _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline), thread_map=thread_map, slack=slack)
+        _spawn(
+            base=tmp_path,
+            terminal_host=terminal_host,
+            git=FakeGit(terminal_host.timeline),
+            thread_map=thread_map,
+            slack=slack,
+        )
 
-    assert hc.timeline == []
+    assert terminal_host.timeline == []
     assert thread_map.records[_THREAD].status is WorkerStatus.FAILED
     assert slack.posts == [
         ("C1", _THREAD, "spawn failed for stream pan-backend: stream name in use")
@@ -177,23 +191,32 @@ def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Pa
 
 
 def test_a_finished_terminal_with_the_name_does_not_block_spawn(tmp_path: Path) -> None:
-    hc = FakeHc()
-    hc.add(make_terminal("t5", name="pan-backend", state=TerminalState.FINISHED))
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t5", name="pan-backend", state=TerminalState.FINISHED))
 
-    record = _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline))
+    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
 
     assert record.status is WorkerStatus.SPAWNING
 
 
-@pytest.mark.parametrize("run_error", [HcError("spawn_failed"), TerminalNameTakenError("raced")])
-def test_hc_failure_wraps_as_spawn_error_and_marks_failed(
-    tmp_path: Path, run_error: HcError
+@pytest.mark.parametrize(
+    "run_error",
+    [TerminalHostError("spawn_failed"), HcError("spawn_failed"), TerminalNameTakenError("raced")],
+)
+def test_terminal_host_failure_wraps_as_spawn_error_and_marks_failed(
+    tmp_path: Path, run_error: TerminalHostError
 ) -> None:
-    hc = FakeHc(errors={"run": run_error})
+    terminal_host = FakeTerminalHost(errors={"run": run_error})
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
     with pytest.raises(SpawnError):
-        _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline), thread_map=thread_map, slack=slack)
+        _spawn(
+            base=tmp_path,
+            terminal_host=terminal_host,
+            git=FakeGit(terminal_host.timeline),
+            thread_map=thread_map,
+            slack=slack,
+        )
 
     failed = thread_map.records[_THREAD]
     assert failed.status is WorkerStatus.FAILED
@@ -204,14 +227,19 @@ def test_hc_failure_wraps_as_spawn_error_and_marks_failed(
 
 
 def test_git_failure_wraps_as_spawn_error_and_never_runs(tmp_path: Path) -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
     thread_map = FakeThreadMap()
 
     with pytest.raises(SpawnError):
-        _spawn(base=tmp_path, hc=hc, git=FakeGit(hc.timeline, fail=True), thread_map=thread_map)
+        _spawn(
+            base=tmp_path,
+            terminal_host=terminal_host,
+            git=FakeGit(terminal_host.timeline, fail=True),
+            thread_map=thread_map,
+        )
 
     assert thread_map.records[_THREAD].status is WorkerStatus.FAILED
-    assert hc.timeline == ["worktree"]
+    assert terminal_host.timeline == ["worktree"]
 
 
 def _finished_record(
@@ -236,14 +264,17 @@ class LaterClock:
 
 
 def _reopen(
-    record: ThreadRecord, hc: FakeHc, thread_map: FakeThreadMap, slack: FakeSlack
+    record: ThreadRecord,
+    terminal_host: FakeTerminalHost,
+    thread_map: FakeThreadMap,
+    slack: FakeSlack,
 ) -> ThreadRecord:
     return reopen_worker(
         record=record,
         task="also update the docs",
         app_space=None,
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map,
         slack=slack,
         clock=LaterClock(),
@@ -254,12 +285,12 @@ def _reopen(
 def test_reopen_continues_the_conversation_in_the_same_worktree(
     tmp_path: Path, status: WorkerStatus
 ) -> None:
-    hc, thread_map, slack = FakeHc(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
     record = _finished_record(tmp_path, status)
 
-    reopened = _reopen(record, hc, thread_map, slack)
+    reopened = _reopen(record, terminal_host, thread_map, slack)
 
-    (run,) = hc.runs
+    (run,) = terminal_host.runs
     assert run.name == "pan-backend"
     assert run.cwd == tmp_path
     assert run.argv == ["claude", "--continue", "also update the docs"]
@@ -283,15 +314,15 @@ def test_reopen_continues_the_conversation_in_the_same_worktree(
 def test_reopen_failure_posts_and_leaves_the_record(
     tmp_path: Path, missing_worktree: bool, live_name_holder: bool, expected_notice: str
 ) -> None:
-    hc, thread_map, slack = FakeHc(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
     if live_name_holder:
-        hc.add(make_terminal("t5", name="pan-backend"))
+        terminal_host.add(make_terminal("t5", name="pan-backend"))
     worktree = tmp_path / "gone" if missing_worktree else tmp_path
     record = _finished_record(worktree)
 
     with pytest.raises(SpawnError):
-        _reopen(record, hc, thread_map, slack)
+        _reopen(record, terminal_host, thread_map, slack)
 
-    assert hc.runs == []
+    assert terminal_host.runs == []
     assert thread_map.records == {}
     assert slack.posts == [("C1", _THREAD, expected_notice)]

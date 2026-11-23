@@ -44,6 +44,12 @@ class TerminalState(StrEnum):
     FINISHED = "finished"
 
 
+class TerminalHostKind(StrEnum):
+    # The terminal multiplexer pan drives through the TerminalHost seam (config key
+    # `terminal_host`). Only one host is active at a time.
+    HC = "hc"
+
+
 class Autonomy(StrEnum):
     FULL = "full"
     GATED = "gated"
@@ -118,9 +124,10 @@ class ThreadRecord(BaseModel):
 
 
 class Terminal(BaseModel, frozen=True):
-    # The confined projection of one hc terminal; the only terminal type the hc adapter
-    # lets escape (INV-8). `address` is hc's id (t7, machine/t7); `name` is unique among
-    # live terminals; `where` is the Herdr app's "space / tab" label when it shows one.
+    # The confined projection of one terminal; the only terminal type a terminal host
+    # adapter lets escape (INV-8). `address` is the host's id (for hc: t7, machine/t7);
+    # `name` is unique among live terminals; `where` is the Herdr app's "space / tab" label
+    # when it shows one (hc only; other hosts leave it empty).
     address: str
     name: str | None = None
     where: str | None = None
@@ -131,7 +138,7 @@ class Terminal(BaseModel, frozen=True):
 
 
 class TerminalRead(BaseModel, frozen=True):
-    # `complete` is False when hc could return only the visible screen (the target was
+    # `complete` is False when the host could return only the visible screen (the target was
     # working, blocked or in error), so a summary of it must not overclaim.
     text: str
     complete: bool
@@ -197,6 +204,7 @@ class PanPaths(BaseModel, frozen=True):
 
 class PanConfig(BaseModel, frozen=True):
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    terminal_host: TerminalHostKind = TerminalHostKind.HC
     orchestrator: OrchestratorConfig
     defaults: Defaults
     users: dict[str, UserPolicy] = Field(default_factory=dict)

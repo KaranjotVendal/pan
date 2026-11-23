@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from hc_fakes import FakeHc
+from terminal_host_fakes import FakeTerminalHost
 from watchdog.events import (
     DirModifiedEvent,
     FileClosedEvent,
@@ -16,8 +16,9 @@ from watchdog.events import (
     FileSystemEvent,
 )
 
+from pan.adapters.hc import HcError
 from pan.config import WATCHER_DEBOUNCE_SECONDS
-from pan.errors import HcError, TargetBlockedError, TerminalGoneError
+from pan.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
 from pan.watcher import WAKE_INSTRUCTION, WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
 
 
@@ -53,25 +54,36 @@ class FakeTimerFactory:
 def test_on_inbox_changed_sends_only_the_fixed_wake_instruction() -> None:
     # One hc send pastes the fixed instruction and presses Enter; no payload, no separate
     # keypress (INV-2).
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
-    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
+    WatchdogInboxWatcher(
+        terminal_host, "pan-orchestrator", Path("/tmp/pan-inbox")
+    ).on_inbox_changed()
 
-    assert hc.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
 
 
 @pytest.mark.parametrize(
     "send_error",
-    [TargetBlockedError("blocked"), TerminalGoneError("gone"), HcError("hc missing")],
+    [
+        TargetBlockedError("blocked"),
+        TerminalGoneError("gone"),
+        TerminalHostError("host missing"),
+        HcError("hc missing"),
+    ],
 )
-def test_on_inbox_changed_logs_and_survives_hc_failures(send_error: HcError) -> None:
+def test_on_inbox_changed_logs_and_survives_terminal_host_failures(
+    send_error: TerminalHostError,
+) -> None:
     # Under launchd a raise would crash-loop the watcher; the item stays in the inbox and
     # the next change (or `pan up`) wakes the orchestrator instead.
-    hc = FakeHc(errors={"send": send_error})
+    terminal_host = FakeTerminalHost(errors={"send": send_error})
 
-    WatchdogInboxWatcher(hc, "pan-orchestrator", Path("/tmp/pan-inbox")).on_inbox_changed()
+    WatchdogInboxWatcher(
+        terminal_host, "pan-orchestrator", Path("/tmp/pan-inbox")
+    ).on_inbox_changed()
 
-    assert hc.sent == []
+    assert terminal_host.sent == []
 
 
 def test_debouncer_runs_the_action_once_for_a_burst_of_triggers() -> None:
@@ -128,8 +140,10 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     inbox_dir = tmp_path / "inbox"
 
     timer_factory = FakeTimerFactory()
-    hc = FakeHc()
-    watcher = WatchdogInboxWatcher(hc, "pan-orchestrator", inbox_dir, timer_factory=timer_factory)
+    terminal_host = FakeTerminalHost()
+    watcher = WatchdogInboxWatcher(
+        terminal_host, "pan-orchestrator", inbox_dir, timer_factory=timer_factory
+    )
     watcher.start()
 
     # The inbox dir is created on demand, then one handler is scheduled on it
@@ -145,11 +159,11 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     handler.on_any_event(
         FileMovedEvent(str(inbox_dir / ".Ev1.json.tmp"), str(inbox_dir / "Ev1.json"))
     )
-    assert hc.sent == []
+    assert terminal_host.sent == []
     (timer,) = timer_factory.timers
     assert timer.interval == WATCHER_DEBOUNCE_SECONDS
     timer.fire()
-    assert hc.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
 
 
 _INBOX = "/inbox"

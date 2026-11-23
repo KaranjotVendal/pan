@@ -9,11 +9,11 @@ from pan.models import (
     ThreadRecord,
     WorkerStatus,
 )
-from pan.seams import HcAdapter, ThreadMap
+from pan.seams import TerminalHost, ThreadMap
 
 logger = initialise_logger(__name__)
 
-# hc's live agent status normalized to the pan WorkerStatus it implies. Between turns an
+# The host's live agent status normalized to the pan WorkerStatus it implies. Between turns an
 # agent is idle but still a live worker, so idle and working both mean RUNNING. NONE and
 # UNKNOWN are resolved in worker_status_for, since they depend on the recorded status.
 _AGENT_TO_WORKER: dict[AgentStatus, WorkerStatus] = {
@@ -26,7 +26,7 @@ _AGENT_TO_WORKER: dict[AgentStatus, WorkerStatus] = {
 
 
 def worker_status_for(terminal: Terminal | None, recorded: WorkerStatus) -> WorkerStatus:
-    # The WorkerStatus a worker's live hc terminal implies, given what pan recorded.
+    # The WorkerStatus a worker's live terminal implies, given what pan recorded.
     # A missing or finished terminal means the worker is gone: it stays DONE if it
     # finished, otherwise it failed (killed, crashed, or lost to a reboot). A live
     # terminal reporting no status is still booting while the record says SPAWNING, and
@@ -64,13 +64,14 @@ def _match_pan_record(terminal: Terminal, records: list[ThreadRecord]) -> Thread
     return None
 
 
-def collect_sessions(hc: HcAdapter, thread_map: ThreadMap) -> list[SessionSummary]:
-    # Pure reconcile over the injected seams: enumerate every live hc terminal, join the
-    # pan thread map to identify pan-owned ones, and flag status drift. The thread map is
+def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list[SessionSummary]:
+    # Pure reconcile over the injected seams: enumerate every live terminal, join the
+    # pan thread map to identify pan-owned ones, and flag status drift. Ownership comes
+    # only from the thread map, never from host labels, so a host without labels works. The thread map is
     # read, never rewritten (INV-7); drift is reported, not healed.
     records = thread_map.records()
     summaries: list[SessionSummary] = []
-    for terminal in hc.list_terminals():
+    for terminal in terminal_host.list_terminals():
         record = _match_pan_record(terminal, records)
         summaries.append(
             SessionSummary(

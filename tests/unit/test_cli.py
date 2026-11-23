@@ -6,16 +6,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hc_fakes import FakeHc, make_terminal
 from pydantic import SecretStr
+from terminal_host_fakes import FakeTerminalHost, make_terminal
 from typer.testing import CliRunner
 
 import pan.cli as cli
+from pan.adapters.hc import HcError, ShellHcAdapter
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HcError,
     InboxError,
     PanError,
     SlackPostError,
@@ -24,6 +24,7 @@ from pan.errors import (
     TargetBlockedError,
     TargetNotFoundError,
     TerminalGoneError,
+    TerminalHostError,
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
@@ -174,7 +175,7 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert captured["stream"] == "backend"
     assert captured["base"] == config.orchestrator.worktree_base
     assert captured["app_space"] == "sp42"
-    assert isinstance(captured["hc"], cli.ShellHcAdapter)
+    assert isinstance(captured["terminal_host"], ShellHcAdapter)
 
 
 def test_watcher_builds_from_config_and_starts(
@@ -182,13 +183,13 @@ def test_watcher_builds_from_config_and_starts(
 ) -> None:
     config = _make_config(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda: config)
-    hc_sentinel = object()
-    monkeypatch.setattr(cli, "ShellHcAdapter", lambda: hc_sentinel)
+    terminal_host_sentinel = object()
+    monkeypatch.setattr(cli, "build_terminal_host", lambda kind: terminal_host_sentinel)
     captured: dict[str, Any] = {}
 
     class FakeWatcher:
-        def __init__(self, hc: Any, orchestrator_terminal: str, inbox_dir: Path) -> None:
-            captured["args"] = (hc, orchestrator_terminal, inbox_dir)
+        def __init__(self, terminal_host: Any, orchestrator_terminal: str, inbox_dir: Path) -> None:
+            captured["args"] = (terminal_host, orchestrator_terminal, inbox_dir)
 
         def start(self) -> None:
             captured["started"] = True
@@ -199,7 +200,7 @@ def test_watcher_builds_from_config_and_starts(
 
     assert result.exit_code == 0
     # Built from config: the hc adapter, the orchestrator terminal name, the inbox dir.
-    assert captured["args"] == (hc_sentinel, "pan-orchestrator", config.paths.inbox)
+    assert captured["args"] == (terminal_host_sentinel, "pan-orchestrator", config.paths.inbox)
     assert captured["started"] is True
 
 
@@ -222,9 +223,11 @@ def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert "**********" in result.stdout
 
 
-def _use_hc(monkeypatch: pytest.MonkeyPatch, hc: FakeHc) -> FakeHc:
-    monkeypatch.setattr(cli, "ShellHcAdapter", lambda: hc)
-    return hc
+def _use_terminal_host(
+    monkeypatch: pytest.MonkeyPatch, terminal_host: FakeTerminalHost
+) -> FakeTerminalHost:
+    monkeypatch.setattr(cli, "build_terminal_host", lambda kind: terminal_host)
+    return terminal_host
 
 
 def _use_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PanConfig:
@@ -254,10 +257,10 @@ def test_status_reads_the_recorded_terminal(
     record = _record("t-1", terminal_address=terminal_address)
     record.status = WorkerStatus.RUNNING
     FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
     for terminal in terminals:
-        hc.add(terminal)
-    _use_hc(monkeypatch, hc)
+        terminal_host.add(terminal)
+    _use_terminal_host(monkeypatch, terminal_host)
 
     result = runner.invoke(cli.app, ["status", "--thread", "t-1"])
 
@@ -282,7 +285,9 @@ def _summary(*, is_pan_owned: bool = True, drift: bool = False) -> SessionSummar
 
 def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "collect_sessions", lambda hc, thread_map: [_summary(drift=True)])
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map: [_summary(drift=True)]
+    )
 
     result = runner.invoke(cli.app, ["sessions", "--json"])
 
@@ -301,7 +306,7 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda hc, thread_map: [_summary(drift=True), _summary(is_pan_owned=False)],
+        lambda terminal_host, thread_map: [_summary(drift=True), _summary(is_pan_owned=False)],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
@@ -314,26 +319,29 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "external" in lines[2]
 
 
-def _live_hc() -> FakeHc:
-    hc = FakeHc()
-    hc.add(make_terminal("t3", where="web / codex"))
-    hc.add(make_terminal("t4", where="web / review"))
-    hc.add(make_terminal("t5", name="pan-backend"))
-    return hc
+def _live_terminal_host() -> FakeTerminalHost:
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t3", where="web / codex"))
+    terminal_host.add(make_terminal("t4", where="web / review"))
+    terminal_host.add(make_terminal("t5", name="pan-backend"))
+    return terminal_host
 
 
-def test_relay_echoes_resolved_name_and_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    hc = _use_hc(monkeypatch, _live_hc())
+def test_relay_echoes_resolved_name_and_address(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(cli.app, ["relay", "pan-backend", "re-run the failing test"])
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "relayed into pan-backend terminal t5"
-    assert hc.sent == [("t5", "re-run the failing test")]
+    assert terminal_host.sent == [("t5", "re-run the failing test")]
 
 
 @pytest.mark.parametrize(
-    "selector, hc_errors, expected_error",
+    "selector, terminal_host_errors, expected_error",
     [
         ("nope", {}, TargetNotFoundError),
         ("web", {}, TargetAmbiguousError),
@@ -342,29 +350,31 @@ def test_relay_echoes_resolved_name_and_address(monkeypatch: pytest.MonkeyPatch)
 )
 def test_relay_failures_propagate_typed_errors(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     selector: str,
-    hc_errors: dict[str, Any],
+    terminal_host_errors: dict[str, Any],
     expected_error: type[PanError],
 ) -> None:
-    hc = _live_hc()
-    hc.errors.update(hc_errors)
-    _use_hc(monkeypatch, hc)
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _live_terminal_host()
+    terminal_host.errors.update(terminal_host_errors)
+    _use_terminal_host(monkeypatch, terminal_host)
 
     result = runner.invoke(cli.app, ["relay", selector, "hi"])
 
     assert isinstance(result.exception, expected_error)
-    assert hc.sent == []
+    assert terminal_host.sent == []
 
 
 def test_read_recent_echoes_raw_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_config(monkeypatch, tmp_path)
-    hc = _use_hc(monkeypatch, _live_hc())
+    terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(cli.app, ["read", "pan-backend"])
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "recent output"
-    assert hc.reads == [("t5", cli.READ_RECENT_LINES)]
+    assert terminal_host.reads == [("t5", cli.READ_RECENT_LINES)]
 
 
 def test_read_full_echoes_the_recorded_transcript(
@@ -376,25 +386,25 @@ def test_read_full_echoes_the_recorded_transcript(
     record = _record("t-1", terminal_address="t5")
     record.transcript_path = transcript
     FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
-    hc = _use_hc(monkeypatch, _live_hc())
+    terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(cli.app, ["read", "pan-backend", "--full"])
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "assistant: all done"
-    assert hc.reads == []
+    assert terminal_host.reads == []
 
 
 def test_read_not_found_propagates_target_not_found(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    hc = _use_hc(monkeypatch, _live_hc())
+    terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(cli.app, ["read", "nope"])
 
     assert isinstance(result.exception, TargetNotFoundError)
-    assert hc.reads == []
+    assert terminal_host.reads == []
 
 
 @pytest.mark.parametrize("terminal_address", ["t12", ""], ids=["recorded", "never-launched"])
@@ -404,12 +414,12 @@ def test_stop_removes_the_terminal_and_marks_failed(
     config = _use_config(monkeypatch, tmp_path)
     thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
     thread_map.put(_record("t-1", terminal_address=terminal_address))
-    hc = _use_hc(monkeypatch, FakeHc())
+    terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
 
     result = runner.invoke(cli.app, ["stop", "--thread", "t-1"])
 
     assert result.exit_code == 0
-    assert hc.removed == ([terminal_address] if terminal_address else [])
+    assert terminal_host.removed == ([terminal_address] if terminal_address else [])
     stopped = thread_map.get("t-1")
     assert stopped is not None
     assert stopped.status is WorkerStatus.FAILED
@@ -424,6 +434,7 @@ def test_stop_removes_the_terminal_and_marks_failed(
         (InboxError("x"), 13),
         (ThreadNotFoundError("x"), 14),
         (SpawnError("x"), 15),
+        (TerminalHostError("x"), 16),
         (HcError("x"), 16),
         (SlackPostError("x"), 17),
         (GatedOpDeniedError("x"), 18),
@@ -562,12 +573,12 @@ def test_up_starts_the_orchestrator_from_config(
     FileThreadMap(config.paths.threads, cli.SystemClock()).put(
         _record("t-1", terminal_address="t9")
     )
-    hc = _use_hc(monkeypatch, FakeHc())
+    terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
 
     result = runner.invoke(cli.app, ["up"])
 
     assert result.exit_code == 0
-    (run,) = hc.runs
+    (run,) = terminal_host.runs
     assert run.name == "pan-orchestrator"
     assert run.cwd == config.orchestrator.cwd
     assert run.argv[0] == "claude"

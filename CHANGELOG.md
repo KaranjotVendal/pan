@@ -16,6 +16,15 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- Put hc behind a neutral terminal host seam, with no behaviour change. The `HcAdapter` protocol is
+  now `TerminalHost` (`src/pan/seams.py`); `ShellHcAdapter` is its hc implementation, built by
+  `build_terminal_host` (`src/pan/adapters/terminal_host.py`) from the new config key
+  `terminal_host` (only `"hc"`, the default; any other value is a config error, exit 11). Callers
+  outside the adapter catch the new neutral `TerminalHostError` (exit 16); `HcError` moved into the
+  hc adapter as its subclass, and `TerminalGoneError`, `TargetBlockedError` and
+  `TerminalNameTakenError` now subclass `TerminalHostError`. Parameters named `hc` are now
+  `terminal_host`. Ownership of a terminal stays decided by the thread map; labels are only a hint.
+  `pan relay` now loads the config, to pick the terminal host.
 - Migrated from the herdr TUI CLI and morcli to herdr-core (`hc`). herdr is no longer installed and
   `morcli streams` depends on it, so spawn, sessions, relay, read, status, stop and the watcher wake
   were all broken. A new `ShellHcAdapter` (`src/pan/adapters/hc.py`, seam `HcAdapter`) is the only

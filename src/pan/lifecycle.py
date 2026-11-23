@@ -5,10 +5,10 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from pan.config import CLAUDE_AGENT_NAMES, ORCHESTRATOR_ROLE, PAN_ROLE_LABEL
-from pan.errors import HcError, TerminalGoneError, TerminalNameTakenError
+from pan.errors import TerminalGoneError, TerminalHostError, TerminalNameTakenError
 from pan.logging import initialise_logger
 from pan.models import Terminal, TerminalState, WorkerStatus
-from pan.seams import HcAdapter, ThreadMap
+from pan.seams import TerminalHost, ThreadMap
 from pan.watcher import WAKE_INSTRUCTION
 
 logger = initialise_logger(__name__)
@@ -34,21 +34,21 @@ class UpReport(BaseModel, frozen=True):
     lost_threads: list[str]
 
 
-def _find(hc: HcAdapter, terminal: str) -> Terminal | None:
+def _find(terminal_host: TerminalHost, terminal: str) -> Terminal | None:
     try:
-        return hc.get(terminal)
+        return terminal_host.get(terminal)
     except TerminalGoneError:
         return None
 
 
 def _ensure_orchestrator(
-    hc: HcAdapter, terminal: str, cwd: Path, command: list[str]
+    terminal_host: TerminalHost, terminal: str, cwd: Path, command: list[str]
 ) -> tuple[Terminal, bool]:
     # Returns the orchestrator terminal and whether it was started now. A live Claude
     # session under the name is left alone; a finished one is removed and replaced. A live
     # terminal under the name running anything else is the person's, so pan refuses to
     # touch it rather than killing it.
-    existing = _find(hc, terminal)
+    existing = _find(terminal_host, terminal)
     if existing is not None and existing.state is TerminalState.LIVE:
         if existing.agent in CLAUDE_AGENT_NAMES:
             return existing, False
@@ -57,8 +57,8 @@ def _ensure_orchestrator(
             "Code; stop it or set a different orchestrator.terminal"
         )
     if existing is not None:
-        hc.remove(existing.address)
-    started = hc.run(
+        terminal_host.remove(existing.address)
+    started = terminal_host.run(
         name=terminal,
         cwd=cwd,
         argv=[*command, ORCHESTRATOR_BOOT_BRIEF],
@@ -68,16 +68,18 @@ def _ensure_orchestrator(
     return started, True
 
 
-def reconcile_lost_workers(hc: HcAdapter, thread_map: ThreadMap) -> list[str]:
+def reconcile_lost_workers(terminal_host: TerminalHost, thread_map: ThreadMap) -> list[str]:
     # Mark FAILED every record that expects a live worker whose terminal is gone (killed,
-    # crashed, or lost to a reboot: hc recovers no worker, since workers run without
-    # --keep). A later follow-up in the thread reopens in the same worktree. Nothing is
-    # posted to Slack here; reporting stuck states belongs to the planned heartbeat.
+    # crashed, or lost to a reboot: the host recovers no worker, since hc workers run
+    # without --keep). A later follow-up in the thread reopens in the same worktree. Nothing
+    # is posted to Slack here; reporting stuck states belongs to the planned heartbeat.
     lost: list[str] = []
     for record in thread_map.records():
         if record.status not in _LIVE_STATUSES:
             continue
-        terminal = _find(hc, record.terminal_address) if record.terminal_address else None
+        terminal = (
+            _find(terminal_host, record.terminal_address) if record.terminal_address else None
+        )
         if terminal is not None and terminal.state is TerminalState.LIVE:
             continue
         thread_map.update_status(record.thread_ts, WorkerStatus.FAILED)
@@ -88,7 +90,7 @@ def reconcile_lost_workers(hc: HcAdapter, thread_map: ThreadMap) -> list[str]:
 
 
 def bring_up(
-    hc: HcAdapter,
+    terminal_host: TerminalHost,
     thread_map: ThreadMap,
     *,
     terminal: str,
@@ -97,14 +99,14 @@ def bring_up(
 ) -> UpReport:
     # Idempotent: ensure the orchestrator runs, reconcile workers lost while pan was down,
     # and wake an already-running orchestrator once so a backlog in the inbox is drained.
-    orchestrator, started = _ensure_orchestrator(hc, terminal, cwd, command)
-    lost = reconcile_lost_workers(hc, thread_map)
+    orchestrator, started = _ensure_orchestrator(terminal_host, terminal, cwd, command)
+    lost = reconcile_lost_workers(terminal_host, thread_map)
     woke = False
     if not started:
         try:
-            hc.send(orchestrator.address, WAKE_INSTRUCTION)
+            terminal_host.send(orchestrator.address, WAKE_INSTRUCTION)
             woke = True
-        except HcError as error:
+        except TerminalHostError as error:
             logger.warning(f"pan up could not wake orchestrator: {type(error).__name__}")
     return UpReport(
         orchestrator_address=orchestrator.address, started=started, woke=woke, lost_threads=lost

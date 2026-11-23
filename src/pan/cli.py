@@ -14,7 +14,7 @@ from typer._click.exceptions import ClickException
 
 from pan.adapters.clock import SystemClock, UuidGen
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
-from pan.adapters.hc import ShellHcAdapter
+from pan.adapters.terminal_host import build_terminal_host
 from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.credentials import load_credentials, save_credentials
 from pan.directive import parse_directive
@@ -22,7 +22,6 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     GatedOpDeniedError,
-    HcError,
     InboxError,
     PanError,
     SlackPostError,
@@ -31,6 +30,7 @@ from pan.errors import (
     TargetBlockedError,
     TargetNotFoundError,
     TerminalGoneError,
+    TerminalHostError,
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
@@ -74,7 +74,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     InboxError: 13,
     ThreadNotFoundError: 14,
     SpawnError: 15,
-    HcError: 16,
+    TerminalHostError: 16,
     SlackPostError: 17,
     GatedOpDeniedError: 18,
     TargetNotFoundError: 20,
@@ -86,7 +86,13 @@ _EXIT_CODES: dict[type[PanError], int] = {
 
 
 def _exit_code_for(error: PanError) -> int:
-    return _EXIT_CODES.get(type(error), 1)
+    # The most specific documented class wins, so an adapter's own subclass (the hc
+    # adapter's HcError) maps through its neutral base (TerminalHostError).
+    for error_class in type(error).__mro__:
+        exit_code = _EXIT_CODES.get(error_class)
+        if exit_code is not None:
+            return exit_code
+    return 1
 
 
 def _config() -> PanConfig:
@@ -108,7 +114,9 @@ def gateway() -> None:
 def watcher() -> None:
     """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
     config = _config()
-    WatchdogInboxWatcher(ShellHcAdapter(), config.orchestrator.terminal, config.paths.inbox).start()
+    WatchdogInboxWatcher(
+        build_terminal_host(config.terminal_host), config.orchestrator.terminal, config.paths.inbox
+    ).start()
 
 
 @config_app.command("set-token")
@@ -174,7 +182,7 @@ def spawn(
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
     spawn_worker(
@@ -186,8 +194,8 @@ def spawn(
         stream=stream,
         app_space=config.orchestrator.app_space,
         git=ShellGitWorktreeAdapter(),
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=FileThreadMap(config.paths.threads, clock),
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
@@ -209,15 +217,15 @@ def reopen(
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
     credentials = load_credentials(config.paths.credentials)
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
     # only maps the exit code.
     reopen_worker(
         record=record,
         task=task,
         app_space=config.orchestrator.app_space,
-        hc=hc,
-        launcher=ClaudeLauncher(hc),
+        terminal_host=terminal_host,
+        launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map,
         slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
         clock=clock,
@@ -335,7 +343,7 @@ def status(thread: str = typer.Option(..., "--thread")) -> None:
     terminal = None
     if record.terminal_address:
         try:
-            terminal = ShellHcAdapter().get(record.terminal_address)
+            terminal = build_terminal_host(config.terminal_host).get(record.terminal_address)
         except TerminalGoneError:
             terminal = None
     typer.echo(worker_status_for(terminal, record.status).value)
@@ -362,7 +370,8 @@ def sessions(as_json: bool = typer.Option(False, "--json")) -> None:
     drift. --json emits the SessionSummary list for the orchestrator."""
     config = _config()
     summaries = collect_sessions(
-        ShellHcAdapter(), FileThreadMap(config.paths.threads, SystemClock())
+        build_terminal_host(config.terminal_host),
+        FileThreadMap(config.paths.threads, SystemClock()),
     )
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
@@ -378,9 +387,10 @@ def relay(
     target: str = typer.Argument(..., help=_TARGET_HELP),
     message: str = typer.Argument(..., help="text to send into the target terminal"),
 ) -> None:
-    """Relay a message into a live hc terminal (pan-owned or external)."""
-    hc = ShellHcAdapter()
-    resolved = relay_to_session(hc, target, message, hc.list_terminals())
+    """Relay a message into a live terminal (pan-owned or external)."""
+    config = _config()
+    terminal_host = build_terminal_host(config.terminal_host)
+    resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
     typer.echo(
         f"relayed into {resolved.name or resolved.where or resolved.address} terminal {resolved.address}"
     )
@@ -393,13 +403,13 @@ def read(
 ) -> None:
     """Print a live session's raw output: recent lines, or the full transcript with --full."""
     config = _config()
-    hc = ShellHcAdapter()
+    terminal_host = build_terminal_host(config.terminal_host)
     records = FileThreadMap(config.paths.threads, SystemClock()).records()
     raw = read_session(
-        hc,
+        terminal_host,
         records,
         target,
-        hc.list_terminals(),
+        terminal_host.list_terminals(),
         full=full,
         lines=READ_RECENT_LINES,
         full_history_lines=READ_FULL_HISTORY_LINES,
@@ -418,7 +428,7 @@ def stop(thread: str = typer.Option(..., "--thread")) -> None:
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
     if record.terminal_address:
-        ShellHcAdapter().remove(record.terminal_address)
+        build_terminal_host(config.terminal_host).remove(record.terminal_address)
     thread_map.update_status(thread, WorkerStatus.FAILED)
     typer.echo(f"stopped {thread}")
 
@@ -429,7 +439,7 @@ def up() -> None:
     FAILED, and wake an already-running orchestrator once. Safe to run any time."""
     config = _config()
     report = bring_up(
-        ShellHcAdapter(),
+        build_terminal_host(config.terminal_host),
         FileThreadMap(config.paths.threads, SystemClock()),
         terminal=config.orchestrator.terminal,
         cwd=config.orchestrator.cwd,

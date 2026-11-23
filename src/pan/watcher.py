@@ -15,10 +15,10 @@ from watchdog.events import (
 from watchdog.observers import Observer
 
 from pan.config import WATCHER_DEBOUNCE_SECONDS
-from pan.errors import HcError
+from pan.errors import TerminalHostError
 from pan.inbox import is_inbox_entry_name
 from pan.logging import initialise_logger
-from pan.seams import HcAdapter
+from pan.seams import TerminalHost
 
 logger = initialise_logger(__name__)
 
@@ -75,27 +75,27 @@ class WakeDebouncer:
 class WatchdogInboxWatcher:
     def __init__(
         self,
-        hc: HcAdapter,
+        terminal_host: TerminalHost,
         orchestrator_terminal: str,
         inbox_dir: Path,
         *,
         debounce_seconds: float = WATCHER_DEBOUNCE_SECONDS,
         timer_factory: TimerFactory = threading.Timer,
     ) -> None:
-        self._hc = hc
+        self._terminal_host = terminal_host
         self._orchestrator_terminal = orchestrator_terminal
         self._inbox_dir = inbox_dir
         self._debouncer = WakeDebouncer(self.on_inbox_changed, debounce_seconds, timer_factory)
 
     def on_inbox_changed(self) -> None:
-        # INV-2: send the fixed wake instruction; `hc send` pastes it and presses Enter.
+        # INV-2: send the fixed wake instruction; one terminal host send pastes it and presses Enter.
         # It carries NO task payload; the payload lives in the durable inbox. A blocked or
-        # missing orchestrator (or any hc failure) is logged, never raised: the item stays
+        # missing orchestrator (or any terminal host failure) is logged, never raised: the item stays
         # in the inbox, the next change re-nudges, and `pan up` sends a wake, whereas a
         # crash would only make launchd restart the watcher in a loop.
         try:
-            self._hc.send(self._orchestrator_terminal, WAKE_INSTRUCTION)
-        except HcError as error:
+            self._terminal_host.send(self._orchestrator_terminal, WAKE_INSTRUCTION)
+        except TerminalHostError as error:
             logger.warning(f"watcher could not wake orchestrator: {type(error).__name__}")
             return
         logger.info("watcher woke orchestrator")

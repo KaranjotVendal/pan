@@ -13,7 +13,7 @@ from pan.config import (
     WORKER_NAME_PREFIX,
     WORKER_ROLE,
 )
-from pan.errors import HcError, SpawnError, TerminalGoneError, TerminalNameTakenError
+from pan.errors import SpawnError, TerminalGoneError, TerminalHostError, TerminalNameTakenError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import Terminal, TerminalState, ThreadRecord, WorkerStatus
@@ -21,9 +21,9 @@ from pan.seams import (
     AgentLauncher,
     Clock,
     GitWorktreeAdapter,
-    HcAdapter,
     IdGen,
     SlackAdapter,
+    TerminalHost,
     ThreadMap,
 )
 
@@ -52,8 +52,8 @@ def _write_worker_settings(worktree_path: Path) -> None:
 
 
 def worker_terminal_name(stream: str | None, id_gen: IdGen) -> str:
-    # `pan-<stream>` normalized to hc's name rules (1-32 of a-z 0-9 - _); the same string
-    # is the git branch. A stream with nothing usable left falls back to a fresh id.
+    # `pan-<stream>` normalized to the terminal host's name rules (hc: 1-32 of a-z 0-9 - _);
+    # the same string is the git branch. A stream with nothing usable left falls back to a fresh id.
     slug = _NAME_DISALLOWED.sub("-", stream.lower()).strip("-") if stream else ""
     if not slug:
         slug = id_gen.new_id()[:8]
@@ -73,8 +73,8 @@ def worker_labels(thread_ts: str, channel: str, app_space: str | None) -> dict[s
 
 
 class ClaudeLauncher:
-    def __init__(self, hc: HcAdapter) -> None:
-        self._hc = hc
+    def __init__(self, terminal_host: TerminalHost) -> None:
+        self._terminal_host = terminal_host
 
     def launch(
         self,
@@ -90,14 +90,14 @@ class ClaudeLauncher:
         # the first task in the run itself; a send to a booting agent can be dropped.
         # continue_session resumes the worktree's most recent conversation (reopen).
         argv = ["claude", "--continue", brief] if continue_session else ["claude", brief]
-        return self._hc.run(name=name, cwd=worktree, argv=argv, labels=labels)
+        return self._terminal_host.run(name=name, cwd=worktree, argv=argv, labels=labels)
 
 
-def _ensure_name_free(hc: HcAdapter, name: str) -> None:
+def _ensure_name_free(terminal_host: TerminalHost, name: str) -> None:
     # Fail before creating a worktree when a live terminal already holds the name, so a
-    # reused `--stream` never half-spawns. hc's own name_taken check still guards the race.
+    # reused `--stream` never half-spawns. The host's own name check still guards the race.
     try:
-        existing = hc.get(name)
+        existing = terminal_host.get(name)
     except TerminalGoneError:
         return
     if existing.state is TerminalState.LIVE:
@@ -114,7 +114,7 @@ def spawn_worker(
     stream: str | None,
     app_space: str | None,
     git: GitWorktreeAdapter,
-    hc: HcAdapter,
+    terminal_host: TerminalHost,
     launcher: AgentLauncher,
     thread_map: ThreadMap,
     slack: SlackAdapter,
@@ -125,7 +125,7 @@ def spawn_worker(
     created_at = clock.now()
 
     try:
-        _ensure_name_free(hc, name)
+        _ensure_name_free(terminal_host, name)
         worktree_path = git.create_worktree(repo, name, base)
         # Register the worker's hooks before it launches, so its SessionStart / Stop /
         # Notification events reach the thread (resolved by cwd).
@@ -133,7 +133,7 @@ def spawn_worker(
         terminal = launcher.launch(
             name, worktree_path, task, worker_labels(thread_ts, channel, app_space)
         )
-    except (SpawnError, HcError) as error:
+    except (SpawnError, TerminalHostError) as error:
         # Record the failed attempt so the thread map still reflects the binding
         # (the worktree may not exist, so record its intended path) and surface it.
         reason = "stream name in use" if isinstance(error, TerminalNameTakenError) else None
@@ -175,7 +175,7 @@ def reopen_worker(
     record: ThreadRecord,
     task: str,
     app_space: str | None,
-    hc: HcAdapter,
+    terminal_host: TerminalHost,
     launcher: AgentLauncher,
     thread_map: ThreadMap,
     slack: SlackAdapter,
@@ -188,7 +188,7 @@ def reopen_worker(
     try:
         if not record.worktree_path.is_dir():
             raise SpawnError(f"worktree missing for stream {name}")
-        _ensure_name_free(hc, name)
+        _ensure_name_free(terminal_host, name)
         terminal = launcher.launch(
             name,
             record.worktree_path,
@@ -196,7 +196,7 @@ def reopen_worker(
             worker_labels(record.thread_ts, record.channel, app_space),
             continue_session=True,
         )
-    except (SpawnError, HcError) as error:
+    except (SpawnError, TerminalHostError) as error:
         notice = f"reopen failed for stream {name}"
         if isinstance(error, TerminalNameTakenError):
             notice = f"{notice}: stream name in use"

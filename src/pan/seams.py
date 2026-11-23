@@ -47,8 +47,15 @@ class ThreadMap(Protocol):
     ) -> None: ...
 
 
-class HcAdapter(Protocol):
-    # `terminal` arguments accept any hc address form: t7, a name, or machine/t7.
+class TerminalHost(Protocol):
+    # The terminal multiplexer pan runs agents in (hc today; see TerminalHostKind). Only the
+    # host's adapter in src/pan/adapters/ talks to the host itself. `terminal` arguments
+    # accept any address form the host reports, or a terminal name. Failures raise
+    # TerminalHostError or one of its typed kinds.
+    #
+    # `labels` are an optional hint a host may store and filter on (hc does); a host without
+    # labels ignores them. Ownership ("pan started this") never depends on labels: it comes
+    # from pan's thread map (see sessions.collect_sessions).
     def run(self, *, name: str, cwd: Path, argv: list[str], labels: dict[str, str]) -> Terminal: ...
 
     # Paste text and press Enter; raises TargetBlockedError when the target is blocked.

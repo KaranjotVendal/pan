@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from pan.errors import ConfigMissingError
 from pan.logging import initialise_logger
-from pan.models import PanConfig
+from pan.models import PanConfig, TerminalHostKind
 
 logger = initialise_logger(__name__)
 
@@ -24,9 +24,11 @@ READ_FULL_HISTORY_LINES = 5000
 # filesystem events (or several items arriving together) becomes a single wake.
 WATCHER_DEBOUNCE_SECONDS = 1.0
 
-# hc labels pan puts on the terminals it starts. Workers carry their thread and channel so
-# `hc ls --label` finds them without the thread map; `herdr.space` opts a terminal into a
-# Herdr app space (only when orchestrator.app_space is configured).
+# Labels pan puts on the terminals it starts, for a host that supports them (hc does).
+# Workers carry their thread and channel so `hc ls --label` finds them without the thread
+# map; `herdr.space` opts a terminal into a Herdr app space (only when
+# orchestrator.app_space is configured). They are a hint only: whether pan started a
+# terminal is decided by the thread map, never by labels.
 PAN_ROLE_LABEL = "pan.role"
 PAN_THREAD_LABEL = "pan.thread"
 PAN_CHANNEL_LABEL = "pan.channel"
@@ -122,6 +124,18 @@ def _reject_herdr_era_orchestrator(raw_config: dict, config_path: Path) -> None:
         )
 
 
+def _reject_unknown_terminal_host(raw_config: dict, config_path: Path) -> None:
+    if "terminal_host" not in raw_config:
+        return
+    terminal_host = raw_config["terminal_host"]
+    accepted = sorted(kind.value for kind in TerminalHostKind)
+    if terminal_host not in accepted:
+        raise ConfigMissingError(
+            f"config terminal_host {terminal_host!r} is not supported: {config_path}. "
+            f"Accepted values: {', '.join(accepted)}"
+        )
+
+
 def load_config(path: Path | None = None) -> PanConfig:
     config_path = path if path is not None else DEFAULT_CONFIG_PATH
 
@@ -139,6 +153,7 @@ def load_config(path: Path | None = None) -> PanConfig:
         raise ConfigMissingError(f"config file must be a JSON object: {config_path}")
 
     _reject_herdr_era_orchestrator(raw_config, config_path)
+    _reject_unknown_terminal_host(raw_config, config_path)
     _expand_user_paths(raw_config)
 
     try:

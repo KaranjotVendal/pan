@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hc_fakes import FakeHc, make_terminal
+from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
 from pan.sessions import collect_sessions, session_drift, worker_status_for
@@ -39,11 +39,11 @@ class FakeThreadMap:
         return self._records
 
 
-def _hc_with(*terminals: object) -> FakeHc:
-    hc = FakeHc()
+def _terminal_host_with(*terminals: object) -> FakeTerminalHost:
+    terminal_host = FakeTerminalHost()
     for terminal in terminals:
-        hc.add(terminal)  # type: ignore[arg-type]
-    return hc
+        terminal_host.add(terminal)  # type: ignore[arg-type]
+    return terminal_host
 
 
 @pytest.mark.parametrize(
@@ -68,7 +68,7 @@ def _hc_with(*terminals: object) -> FakeHc:
     ids=["address", "name", "cwd"],
 )
 def test_collect_sessions_joins_pan_owned_terminals(terminal: object, record: ThreadRecord) -> None:
-    summaries = collect_sessions(_hc_with(terminal), FakeThreadMap([record]))
+    summaries = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([record]))
 
     (summary,) = summaries
     assert summary.is_pan_owned is True
@@ -87,7 +87,7 @@ def test_collect_sessions_marks_external_terminal() -> None:
     )
     record = _record("t-1", "pan-a", "t5", "/tmp/worktree")
 
-    (summary,) = collect_sessions(_hc_with(terminal), FakeThreadMap([record]))
+    (summary,) = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([record]))
 
     assert summary.address == "t2"
     assert summary.where == "my-app / 1"
@@ -113,7 +113,7 @@ def test_collect_sessions_sets_drift_flag(
     terminal = make_terminal("t5", agent_status=agent_status)
     record = _record("t-1", "pan-a", "t5", "/tmp/worktree", status=pan_status)
 
-    (summary,) = collect_sessions(_hc_with(terminal), FakeThreadMap([record]))
+    (summary,) = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([record]))
 
     assert summary.drift is expected_drift
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hc_fakes import FakeHc, make_terminal
+from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import TargetBlockedError, TerminalNameTakenError
 from pan.lifecycle import ORCHESTRATOR_BOOT_BRIEF, UpReport, bring_up, reconcile_lost_workers
@@ -43,9 +43,9 @@ class FakeThreadMap:
         return self._records[thread_ts].status
 
 
-def _bring_up(hc: FakeHc, thread_map: FakeThreadMap | None = None) -> UpReport:
+def _bring_up(terminal_host: FakeTerminalHost, thread_map: FakeThreadMap | None = None) -> UpReport:
     return bring_up(
-        hc,
+        terminal_host,
         thread_map if thread_map is not None else FakeThreadMap([]),
         terminal="pan-orchestrator",
         cwd=_CWD,
@@ -54,11 +54,11 @@ def _bring_up(hc: FakeHc, thread_map: FakeThreadMap | None = None) -> UpReport:
 
 
 def test_bring_up_starts_a_missing_orchestrator_with_the_boot_brief() -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
 
-    report = _bring_up(hc)
+    report = _bring_up(terminal_host)
 
-    (run,) = hc.runs
+    (run,) = terminal_host.runs
     assert run.name == "pan-orchestrator"
     assert run.cwd == _CWD
     assert run.argv == [*_COMMAND, ORCHESTRATOR_BOOT_BRIEF]
@@ -67,24 +67,24 @@ def test_bring_up_starts_a_missing_orchestrator_with_the_boot_brief() -> None:
     assert report.orchestrator_address == "t101"
     # A freshly started orchestrator drains on its own via the boot brief; a send to a
     # booting agent could be dropped, so no wake is sent.
-    assert hc.sent == []
+    assert terminal_host.sent == []
 
 
 def test_bring_up_leaves_a_healthy_orchestrator_and_wakes_it() -> None:
-    hc = FakeHc()
-    hc.add(make_terminal("t42", name="pan-orchestrator", agent="claude-code"))
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t42", name="pan-orchestrator", agent="claude-code"))
 
-    report = _bring_up(hc)
+    report = _bring_up(terminal_host)
 
-    assert hc.runs == []
+    assert terminal_host.runs == []
     assert report.started is False
     assert report.orchestrator_address == "t42"
-    assert hc.sent == [("t42", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("t42", WAKE_INSTRUCTION)]
 
 
 def test_bring_up_replaces_a_finished_orchestrator() -> None:
-    hc = FakeHc()
-    hc.add(
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(
         make_terminal(
             "t42",
             name="pan-orchestrator",
@@ -93,38 +93,40 @@ def test_bring_up_replaces_a_finished_orchestrator() -> None:
         )
     )
 
-    report = _bring_up(hc)
+    report = _bring_up(terminal_host)
 
-    assert hc.removed == ["t42"]
-    assert hc.timeline[:2] == ["remove", "run"]
+    assert terminal_host.removed == ["t42"]
+    assert terminal_host.timeline[:2] == ["remove", "run"]
     assert report.started is True
 
 
 def test_bring_up_refuses_a_live_terminal_that_is_not_claude() -> None:
     # A live terminal holding the name but running something else is not pan's to kill.
-    hc = FakeHc()
-    hc.add(make_terminal("t3", name="pan-orchestrator", agent="zsh", agent_status=AgentStatus.NONE))
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(
+        make_terminal("t3", name="pan-orchestrator", agent="zsh", agent_status=AgentStatus.NONE)
+    )
 
     with pytest.raises(TerminalNameTakenError):
-        _bring_up(hc)
+        _bring_up(terminal_host)
 
-    assert hc.removed == []
-    assert hc.runs == []
+    assert terminal_host.removed == []
+    assert terminal_host.runs == []
 
 
 def test_bring_up_tolerates_a_blocked_orchestrator_on_wake() -> None:
-    hc = FakeHc(errors={"send": TargetBlockedError("blocked")})
-    hc.add(make_terminal("t42", name="pan-orchestrator", agent="claude-code"))
+    terminal_host = FakeTerminalHost(errors={"send": TargetBlockedError("blocked")})
+    terminal_host.add(make_terminal("t42", name="pan-orchestrator", agent="claude-code"))
 
-    report = _bring_up(hc)
+    report = _bring_up(terminal_host)
 
     assert report.woke is False
 
 
 def test_reconcile_marks_only_gone_live_workers_failed() -> None:
-    hc = FakeHc()
-    hc.add(make_terminal("t20", agent_status=AgentStatus.WORKING))
-    hc.add(make_terminal("t21", state=TerminalState.FINISHED))
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t20", agent_status=AgentStatus.WORKING))
+    terminal_host.add(make_terminal("t21", state=TerminalState.FINISHED))
     records = [
         _record("alive", "t20", WorkerStatus.RUNNING),
         _record("finished-terminal", "t21", WorkerStatus.BLOCKED),
@@ -134,7 +136,7 @@ def test_reconcile_marks_only_gone_live_workers_failed() -> None:
     ]
     thread_map = FakeThreadMap(records)
 
-    lost = reconcile_lost_workers(hc, thread_map)
+    lost = reconcile_lost_workers(terminal_host, thread_map)
 
     assert lost == ["finished-terminal", "missing-terminal", "never-launched"]
     assert thread_map.status_of("alive") is WorkerStatus.RUNNING
@@ -143,9 +145,9 @@ def test_reconcile_marks_only_gone_live_workers_failed() -> None:
 
 
 def test_bring_up_reports_lost_workers() -> None:
-    hc = FakeHc()
+    terminal_host = FakeTerminalHost()
     thread_map = FakeThreadMap([_record("gone", "t30", WorkerStatus.RUNNING)])
 
-    report = _bring_up(hc, thread_map)
+    report = _bring_up(terminal_host, thread_map)
 
     assert report.lost_threads == ["gone"]
