@@ -9,6 +9,18 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Fixed
 
+- A worker's brief and the "from Slack" line typed into a desk session now say who replies in
+  Slack, by the thread's reply mode, instead of a bare "Do not post to Slack." that a worker in
+  the reply-in-Slack mode read as a refusal. In that mode they say "Do not post to Slack
+  yourself: pan posts your final answer to this Slack thread for you."; otherwise "Do not post
+  to Slack yourself: the Slack thread gets a reply only when the person asks for one, and pan
+  posts it for you." `worker_brief` and `from_slack_text` take the reply mode, and a follow-up
+  to a desk session uses its record's mode.
+- `check` on a session with no transcript posts its screen text cleaned by `clean_screen_text`:
+  lines made only of box-drawing or rule characters (Claude Code's dividers and banner frame)
+  are dropped, runs of blank lines collapse to one, trailing whitespace is stripped, and only
+  the last `CHECK_SCREEN_MAX_LINES` (30) non-empty lines are kept. The "(incomplete: ...)"
+  marker stays on top.
 - The inbox-link hook now records the Inbox link for a worker in Claude Code's code mode, which
   calls the Inbox from inside its `REPL` tool. The worker's PostToolUse matcher is
   `^(mcp__plannotator__plannotator_inbox|REPL)$` (built from `PLANNOTATOR_INBOX_TOOL_NAME` and

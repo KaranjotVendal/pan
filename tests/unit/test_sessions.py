@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
+from pan.models import AgentStatus, ReplyMode, TerminalState, ThreadRecord, WorkerStatus
 from pan.sessions import collect_sessions, session_drift, worker_status_for
 from pan.spawn import worker_brief
 
@@ -261,7 +261,10 @@ def _transcript_asking(tmp_path: Path, ask: str) -> Path:
     "ask, expected",
     [
         ("add the tests", "add the tests"),
-        (worker_brief("pan-a: fix the login page", "fix the\nlogin page"), "fix the login page"),
+        (
+            worker_brief("pan-a: fix the login page", "fix the\nlogin page", ReplyMode.ON_DEMAND),
+            "fix the login page",
+        ),
         ("x" * 100, "x" * 77 + "..."),
     ],
     ids=["plain", "brief-cut-to-its-task", "truncated"],

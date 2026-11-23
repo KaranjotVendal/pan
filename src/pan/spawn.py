@@ -74,8 +74,20 @@ _WORKER_SETTINGS = {
 _WORKER_BRIEF_PREAMBLE = (
     "pan started you from a Slack request. Use the Plannotator Inbox for questions, decisions "
     'and progress, in a thread named exactly "{inbox_thread_name}". Send a first short message '
-    "there before you start the work. Do not post to Slack."
+    "there before you start the work. {slack_reply_sentence}"
 )
+# Tells a session started or messaged from Slack who replies in the Slack thread. pan's Stop
+# hook posts the final answer itself in the reply-in-Slack mode; otherwise Slack gets a reply
+# only when the person asks for one, and pan posts that too.
+_SLACK_REPLY_SENTENCES: dict[ReplyMode, str] = {
+    ReplyMode.SLACK: (
+        "Do not post to Slack yourself: pan posts your final answer to this Slack thread for you."
+    ),
+    ReplyMode.ON_DEMAND: (
+        "Do not post to Slack yourself: the Slack thread gets a reply only when the person asks "
+        "for one, and pan posts it for you."
+    ),
+}
 
 _NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
 
@@ -104,8 +116,14 @@ def inbox_thread_name(terminal_name: str, task: str) -> str:
     return f"{terminal_name}: {short_task}" if short_task else terminal_name
 
 
-def worker_brief(inbox_thread: str, task: str) -> str:
-    preamble = _WORKER_BRIEF_PREAMBLE.format(inbox_thread_name=inbox_thread)
+def slack_reply_sentence(reply_mode: ReplyMode) -> str:
+    return _SLACK_REPLY_SENTENCES[reply_mode]
+
+
+def worker_brief(inbox_thread: str, task: str, reply_mode: ReplyMode) -> str:
+    preamble = _WORKER_BRIEF_PREAMBLE.format(
+        inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
+    )
     return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
 
 
@@ -205,7 +223,7 @@ def spawn_worker(
         terminal = launcher.launch(
             name,
             worktree_path,
-            worker_brief(inbox_thread, task),
+            worker_brief(inbox_thread, task, reply_mode),
             worker_labels(thread_ts, channel, app_space),
         )
     except (SpawnError, TerminalHostError) as error:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import difflib
+import re
 
-from pan.config import CLAUDE_AGENT_NAMES, WORKER_BRIEF_TASK_MARKER
+from pan.config import CHECK_SCREEN_MAX_LINES, CLAUDE_AGENT_NAMES, WORKER_BRIEF_TASK_MARKER
 from pan.errors import (
     SessionBusyError,
     TargetAmbiguousError,
@@ -13,7 +14,7 @@ from pan.errors import (
     ThreadNotFoundError,
 )
 from pan.gateway.slack_post import slack_post, slack_post_parts
-from pan.interface import read_session, resolve_target
+from pan.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
 from pan.logging import initialise_logger
 from pan.models import (
     AgentStatus,
@@ -26,7 +27,7 @@ from pan.models import (
 )
 from pan.seams import Clock, InboxDirectory, SlackAdapter, TerminalHost, ThreadMap
 from pan.sessions import joins_by_address, joins_terminal, worker_status_for
-from pan.spawn import desk_session_ended_reply, inbox_thread_name
+from pan.spawn import desk_session_ended_reply, inbox_thread_name, slack_reply_sentence
 from pan.transcript import last_assistant_text
 
 logger = initialise_logger(__name__)
@@ -35,7 +36,7 @@ UNTIED_THREAD_REPLY = "this thread isn't tied to a session; @pan sessions lists 
 # The line on top of text typed into a session from Slack (see from_slack_text).
 FROM_SLACK_HEADER = (
     "From Slack via pan. Put questions and progress in the Plannotator Inbox thread named "
-    '"{inbox_thread_name}"; Slack gets a reply only when someone asks for one.'
+    '"{inbox_thread_name}". {slack_reply_sentence}'
 )
 # The agent states in which a session is waiting for input, so text can be typed into it. Any
 # other state (working, an error, no status, an unknown one) counts as busy, except a fresh
@@ -43,6 +44,9 @@ FROM_SLACK_HEADER = (
 _READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
 _CLOSE_MATCH_LIMIT = 3
 _CLOSE_MATCH_CUTOFF = 0.6
+# A screen line made only of box-drawing characters (Claude Code's dividers and banner frame),
+# ASCII rule characters and whitespace carries nothing worth posting.
+_DIVIDER_LINE = re.compile(r"[\s\u2500-\u259f\-=_]*")
 
 # What `check` says about the session's state, from the status its terminal implies.
 _STATE_SENTENCES: dict[WorkerStatus, str] = {
@@ -113,11 +117,13 @@ def sent_notice(record: ThreadRecord) -> str:
     return notice
 
 
-def from_slack_text(inbox_thread: str, text: str) -> str:
-    # The text typed into a session, under one line saying where it came from and which Inbox
-    # thread to report in. The brief's task marker separates them, so `pan sessions` shows only
-    # the task as the session's last ask.
-    header = FROM_SLACK_HEADER.format(inbox_thread_name=inbox_thread)
+def from_slack_text(inbox_thread: str, text: str, reply_mode: ReplyMode) -> str:
+    # The text typed into a session, under one line saying where it came from, which Inbox
+    # thread to report in and who replies in Slack. The brief's task marker separates them, so
+    # `pan sessions` shows only the task as the session's last ask.
+    header = FROM_SLACK_HEADER.format(
+        inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
+    )
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
 
 
@@ -229,17 +235,17 @@ def send_to_session(
         if session_record is not None and session_record.inbox_thread_name
         else inbox_thread_name(name, text)
     )
+    reply_mode = ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND
     _deliver(
         terminal_host,
         target,
-        from_slack_text(inbox_thread, text),
+        from_slack_text(inbox_thread, text, reply_mode),
         slack=slack,
         channel=channel,
         thread_ts=thread_ts,
     )
 
     now = clock.now()
-    reply_mode = ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND
     if session_record is None:
         # A desk session: pan did not start it, so its record holds its own folder and pan
         # never stops, removes or reopens it.
@@ -313,7 +319,7 @@ def follow_up_to_session(
     typed = text
     if not record.started_by_pan:
         inbox_thread = record.inbox_thread_name or inbox_thread_name(record.terminal_name, text)
-        typed = from_slack_text(inbox_thread, text)
+        typed = from_slack_text(inbox_thread, text, record.reply_mode)
     _deliver(terminal_host, terminal, typed, slack=slack, channel=channel, thread_ts=thread_ts)
     if not record.started_by_pan:
         thread_map.update_status(thread_ts, WorkerStatus.RUNNING, session_name=record.terminal_name)
@@ -356,6 +362,36 @@ def _live_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Termina
     return terminal if terminal.state is TerminalState.LIVE else None
 
 
+def clean_screen_text(screen: str, max_lines: int = CHECK_SCREEN_MAX_LINES) -> str:
+    # Screen text for Slack: trailing whitespace stripped, divider lines dropped, runs of blank
+    # lines collapsed to one, and only the last `max_lines` non-empty lines kept. A leading
+    # "(incomplete: ...)" marker from read_session is kept on top.
+    lines = screen.splitlines()
+    marker = None
+    if lines and lines[0] == INCOMPLETE_READ_NOTICE:
+        marker, lines = lines[0], lines[1:]
+    kept: list[str] = []
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line:
+            if kept and kept[-1]:
+                kept.append(line)
+        elif not _DIVIDER_LINE.fullmatch(line):
+            kept.append(line)
+    while kept and not kept[-1]:
+        kept.pop()
+    non_empty_seen = 0
+    start = len(kept)
+    while start > 0 and non_empty_seen < max_lines:
+        start -= 1
+        if kept[start]:
+            non_empty_seen += 1
+    tail = kept[start:]
+    if marker is not None:
+        tail.insert(0, marker)
+    return "\n".join(tail)
+
+
 def check_reply(record: ThreadRecord, terminal_host: TerminalHost, *, screen_lines: int) -> str:
     # The tied session's latest answer, as is: the last assistant text from its transcript,
     # or, without one, its recent screen lines labelled as such. Headed by the session name,
@@ -383,7 +419,7 @@ def check_reply(record: ThreadRecord, terminal_host: TerminalHost, *, screen_lin
                 lines=screen_lines,
                 full_history_lines=screen_lines,
             )
-            body = f"Screen text (no transcript yet):\n```\n{screen}\n```"
+            body = f"Screen text (no transcript yet):\n```\n{clean_screen_text(screen)}\n```"
         except TerminalHostError:
             body = "Its screen could not be read."
     else:
