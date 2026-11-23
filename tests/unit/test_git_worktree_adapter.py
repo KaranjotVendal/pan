@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from terminal_host_fakes import FakeTerminalHost
 
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.errors import GitWorktreeError, PanError, SpawnError, UnsavedWorkError
-from pan.models import ThreadRecord, WorkerStatus
+from pan.models import BranchStatus, ThreadRecord, WorkerStatus
 from pan.session_control import done_thread
 from pan.threadmap import FileThreadMap
 
@@ -106,13 +107,31 @@ def _status(adapter: ShellGitWorktreeAdapter) -> object:
     return adapter.worktree_status(Path("/base/pan-task-3"))
 
 
+def _branch_status(adapter: ShellGitWorktreeAdapter) -> object:
+    return adapter.branch_status(Path("/repo"), "pan-task-3")
+
+
+def _prune(adapter: ShellGitWorktreeAdapter) -> object:
+    return adapter.prune_worktrees(Path("/repo"))
+
+
 _OPERATIONS_AND_ERRORS = [
     (_create, SpawnError),
     (_remove, GitWorktreeError),
     (_delete_branch, GitWorktreeError),
     (_status, GitWorktreeError),
+    (_branch_status, GitWorktreeError),
+    (_prune, GitWorktreeError),
 ]
-_OPERATION_IDS = ["create", "remove", "delete-branch", "status"]
+_OPERATION_IDS = ["create", "remove", "delete-branch", "status", "branch-status", "prune"]
+
+
+def test_prune_worktrees_builds_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_runner(monkeypatch)
+
+    ShellGitWorktreeAdapter().prune_worktrees(Path("/repo"))
+
+    assert calls[0] == ["git", "-C", "/repo", "worktree", "prune"]
 
 
 @pytest.mark.parametrize("operation, expected_error", _OPERATIONS_AND_ERRORS, ids=_OPERATION_IDS)
@@ -217,13 +236,12 @@ def test_status_of_a_fresh_worktree(worktree: Path, main_repo: Path) -> None:
     assert status.main_repo.resolve() == main_repo.resolve()
     assert status.is_main_worktree is False
     assert status.branch == _BRANCH
-    assert status.changed_paths == [".claude/settings.json"]
-    assert status.upstream is None
-    assert status.commits_not_on_upstream == 0
-    assert status.commits_not_in_base == 0
+    assert status.untracked_paths == [".claude/settings.json"]
+    assert status.modified_paths == []
+    assert status.detached_commits == 0
 
 
-def test_status_lists_uncommitted_and_renamed_files(worktree: Path) -> None:
+def test_status_splits_untracked_from_modified_files(worktree: Path) -> None:
     (worktree / "README.md").write_text("edited\n")
     (worktree / "notes.txt").write_text("new\n")
     _commit_file(worktree, "old_name.txt", "to rename\n")
@@ -231,12 +249,18 @@ def test_status_lists_uncommitted_and_renamed_files(worktree: Path) -> None:
 
     status = ShellGitWorktreeAdapter().worktree_status(worktree)
 
-    assert sorted(status.changed_paths) == [
-        ".claude/settings.json",
-        "README.md",
-        "new_name.txt",
-        "notes.txt",
-    ]
+    assert sorted(status.untracked_paths) == [".claude/settings.json", "notes.txt"]
+    assert sorted(status.modified_paths) == ["README.md", "new_name.txt"]
+
+
+def test_status_reports_a_tracked_settings_file_as_modified(worktree: Path) -> None:
+    _commit_file(worktree, ".claude/settings.json", "{}")
+    (worktree / ".claude" / "settings.json").write_text('{"hooks": {}}')
+
+    status = ShellGitWorktreeAdapter().worktree_status(worktree)
+
+    assert status.untracked_paths == []
+    assert status.modified_paths == [".claude/settings.json"]
 
 
 def test_status_leaves_out_ignored_files(worktree: Path) -> None:
@@ -246,48 +270,89 @@ def test_status_leaves_out_ignored_files(worktree: Path) -> None:
 
     status = ShellGitWorktreeAdapter().worktree_status(worktree)
 
-    assert status.changed_paths == [".claude/settings.json"]
+    assert status.untracked_paths == [".claude/settings.json"]
+    assert status.modified_paths == []
 
 
-def test_status_counts_commits_without_upstream_against_the_base(worktree: Path) -> None:
-    _commit_file(worktree, "feature.txt", "work\n")
-
-    status = ShellGitWorktreeAdapter().worktree_status(worktree)
-
-    assert status.upstream is None
-    assert status.commits_not_in_base == 1
-
-
-def test_status_counts_commits_against_the_upstream(worktree: Path) -> None:
-    _commit_file(worktree, "feature.txt", "work\n")
-    _git(worktree, "push", "-q", "-u", "origin", _BRANCH)
-    adapter = ShellGitWorktreeAdapter()
-
-    pushed = adapter.worktree_status(worktree)
-    _commit_file(worktree, "more.txt", "more work\n")
-    ahead = adapter.worktree_status(worktree)
-
-    assert pushed.upstream == f"origin/{_BRANCH}"
-    assert pushed.commits_not_on_upstream == 0
-    assert pushed.commits_not_in_base == 1
-    assert ahead.commits_not_on_upstream == 1
-
-
-def test_status_counts_no_commit_once_merged_into_the_base(worktree: Path, main_repo: Path) -> None:
-    _commit_file(worktree, "feature.txt", "work\n")
-    _git(main_repo, "merge", "-q", "--ff-only", _BRANCH)
-
-    status = ShellGitWorktreeAdapter().worktree_status(worktree)
-
-    assert status.commits_not_in_base == 0
-
-
-def test_status_reports_a_detached_head(worktree: Path) -> None:
+def test_status_counts_commits_only_a_detached_head_holds(worktree: Path) -> None:
     _git(worktree, "checkout", "-q", "--detach")
+    _commit_file(worktree, "feature.txt", "work\n")
 
     status = ShellGitWorktreeAdapter().worktree_status(worktree)
 
     assert status.branch is None
+    assert status.detached_commits == 1
+
+
+def _merge_into_base(worktree: Path, main_repo: Path) -> None:
+    _git(main_repo, "merge", "-q", "--ff-only", _BRANCH)
+
+
+def _push(worktree: Path, main_repo: Path) -> None:
+    _git(worktree, "push", "-q", "-u", "origin", _BRANCH)
+
+
+def _push_then_commit(worktree: Path, main_repo: Path) -> None:
+    _push(worktree, main_repo)
+    _commit_file(worktree, "more.txt", "more work\n")
+
+
+def _push_then_delete_remote_branch(worktree: Path, main_repo: Path) -> None:
+    # A squash-merged pull request: the remote branch is deleted and a fetch prunes it.
+    _push(worktree, main_repo)
+    _git(main_repo, "push", "-q", "origin", "--delete", _BRANCH)
+    _git(main_repo, "fetch", "-q", "--prune")
+
+
+def _no_change(worktree: Path, main_repo: Path) -> None:
+    return None
+
+
+@pytest.mark.parametrize(
+    "after_commit, expected",
+    [
+        (_no_change, BranchStatus(commits_not_in_base=1)),
+        (_merge_into_base, BranchStatus()),
+        (_push, BranchStatus(upstream=f"origin/{_BRANCH}", commits_not_in_base=1)),
+        (
+            _push_then_commit,
+            BranchStatus(
+                upstream=f"origin/{_BRANCH}", commits_not_on_upstream=1, commits_not_in_base=2
+            ),
+        ),
+        (
+            _push_then_delete_remote_branch,
+            BranchStatus(upstream=f"origin/{_BRANCH}", upstream_gone=True, commits_not_in_base=1),
+        ),
+    ],
+    ids=["no-upstream", "merged-into-base", "pushed", "ahead-of-upstream", "upstream-gone"],
+)
+def test_branch_status(
+    worktree: Path,
+    main_repo: Path,
+    after_commit: Callable[[Path, Path], None],
+    expected: BranchStatus,
+) -> None:
+    _commit_file(worktree, "feature.txt", "work\n")
+    after_commit(worktree, main_repo)
+
+    assert ShellGitWorktreeAdapter().branch_status(main_repo, _BRANCH) == expected
+
+
+def test_branch_status_of_a_missing_branch(main_repo: Path) -> None:
+    _git(main_repo, "branch", f"{_BRANCH}/nested")
+
+    assert ShellGitWorktreeAdapter().branch_status(main_repo, _BRANCH) is None
+
+
+def test_prune_worktrees_drops_a_deleted_folder(worktree: Path, main_repo: Path) -> None:
+    shutil.rmtree(worktree)
+    adapter = ShellGitWorktreeAdapter()
+
+    adapter.prune_worktrees(main_repo)
+    adapter.delete_branch(main_repo, _BRANCH, force=False)
+
+    assert _git(main_repo, "branch", "--list", _BRANCH) == ""
 
 
 def test_status_of_the_main_worktree(main_repo: Path) -> None:
@@ -359,30 +424,67 @@ class _RecordingSlack:
         raise NotImplementedError
 
 
+def _commit_only(worktree: Path, main_repo: Path) -> None:
+    _commit_file(worktree, "feature.txt", "work\n")
+
+
+def _commit_then_delete_remote_branch(worktree: Path, main_repo: Path) -> None:
+    _commit_only(worktree, main_repo)
+    _push_then_delete_remote_branch(worktree, main_repo)
+
+
+def _delete_folder(worktree: Path, main_repo: Path) -> None:
+    shutil.rmtree(worktree)
+
+
 @pytest.mark.parametrize(
-    "commit_work, discard, expected_reply",
+    "prepare, discard, expected_reply, expect_closed",
     [
-        (False, False, f"Closed {_BRANCH} and removed its worktree and branch."),
-        (True, True, f"Closed {_BRANCH} and removed its worktree and branch."),
+        (_no_change, False, f"Closed {_BRANCH} and removed its worktree and branch.", True),
         (
+            _commit_only,
             True,
+            f"Closed {_BRANCH} and removed its worktree and branch.",
+            True,
+        ),
+        (
+            _commit_only,
             False,
             f"{_BRANCH} has 1 unpushed commit; kept it. "
             "Push or commit them, or send `@pan done --discard`.",
+            False,
+        ),
+        (
+            _commit_then_delete_remote_branch,
+            False,
+            f"Closed {_BRANCH} and removed its worktree and branch.",
+            True,
+        ),
+        (
+            _delete_folder,
+            False,
+            f"Closed {_BRANCH} and removed its branch; its worktree was already gone.",
+            True,
         ),
     ],
-    ids=["clean", "discard-unmerged-commit", "keep-unmerged-commit"],
+    ids=[
+        "clean",
+        "discard-unmerged-commit",
+        "keep-unmerged-commit",
+        "upstream-gone",
+        "folder-gone",
+    ],
 )
 def test_done_thread_with_real_git(
     worktree: Path,
     main_repo: Path,
     tmp_path: Path,
-    commit_work: bool,
+    prepare: Callable[[Path, Path], None],
     discard: bool,
     expected_reply: str,
+    expect_closed: bool,
 ) -> None:
-    if commit_work:
-        _commit_file(worktree, "feature.txt", "work\n")
+    prepare(worktree, main_repo)
     clock = _FixedClock()
     thread_map = FileThreadMap(tmp_path / "threads.json", clock)
     thread_map.tie(
@@ -391,13 +493,13 @@ def test_done_thread_with_real_git(
             terminal_name=_BRANCH,
             channel="C0TEST",
             worktree_path=worktree,
+            repo_path=main_repo,
             status=WorkerStatus.IDLE,
             created_at=clock.now(),
             updated_at=clock.now(),
         )
     )
     slack = _RecordingSlack()
-    closes = discard or not commit_work
 
     try:
         done_thread(
@@ -405,15 +507,16 @@ def test_done_thread_with_real_git(
             channel="C0TEST",
             discard=discard,
             worktree_base=tmp_path / "worktrees",
+            fallback_repo=tmp_path / "orchestrator",
             thread_map=thread_map,
             terminal_host=FakeTerminalHost(),
             git=ShellGitWorktreeAdapter(),
             slack=slack,
         )
     except UnsavedWorkError:
-        assert not closes
+        assert not expect_closed
 
     assert slack.texts == [expected_reply]
-    assert worktree.exists() is not closes
+    assert worktree.exists() is not expect_closed
     branch_listing = _git(main_repo, "branch", "--list", _BRANCH)
-    assert (branch_listing == "") is closes
+    assert (branch_listing == "") is expect_closed

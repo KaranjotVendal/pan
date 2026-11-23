@@ -38,6 +38,7 @@ from pan.errors import (
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
+    UnsafeWorktreeError,
     UnsavedWorkError,
 )
 from pan.hooks.notification import notification_hook
@@ -45,6 +46,7 @@ from pan.hooks.stop import stop_hook
 from pan.inbox import FileInboxStore
 from pan.models import (
     AgentStatus,
+    BranchStatus,
     ConfirmationCandidate,
     InboxItem,
     LaunchdJobState,
@@ -646,6 +648,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (NoExactMatchError("x"), 28),
         (UnsavedWorkError("x"), 29),
         (GitWorktreeError("x"), 30),
+        (UnsafeWorktreeError("x"), 31),
         (PanError("x"), 1),
     ],
 )
@@ -1037,6 +1040,7 @@ def test_done_command_wires_to_done_thread(
     assert captured["channel"] == "C0TEST"
     assert captured["discard"] is expected_discard
     assert captured["worktree_base"] == config.orchestrator.worktree_base
+    assert captured["fallback_repo"] == config.orchestrator.cwd
 
 
 def test_done_command_keeps_a_worktree_with_unsaved_work(
@@ -1055,8 +1059,9 @@ def test_done_command_keeps_a_worktree_with_unsaved_work(
             main_repo=tmp_path / "repo",
             is_main_worktree=False,
             branch="pan-task",
-            changed_paths=["app.py"],
-        )
+            modified_paths=["app.py"],
+        ),
+        branches={tmp_path / "repo": BranchStatus()},
     )
     monkeypatch.setattr(cli, "ShellGitWorktreeAdapter", lambda: git)
     slack = _use_slack(monkeypatch)

@@ -55,6 +55,7 @@ from pan.errors import (
     TerminalNameTakenError,
     ThreadNotFoundError,
     UnauthorizedSenderError,
+    UnsafeWorktreeError,
     UnsavedWorkError,
 )
 from pan.gateway.app import BoltSlackAdapter
@@ -128,6 +129,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     NoExactMatchError: 28,
     UnsavedWorkError: 29,
     GitWorktreeError: 30,
+    UnsafeWorktreeError: 31,
 }
 
 
@@ -628,18 +630,22 @@ def done(
         False, "--discard", help="close it even if uncommitted files or unpushed commits are lost"
     ),
 ) -> None:
-    """Close the thread's tied session: remove its terminal, its worktree and its branch, mark
-    it done and untie the thread; say so in the thread. Keeps everything (exit 29) while the
-    worktree has uncommitted files (pan's own .claude/settings.json aside) or commits not
-    pushed (with no upstream: not merged into the default or base branch), and refuses while
-    the session is working (exit 26), unless --discard. A session pan did not start is only
-    untied, never closed."""
+    """Close the thread's tied session: remove its terminal, its worktree and its branch, then
+    mark it done and untie the thread; say so in the thread. Keeps everything (exit 29) while
+    the worktree has uncommitted files (pan's own untracked .claude/settings.json aside) or the
+    branch has commits not pushed (with no upstream: not merged into the default or base
+    branch; an upstream deleted after a merge counts as pushed), and refuses while the session
+    is working (exit 26) or waiting on a prompt (exit 23), unless --discard. A failed git
+    cleanup exits 30 and keeps the thread tied for a retry; a folder pan never removes (outside
+    the worktree folder, or a main repository) exits 31. With the worktree folder already gone
+    it still deletes the branch. A session pan did not start is only untied, never closed."""
     config = _config()
     done_thread(
         thread_ts=thread,
         channel=channel,
         discard=discard,
         worktree_base=config.orchestrator.worktree_base,
+        fallback_repo=config.orchestrator.cwd,
         thread_map=FileThreadMap(config.paths.threads, SystemClock()),
         terminal_host=build_terminal_host(config.terminal_host),
         git=ShellGitWorktreeAdapter(),

@@ -180,7 +180,7 @@ runs once the actuation lands.
 | `pan propose --thread … --channel … --to … --task … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
 | `pan confirm --thread … --channel … --choice <yes\|n>` / `--cancel` | Act on the reply to that question: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
-| `pan done --thread … --channel … [--discard]` | Close the thread's session: remove its terminal, its worktree and its branch, mark it done and untie the thread. Keeps everything (exit 29) while the worktree has uncommitted files or unpushed commits, and refuses while the session is working (exit 26), unless `--discard`. A session pan did not start is only untied. See [Closing a session](#closing-a-session). |
+| `pan done --thread … --channel … [--discard]` | Close the thread's session: remove its terminal, its worktree and its branch, mark it done and untie the thread. Keeps everything (exit 29) while the worktree has uncommitted files or the branch unpushed commits, and refuses while the session is working (exit 26) or waiting on a prompt (exit 23), unless `--discard`. Exit 30: a git cleanup failed (retry with `done`); exit 31: a folder pan never removes. A session pan did not start is only untied. See [Closing a session](#closing-a-session). |
 | `pan relay <target> <message>` | Send a message into a live terminal (address, name, or Herdr app label). |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal and mark the thread FAILED. Refuses for a session pan did not start: it only unties the thread. |
@@ -215,21 +215,31 @@ first word after the mention, spelled exactly, in any letter case; anything else
 - In a thread with no tied session, pan replies "This thread has no session." and does nothing.
 - A session pan did not start (one of your desk sessions) is only untied: "Untied this thread from
   desk-x; pan never closes sessions it didn't start."
-- A session pan started that is still working is refused: "pan-7 is still working; send `@pan done`
-  when it finishes, or `@pan done --discard` to stop it now."
-- pan then looks at the session's worktree (read-only). Work counts as unsaved when the worktree has
-  uncommitted or untracked files (ignored files and the `.claude/settings.json` pan writes there at
-  spawn do not count), or commits its branch's upstream lacks; with no upstream, commits merged into
-  neither the repo's default branch (`origin/HEAD`) nor the branch the main checkout is on (the one
-  pan created the worktree from). With unsaved work pan keeps everything: "pan-7 has 2 uncommitted
-  files and 1 unpushed commit; kept it. Push or commit them, or send `@pan done --discard`."
-- Otherwise pan removes the session's terminal (if it is still there), removes the worktree (forced
-  only with `--discard` or when pan's settings file is all that is left) and deletes the branch
-  (`git branch -D` only with `--discard` or when it has no commits outside the base branches, else
-  `-d`), marks the thread's record done and unties it: "Closed pan-7 and removed its worktree and
-  branch." If the worktree folder is already gone, it closes the session and says so.
+- A session pan started that is still working, or waiting on a prompt, is refused: "pan-7 is still
+  working; send `@pan done` when it finishes, or `@pan done --discard` to stop it now."
+- pan then looks at the session's worktree and branch (read-only). Work counts as unsaved when the
+  worktree has uncommitted or untracked files (ignored files, and the untracked
+  `.claude/settings.json` pan writes there at spawn, do not count; a tracked settings file the
+  session changed does), or the branch has commits its upstream lacks. An upstream deleted after a
+  merge (shown as gone after `git fetch --prune`) counts as holding them; with no upstream, commits
+  merged into neither the repo's default branch (`origin/HEAD`) nor the branch the main checkout is
+  on (the one pan created the worktree from) count. With unsaved work pan keeps everything: "pan-7
+  has 2 uncommitted files and 1 unpushed commit; kept it. Push or commit them, or send `@pan done
+  --discard`."
+- Otherwise pan removes the session's terminal (if it is still there), removes the worktree
+  (forced only with `--discard` or when pan's settings file is all that is left) and deletes the
+  branch (`git branch -D` with `--discard`, when it has no commits outside the base branches, or
+  when its upstream is gone; else `-d`), then marks the thread's record done and unties it:
+  "Closed pan-7 and removed its worktree and branch."
+- If the worktree folder is already gone, pan prunes the repository's record of it and deletes the
+  branch under the same rules, judging the branch's commits. It finds the repository from the
+  record (pan stores it at spawn); for records from before that, it uses the orchestrator's folder
+  only if that repository has the branch. The reply says only what it removed.
+- If a git command fails (exit 30), the thread stays tied with its status unchanged, so `@pan done`
+  again finishes the cleanup. A folder outside pan's worktree folder, or a main checkout, is never
+  removed (exit 31).
 
-`done --discard` skips the working and unsaved-work checks. `pan stop` is still the kill switch: it
+`done --discard` skips the busy and unsaved-work checks. `pan stop` is still the kill switch: it
 marks the thread failed and leaves the worktree alone.
 
 ### Your own sessions

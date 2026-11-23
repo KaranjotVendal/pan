@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pan.errors import GitWorktreeError, PanError, SpawnError
 from pan.logging import initialise_logger
-from pan.models import WorktreeStatus
+from pan.models import BranchStatus, WorktreeStatus
 
 logger = initialise_logger(__name__)
 
@@ -15,6 +15,9 @@ _GIT = "git"
 _RENAME_STATUS_LETTERS = frozenset("RC")
 # The remote's default branch, as `git clone` (or `git remote set-head`) records it.
 _REMOTE_DEFAULT_BRANCH_REF = "refs/remotes/origin/HEAD"
+_UNTRACKED_STATUS = "??"
+_LOCAL_BRANCH_PREFIX = "refs/heads/"
+_GONE_UPSTREAM_TRACK = "[gone]"
 _PORCELAIN_WORKTREE_PREFIX = "worktree "
 _PORCELAIN_BRANCH_PREFIX = "branch "
 
@@ -35,33 +38,63 @@ class ShellGitWorktreeAdapter:
 
     def worktree_status(self, path: Path) -> WorktreeStatus:
         # Only reading commands run here, so the worktree and its repository are unchanged.
-        main_repo, main_branch = self._main_worktree(path)
+        main_repo, _main_branch = self._main_worktree(path)
         top_level = Path(self._run(["-C", str(path), "rev-parse", "--show-toplevel"]).strip())
         branch = self._run_optional(["-C", str(path), "symbolic-ref", "-q", "--short", "HEAD"])
-        upstream = self._run_optional(
-            ["-C", str(path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
-        )
-        commits_not_on_upstream = (
-            self._count_commits(path, [upstream]) if upstream is not None else 0
-        )
-        base_refs = [
-            ref
-            for ref in (
-                self._run_optional(
-                    ["-C", str(path), "symbolic-ref", "-q", _REMOTE_DEFAULT_BRANCH_REF]
-                ),
-                main_branch,
-            )
-            if ref is not None
-        ]
+        untracked_paths, modified_paths = self._changed_paths(path)
+        detached_commits = 0
+        if branch is None:
+            detached_commits = self._count_commits(path, "HEAD", ["--branches", "--remotes"])
         return WorktreeStatus(
             main_repo=main_repo,
             is_main_worktree=top_level.resolve() == main_repo.resolve(),
             branch=branch,
-            changed_paths=self._changed_paths(path),
+            untracked_paths=untracked_paths,
+            modified_paths=modified_paths,
+            detached_commits=detached_commits,
+        )
+
+    def branch_status(self, repo: Path, branch: str) -> BranchStatus | None:
+        # Only reading commands run here. `%(upstream:track)` is "[gone]" when the upstream is
+        # configured but its remote branch no longer exists.
+        branch_ref = f"{_LOCAL_BRANCH_PREFIX}{branch}"
+        listing = self._run(
+            [
+                "-C",
+                str(repo),
+                "for-each-ref",
+                "--format=%(refname)%00%(upstream:short)%00%(upstream:track)",
+                branch_ref,
+            ]
+        )
+        # The pattern also matches refs below it (refs/heads/<branch>/...), so match exactly.
+        matching_rows = [
+            row.split("\0") for row in listing.splitlines() if row.startswith(f"{branch_ref}\0")
+        ]
+        if not matching_rows:
+            return None
+        _refname, upstream_name, upstream_track = matching_rows[0]
+        upstream = upstream_name or None
+        upstream_gone = upstream is not None and upstream_track == _GONE_UPSTREAM_TRACK
+        commits_not_on_upstream = 0
+        if upstream is not None and not upstream_gone:
+            commits_not_on_upstream = self._count_commits(repo, branch_ref, [upstream])
+        _main_repo, main_branch = self._main_worktree(repo)
+        base_refs = [
+            ref
+            for ref in (
+                self._run_optional(
+                    ["-C", str(repo), "symbolic-ref", "-q", _REMOTE_DEFAULT_BRANCH_REF]
+                ),
+                main_branch,
+            )
+            if ref is not None and ref != branch_ref
+        ]
+        return BranchStatus(
             upstream=upstream,
+            upstream_gone=upstream_gone,
             commits_not_on_upstream=commits_not_on_upstream,
-            commits_not_in_base=self._count_commits(path, base_refs),
+            commits_not_in_base=self._count_commits(repo, branch_ref, base_refs),
         )
 
     def remove_worktree(self, path: Path, *, force: bool) -> None:
@@ -71,6 +104,10 @@ class ShellGitWorktreeAdapter:
         force_flag = ["--force"] if force else []
         self._run(["-C", str(path), "worktree", "remove", *force_flag, str(path)])
         logger.info(f"git worktree removed path={path} force={force}")
+
+    def prune_worktrees(self, repo: Path) -> None:
+        self._run(["-C", str(repo), "worktree", "prune"])
+        logger.info(f"git worktrees pruned repo={repo}")
 
     def delete_branch(self, repo: Path, branch: str, *, force: bool) -> None:
         delete_flag = "-D" if force else "-d"
@@ -94,12 +131,14 @@ class ShellGitWorktreeAdapter:
             raise GitWorktreeError(f"git worktree list named no main worktree for {path}")
         return main_repo, main_branch
 
-    def _changed_paths(self, path: Path) -> list[str]:
+    def _changed_paths(self, path: Path) -> tuple[list[str], list[str]]:
+        # (untracked, modified) paths from `git status`; `??` marks an untracked file.
         raw_status = self._run(
             ["-C", str(path), "status", "--porcelain=v1", "-z", "--untracked-files=all"]
         )
         fields = raw_status.split("\0")
-        changed: list[str] = []
+        untracked: list[str] = []
+        modified: list[str] = []
         field_index = 0
         while field_index < len(fields):
             entry = fields[field_index]
@@ -107,16 +146,20 @@ class ShellGitWorktreeAdapter:
             if len(entry) < 4:
                 continue
             status_letters, changed_path = entry[:2], entry[3:]
-            changed.append(changed_path)
+            if status_letters == _UNTRACKED_STATUS:
+                untracked.append(changed_path)
+                continue
+            modified.append(changed_path)
             if _RENAME_STATUS_LETTERS.intersection(status_letters):
                 # Skip the old path of a rename or copy.
                 field_index += 1
-        return changed
+        return untracked, modified
 
-    def _count_commits(self, path: Path, excluded_refs: list[str]) -> int:
-        # HEAD's commits reachable from none of `excluded_refs` (all of them when it is empty).
+    def _count_commits(self, cwd: Path, revision: str, excluded: list[str]) -> int:
+        # The commits of `revision` reachable from none of `excluded` (refs, or rev-list
+        # options such as --branches); all of them when `excluded` is empty.
         output = self._run(
-            ["-C", str(path), "rev-list", "--count", "HEAD", "--not", *excluded_refs, "--"]
+            ["-C", str(cwd), "rev-list", "--count", revision, "--not", *excluded, "--"]
         )
         return int(output.strip())
 

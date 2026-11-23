@@ -126,14 +126,21 @@ one-line reply in every case; do nothing more, whatever its exit code:
 - Untied thread: "This thread has no session." Nothing is touched.
 - A session pan did not start: it only unties the thread ("Untied this thread from desk-x; pan never
   closes sessions it didn't start."). pan never closes it.
-- pan's own session while it is working: refused, exit 26, unless `--discard`.
-- pan's own session whose worktree has uncommitted files (pan's own `.claude/settings.json` does not
-  count) or commits not pushed to its upstream (with no upstream: not merged into the repo's default
-  branch or the branch it was created from): kept, exit 29, unless `--discard` ("pan-7 has 2
-  uncommitted files and 1 unpushed commit; kept it. ...").
-- Otherwise it removes the session's terminal (if still there), its worktree and its branch, marks
-  the record `done` and unties the thread ("Closed pan-7 and removed its worktree and branch.").
-  A git failure during the cleanup is exit 30; the thread stays tied so `@pan done` can retry.
+- pan's own session while it is working (exit 26) or waiting on a prompt (exit 23): refused,
+  unless `--discard`.
+- pan's own session with unsaved work: kept, exit 29, unless `--discard` ("pan-7 has 2 uncommitted
+  files and 1 unpushed commit; kept it. ..."). Unsaved work is uncommitted or untracked files (the
+  untracked `.claude/settings.json` pan writes at spawn does not count; a tracked one the session
+  changed does), or branch commits its upstream lacks. An upstream deleted after a merge counts as
+  holding them; with no upstream, commits merged into neither the repo's default branch nor the
+  branch it was created from count.
+- Otherwise it removes the session's terminal (if still there), its worktree and its branch, then
+  marks the record `done` and unties the thread ("Closed pan-7 and removed its worktree and
+  branch."). With the worktree folder already gone it still deletes the branch from the repository.
+- Exit 30: a git command failed. The terminal may be gone, but the thread stays tied with its status
+  unchanged, so the person can send `@pan done` again to finish; the reply says so.
+- Exit 31: the session's folder is outside pan's worktree folder or is a repository's main checkout.
+  pan never removes it, and retrying will not change that; the reply says so.
 
 `pan stop` stays the kill switch (it marks the thread `failed` and never touches the worktree);
 never use it for `done`.

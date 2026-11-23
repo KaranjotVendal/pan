@@ -6,10 +6,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from git_worktree_fakes import FakeGitWorktree
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.adapters.hc import HcError
-from pan.errors import NotPanSessionError, SpawnError, TerminalHostError, TerminalNameTakenError
+from pan.errors import (
+    NotPanSessionError,
+    PanError,
+    SpawnError,
+    TerminalHostError,
+    TerminalNameTakenError,
+)
 from pan.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
 from pan.slack_format import to_slack_mrkdwn
 from pan.spawn import (
@@ -26,19 +33,10 @@ _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1718000000.000200"
 
 
-class FakeGit:
-    def __init__(self, timeline: list[str], *, fail: bool = False) -> None:
-        self._timeline = timeline
-        self._fail = fail
-
-    def create_worktree(self, repo: Path, branch: str, base: Path) -> Path:
-        self._timeline.append("worktree")
-        if self._fail:
-            raise SpawnError("git failed")
-        return base / branch
-
-    def remove_worktree(self, path: Path) -> None:  # pragma: no cover
-        raise NotImplementedError
+def _fake_git(timeline: list[str], *, fail: bool = False) -> FakeGitWorktree:
+    # The shared fake, its create step recorded on the terminal host's timeline.
+    errors: dict[str, PanError] = {"create": SpawnError("git failed")} if fail else {}
+    return FakeGitWorktree(timeline=timeline, errors=errors)
 
 
 class FakeThreadMap:
@@ -85,7 +83,7 @@ def _spawn(
     *,
     base: Path,
     terminal_host: FakeTerminalHost,
-    git: FakeGit,
+    git: FakeGitWorktree,
     thread_map: FakeThreadMap | None = None,
     slack: FakeSlack | None = None,
     stream: str | None = "backend",
@@ -117,7 +115,7 @@ def _spawn(
 
 def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path: Path) -> None:
     terminal_host = FakeTerminalHost()
-    git = FakeGit(terminal_host.timeline)
+    git = _fake_git(terminal_host.timeline)
     thread_map, slack = FakeThreadMap(), FakeSlack()
 
     record = _spawn(
@@ -143,6 +141,7 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert record.terminal_address == "t101"
     assert record.channel == "C1"
     assert record.worktree_path == tmp_path / "pan-backend"
+    assert record.repo_path == Path("/repo")
     assert record.created_at == _FIXED_NOW
     assert record.source is ThreadSource.SLACK
     assert record.tied is True
@@ -192,7 +191,7 @@ def test_spawn_sets_the_reply_mode_from_the_request(
     record = _spawn(
         base=tmp_path,
         terminal_host=terminal_host,
-        git=FakeGit(terminal_host.timeline),
+        git=_fake_git(terminal_host.timeline),
         slack=slack,
         task=task,
         request_text=request_text,
@@ -227,7 +226,7 @@ def test_spawn_worker_labels_into_the_app_space_only_when_configured(tmp_path: P
     _spawn(
         base=tmp_path,
         terminal_host=terminal_host,
-        git=FakeGit(terminal_host.timeline),
+        git=_fake_git(terminal_host.timeline),
         app_space="sp42",
     )
 
@@ -255,7 +254,9 @@ def test_worker_terminal_name_follows_hc_name_rules(stream: str | None, expected
 def test_spawn_writes_worker_claude_settings_with_hook_commands(tmp_path: Path) -> None:
     terminal_host = FakeTerminalHost()
 
-    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
+    record = _spawn(
+        base=tmp_path, terminal_host=terminal_host, git=_fake_git(terminal_host.timeline)
+    )
 
     settings = json.loads((record.worktree_path / ".claude" / "settings.json").read_text())
     commands = {
@@ -298,7 +299,9 @@ def test_worker_inbox_link_matcher_matches_the_inbox_tool_and_the_repl_tool(
     # Claude Code matches a hook's matcher as a regex; the matcher is anchored, so a search
     # and a whole-name match agree.
     terminal_host = FakeTerminalHost()
-    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
+    record = _spawn(
+        base=tmp_path, terminal_host=terminal_host, git=_fake_git(terminal_host.timeline)
+    )
     settings = json.loads((record.worktree_path / ".claude" / "settings.json").read_text())
     matcher = settings["hooks"]["PostToolUse"][0]["matcher"]
 
@@ -314,7 +317,7 @@ def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Pa
         _spawn(
             base=tmp_path,
             terminal_host=terminal_host,
-            git=FakeGit(terminal_host.timeline),
+            git=_fake_git(terminal_host.timeline),
             thread_map=thread_map,
             slack=slack,
         )
@@ -333,7 +336,9 @@ def test_a_finished_terminal_with_the_name_does_not_block_spawn(tmp_path: Path) 
     terminal_host = FakeTerminalHost()
     terminal_host.add(make_terminal("t5", name="pan-backend", state=TerminalState.FINISHED))
 
-    record = _spawn(base=tmp_path, terminal_host=terminal_host, git=FakeGit(terminal_host.timeline))
+    record = _spawn(
+        base=tmp_path, terminal_host=terminal_host, git=_fake_git(terminal_host.timeline)
+    )
 
     assert record.status is WorkerStatus.SPAWNING
 
@@ -352,7 +357,7 @@ def test_terminal_host_failure_wraps_as_spawn_error_and_marks_failed(
         _spawn(
             base=tmp_path,
             terminal_host=terminal_host,
-            git=FakeGit(terminal_host.timeline),
+            git=_fake_git(terminal_host.timeline),
             thread_map=thread_map,
             slack=slack,
         )
@@ -373,11 +378,12 @@ def test_git_failure_wraps_as_spawn_error_and_never_runs(tmp_path: Path) -> None
         _spawn(
             base=tmp_path,
             terminal_host=terminal_host,
-            git=FakeGit(terminal_host.timeline, fail=True),
+            git=_fake_git(terminal_host.timeline, fail=True),
             thread_map=thread_map,
         )
 
     assert thread_map.records[_THREAD].status is WorkerStatus.FAILED
+    assert thread_map.records[_THREAD].repo_path == Path("/repo")
     assert terminal_host.timeline == ["worktree"]
 
 

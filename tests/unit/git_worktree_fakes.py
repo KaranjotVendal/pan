@@ -3,21 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pan.errors import GitWorktreeError
-from pan.models import WorktreeStatus
+from pan.errors import PanError
+from pan.models import BranchStatus, WorktreeStatus
 
 
 @dataclass
 class FakeGitWorktree:
-    # An in-memory GitWorktreeAdapter. `status` is what worktree_status returns; `errors` maps
-    # an operation name ("status", "remove", "delete_branch") to an error it raises. Every
-    # call is recorded in `calls` as a tuple naming the operation and its arguments.
+    # An in-memory GitWorktreeAdapter. `status` is what worktree_status returns; `branches`
+    # maps a repository to what branch_status returns there (None when it is absent). `errors`
+    # maps an operation name ("create", "status", "branch_status", "remove", "prune",
+    # "delete_branch") to an error it raises. Every call but create is recorded in `calls` as a
+    # tuple naming the operation and its arguments; create appends "worktree" to `timeline`, so
+    # spawn tests can order it against the terminal host's steps.
     status: WorktreeStatus | None = None
-    errors: dict[str, GitWorktreeError] = field(default_factory=dict)
+    branches: dict[Path, BranchStatus] = field(default_factory=dict)
+    errors: dict[str, PanError] = field(default_factory=dict)
     calls: list[tuple[object, ...]] = field(default_factory=list)
+    timeline: list[str] = field(default_factory=list)
 
-    def create_worktree(self, repo: Path, branch: str, base: Path) -> Path:  # pragma: no cover
-        raise NotImplementedError
+    def create_worktree(self, repo: Path, branch: str, base: Path) -> Path:
+        self.timeline.append("worktree")
+        if "create" in self.errors:
+            raise self.errors["create"]
+        return base / branch
 
     def worktree_status(self, path: Path) -> WorktreeStatus:
         self.calls.append(("status", path))
@@ -26,10 +34,21 @@ class FakeGitWorktree:
         assert self.status is not None, "set FakeGitWorktree.status first"
         return self.status
 
+    def branch_status(self, repo: Path, branch: str) -> BranchStatus | None:
+        self.calls.append(("branch_status", repo, branch))
+        if "branch_status" in self.errors:
+            raise self.errors["branch_status"]
+        return self.branches.get(repo)
+
     def remove_worktree(self, path: Path, *, force: bool) -> None:
         self.calls.append(("remove", path, force))
         if "remove" in self.errors:
             raise self.errors["remove"]
+
+    def prune_worktrees(self, repo: Path) -> None:
+        self.calls.append(("prune", repo))
+        if "prune" in self.errors:
+            raise self.errors["prune"]
 
     def delete_branch(self, repo: Path, branch: str, *, force: bool) -> None:
         self.calls.append(("delete_branch", repo, branch, force))
