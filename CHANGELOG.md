@@ -90,6 +90,27 @@ as it works (see `AGENT_LOOP.md` step 9).
   the link here", "reply here"), as well as when it says "reply in slack". `wants_slack_reply`
   stays the code-level hint; the new judgment is the orchestrator's second bounded exception to
   INV-3, stated in SKILL.md next to the confirm exception, and it sets the reply mode only.
+- `@pan done` closes the thread's session. New route word `done` (`RouteKind.DONE`), the whole
+  message like `check` and `forget`, and `done --discard` (`Route.discard`; a phone's `—discard`
+  works too). New `pan done --thread --channel [--discard]` (`session_control.done_thread`) and
+  orchestrator step (r5) (the later steps are now (r6) to (r9)). An untied thread gets "This thread
+  has no session."; a session pan did not start is only untied. For pan's own session it refuses
+  while the session is working (exit 26) or waiting on a prompt (exit 23), and keeps everything
+  while there is unsaved work (new `UnsavedWorkError`, exit 29): modified files, untracked files
+  other than the untracked `.claude/settings.json` pan writes at spawn
+  (`WORKER_SETTINGS_RELATIVE_PATH`), commits only a detached HEAD holds, or branch commits the
+  upstream lacks (an upstream gone after a merge counts as pushed; with no upstream, commits merged
+  into neither `origin/HEAD` nor the main checkout's branch), unless `--discard`. Otherwise it
+  removes the terminal, the worktree and the branch, and only then marks the record DONE and
+  unties the thread. With the worktree folder already gone it prunes and deletes the branch from
+  the repository, found from the new `ThreadRecord.repo_path` (stored at spawn; older records fall
+  back to the orchestrator's folder only when that repository has the branch). A failed git
+  cleanup (new `GitWorktreeError`, exit 30) keeps the thread tied with its status, clears the
+  removed terminal's address and asks for a retry; a folder outside the worktree folder or a main
+  checkout is never removed (new `UnsafeWorktreeError`, exit 31). The `GitWorktreeAdapter` seam
+  gains read-only `worktree_status` (`WorktreeStatus`) and `branch_status` (`BranchStatus`),
+  `prune_worktrees` and `delete_branch`, and `remove_worktree` now takes `force`. `pan stop` is
+  unchanged.
 - `to <name>:` with no exact match asks before sending. The name stays one token, so a sentence
   such as "to be clear: ..." is still a plain task. `pan send --to` still sends at once to an exact
   match (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits

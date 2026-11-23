@@ -245,6 +245,7 @@ def test_directive_footer_documents_the_slack_only_grammar() -> None:
         "check",
         "sessions",
         "forget",
+        "done [--discard]",
         "reply in slack",
         "--sessions",
         "--stream",

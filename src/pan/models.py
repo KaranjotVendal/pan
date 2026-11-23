@@ -82,12 +82,14 @@ class RouteKind(StrEnum):
     # (a retired flag, or a route word with no task) and does nothing else. CONFIRM is a reply
     # (`yes`, `y`, 1-3, or a decline: `no`, `n`, `cancel`, `stop`) to pan's open question in
     # the thread asking which session to send a task to; only `pan inbox drain` sets it, because only it knows whether a question is open.
+    # DONE closes the thread's session (`done`, or `done --discard` to drop unsaved work).
     TASK = "task"
     NEW = "new"
     TO = "to"
     SESSIONS = "sessions"
     FORGET = "forget"
     CHECK = "check"
+    DONE = "done"
     NOTICE = "notice"
     CONFIRM = "confirm"
 
@@ -103,6 +105,8 @@ class Route(BaseModel, frozen=True):
     notice: str | None = None
     # For CONFIRM: the reply, `yes`, a number from 1 to 3, or `no` (a decline).
     choice: str | None = None
+    # For DONE: `done --discard`, so uncommitted files and unpushed commits are thrown away.
+    discard: bool = False
 
 
 class Directive(BaseModel, frozen=True):
@@ -147,6 +151,9 @@ class ThreadRecord(BaseModel):
     # The worker's worktree; for a session pan did not start (started_by_pan False), the
     # session's own folder, which pan never removes.
     worktree_path: Path
+    # The repository pan created the worktree from (pan spawn's --repo), so `done` can delete
+    # the branch after the worktree folder is gone. None on records written before it existed.
+    repo_path: Path | None = None
     agent: Agent = Agent.CLAUDE
     # Recorded by the worker's SessionStart hook; used by `pan read --full`.
     claude_session_id: str | None = None
@@ -224,6 +231,36 @@ class Terminal(BaseModel, frozen=True):
     agent: str | None = None
     agent_status: AgentStatus
     turn: int | None = None
+
+
+class WorktreeStatus(BaseModel, frozen=True):
+    # What a read-only look at a git worktree found (GitWorktreeAdapter.worktree_status).
+    # `main_repo` is the repository's main worktree, where its branches are deleted from.
+    # `branch` is the checked-out branch, None when HEAD is detached. Paths are relative to
+    # the worktree; ignored files are left out. `untracked_paths` are new files git does not
+    # track; `modified_paths` are tracked files with uncommitted changes (staged or not).
+    # `detached_commits` counts, for a detached HEAD only, its commits on no branch and no
+    # remote branch: removing the worktree would lose them.
+    main_repo: Path
+    is_main_worktree: bool
+    branch: str | None = None
+    untracked_paths: list[str] = Field(default_factory=list)
+    modified_paths: list[str] = Field(default_factory=list)
+    detached_commits: int = 0
+
+
+class BranchStatus(BaseModel, frozen=True):
+    # What a read-only look at a local branch found (GitWorktreeAdapter.branch_status).
+    # `upstream` is its configured upstream (None when it has none); `upstream_gone` is True
+    # when that upstream no longer exists on the remote (deleted after a merge, then pruned
+    # by a fetch). `commits_not_on_upstream` counts the branch's commits the upstream lacks (0
+    # without one, or when it is gone). `commits_not_in_base` counts its commits in neither the
+    # remote's default branch (origin/HEAD) nor the branch the main worktree has checked out,
+    # which is the branch pan created the worktree from.
+    upstream: str | None = None
+    upstream_gone: bool = False
+    commits_not_on_upstream: int = 0
+    commits_not_in_base: int = 0
 
 
 class InboxThread(BaseModel, frozen=True):

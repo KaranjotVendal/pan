@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from pan.config import CHECK_SCREEN_MAX_LINES, CLAUDE_AGENT_NAMES, WORKER_BRIEF_TASK_MARKER
+from pan.config import (
+    CHECK_SCREEN_MAX_LINES,
+    CLAUDE_AGENT_NAMES,
+    WORKER_BRIEF_TASK_MARKER,
+    WORKER_SETTINGS_RELATIVE_PATH,
+)
 from pan.errors import (
+    GitWorktreeError,
     NoExactMatchError,
     SessionBusyError,
     TargetAmbiguousError,
@@ -12,12 +19,15 @@ from pan.errors import (
     TerminalGoneError,
     TerminalHostError,
     ThreadNotFoundError,
+    UnsafeWorktreeError,
+    UnsavedWorkError,
 )
 from pan.gateway.slack_post import slack_post, slack_post_parts
 from pan.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
 from pan.logging import initialise_logger
 from pan.models import (
     AgentStatus,
+    BranchStatus,
     InboxThread,
     ReplyMode,
     Terminal,
@@ -25,8 +35,16 @@ from pan.models import (
     ThreadRecord,
     ThreadSource,
     WorkerStatus,
+    WorktreeStatus,
 )
-from pan.seams import Clock, InboxDirectory, SlackAdapter, TerminalHost, ThreadMap
+from pan.seams import (
+    Clock,
+    GitWorktreeAdapter,
+    InboxDirectory,
+    SlackAdapter,
+    TerminalHost,
+    ThreadMap,
+)
 from pan.sessions import (
     inbox_thread_known,
     joins_by_address,
@@ -393,9 +411,9 @@ def forget_thread(
     logger.info(f"forget thread={thread_ts}")
 
 
-def _live_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Terminal | None:
-    # The record's live terminal, by its address (else its name). A terminal now at that
-    # address under another name is a different session, so the record's one is gone.
+def _session_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Terminal | None:
+    # The record's terminal, live or finished, by its address (else its name). A terminal now
+    # at that address under another name is a different session, so the record's one is gone.
     selector = record.terminal_address or record.terminal_name
     try:
         terminal = terminal_host.get(selector)
@@ -407,7 +425,12 @@ def _live_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Termina
             f"treating the session as gone thread={record.thread_ts}"
         )
         return None
-    return terminal if terminal.state is TerminalState.LIVE else None
+    return terminal
+
+
+def _live_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Terminal | None:
+    terminal = _session_terminal(terminal_host, record)
+    return terminal if terminal is not None and terminal.state is TerminalState.LIVE else None
 
 
 def clean_screen_text(screen: str, max_lines: int = CHECK_SCREEN_MAX_LINES) -> str:
@@ -494,3 +517,237 @@ def check_thread(
         slack, channel, thread_ts, check_reply(record, terminal_host, screen_lines=screen_lines)
     )
     logger.info(f"check thread={thread_ts} session={record.terminal_name}")
+
+
+NO_SESSION_REPLY = "This thread has no session."
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def uncommitted_paths(status: WorktreeStatus) -> list[str]:
+    # The worktree's uncommitted work: every modified tracked file, and every untracked file
+    # except the settings file pan wrote at spawn (the worker's hooks), which is pan's. A
+    # tracked settings file the worker changed is the worker's work, so it counts.
+    untracked = [path for path in status.untracked_paths if path != WORKER_SETTINGS_RELATIVE_PATH]
+    return [*status.modified_paths, *untracked]
+
+
+def unpushed_commit_count(branch: BranchStatus) -> int:
+    # Commits that deleting the branch would lose: those its upstream lacks. An upstream that
+    # is gone (its remote branch was deleted after a merge) counts as holding them all. With
+    # no upstream: those merged into neither the repo's default branch nor the base branch.
+    if branch.upstream is not None:
+        return 0 if branch.upstream_gone else branch.commits_not_on_upstream
+    return branch.commits_not_in_base
+
+
+def force_branch_delete(branch: BranchStatus, *, discard: bool) -> bool:
+    # `git branch -d` refuses a branch not merged into its upstream (or, with none, the main
+    # checkout's branch). -D is used when that refusal would be wrong: with discard, when the
+    # branch has no commits outside the base branches, or when its upstream is gone (merged
+    # and deleted remotely, so -d would compare against nothing). Otherwise -d, which deletes
+    # a branch whose commits are all on its upstream.
+    return discard or branch.commits_not_in_base == 0 or branch.upstream_gone
+
+
+def kept_reply(name: str, uncommitted_count: int, unpushed_count: int) -> str:
+    unsaved = [
+        _counted(count, noun)
+        for count, noun in (
+            (uncommitted_count, "uncommitted file"),
+            (unpushed_count, "unpushed commit"),
+        )
+        if count
+    ]
+    return (
+        f"{name} has {' and '.join(unsaved)}; kept it. "
+        "Push or commit them, or send `@pan done --discard`."
+    )
+
+
+def done_busy_reply(name: str) -> str:
+    return (
+        f"{name} is still working; send `@pan done` when it finishes, "
+        "or `@pan done --discard` to stop it now."
+    )
+
+
+def done_blocked_reply(name: str) -> str:
+    return (
+        f"{name} is waiting on a prompt; answer it at the terminal and send `@pan done` again, "
+        "or `@pan done --discard` to stop it now."
+    )
+
+
+def desk_session_done_reply(name: str) -> str:
+    return f"Untied this thread from {name}; pan never closes sessions it didn't start."
+
+
+def closed_reply(
+    name: str, *, worktree_removed: bool, branch_deleted: bool, repo_known: bool
+) -> str:
+    # Says what this run removed and nothing more, so a retry after a half-finished cleanup
+    # reports only the part it did.
+    if worktree_removed and branch_deleted:
+        return f"Closed {name} and removed its worktree and branch."
+    if worktree_removed:
+        return f"Closed {name} and removed its worktree."
+    if branch_deleted:
+        return f"Closed {name} and removed its branch; its worktree was already gone."
+    if repo_known:
+        return f"Closed {name}; its worktree and branch were already gone."
+    return f"Closed {name}; its worktree was already gone."
+
+
+def _is_pan_worktree(worktree_path: Path, worktree_base: Path) -> bool:
+    resolved_path = worktree_path.resolve()
+    resolved_base = worktree_base.resolve()
+    return resolved_path != resolved_base and resolved_path.is_relative_to(resolved_base)
+
+
+def _repo_without_worktree(
+    record: ThreadRecord, fallback_repo: Path, git: GitWorktreeAdapter
+) -> Path | None:
+    # Where to finish the cleanup once the worktree folder is gone: the repository recorded at
+    # spawn, else (a record from before pan stored it) the orchestrator's folder, but only
+    # when that repository has the session's branch, so pan never touches a repository the
+    # session did not come from.
+    if record.repo_path is not None and record.repo_path.is_dir():
+        return record.repo_path
+    if not fallback_repo.is_dir():
+        return None
+    try:
+        has_branch = git.branch_status(fallback_repo, record.terminal_name) is not None
+    except GitWorktreeError:
+        return None
+    return fallback_repo if has_branch else None
+
+
+def done_thread(
+    *,
+    thread_ts: str,
+    channel: str,
+    discard: bool,
+    worktree_base: Path,
+    fallback_repo: Path,
+    thread_map: ThreadMap,
+    terminal_host: TerminalHost,
+    git: GitWorktreeAdapter,
+    slack: SlackAdapter,
+) -> None:
+    # `done`: close the thread's tied session. A session pan did not start is only untied.
+    # For pan's own, nothing is closed while it is working or waiting on a prompt, or while
+    # closing it would lose work (uncommitted files, or branch commits not pushed or merged),
+    # unless `discard`. Otherwise its terminal is removed (when it still exists), then its
+    # worktree (or, when the folder is already gone, the repository's record of it) and its
+    # branch, and only then is the record marked DONE and untied.
+    record = thread_map.get(thread_ts)
+    if record is None or not record.tied:
+        slack_post(slack, channel, thread_ts, NO_SESSION_REPLY)
+        return
+    name = record.terminal_name
+    if not record.started_by_pan:
+        thread_map.untie(thread_ts)
+        slack_post(slack, channel, thread_ts, desk_session_done_reply(name))
+        logger.info(f"done untied desk session={name} thread={thread_ts}")
+        return
+
+    terminal = _session_terminal(terminal_host, record)
+    if terminal is not None and terminal.state is TerminalState.LIVE and not discard:
+        if terminal.agent_status is AgentStatus.WORKING:
+            slack_post(slack, channel, thread_ts, done_busy_reply(name))
+            raise SessionBusyError(f"{name} is still working; not closed")
+        if terminal.agent_status is AgentStatus.BLOCKED:
+            slack_post(slack, channel, thread_ts, done_blocked_reply(name))
+            raise TargetBlockedError(f"{name} is waiting on a prompt; not closed")
+
+    worktree_path = record.worktree_path
+    worktree: WorktreeStatus | None = None
+    branch: BranchStatus | None = None
+    try:
+        if worktree_path.exists():
+            if not _is_pan_worktree(worktree_path, worktree_base):
+                slack_post(
+                    slack,
+                    channel,
+                    thread_ts,
+                    f"{name}'s folder is not in pan's worktree folder; pan never removes it.",
+                )
+                raise UnsafeWorktreeError(f"{worktree_path} is not under {worktree_base}")
+            worktree = git.worktree_status(worktree_path)
+            if worktree.is_main_worktree:
+                slack_post(
+                    slack,
+                    channel,
+                    thread_ts,
+                    f"{name}'s folder is a main repository; pan never removes it.",
+                )
+                raise UnsafeWorktreeError(f"{worktree_path} is a main worktree")
+            repo = worktree.main_repo
+        else:
+            repo = _repo_without_worktree(record, fallback_repo, git)
+        if repo is not None:
+            branch = git.branch_status(repo, name)
+    except GitWorktreeError:
+        slack_post(slack, channel, thread_ts, f"Could not read {name}'s worktree; kept it.")
+        raise
+
+    uncommitted_count = len(uncommitted_paths(worktree)) if worktree is not None else 0
+    unpushed_count = unpushed_commit_count(branch) if branch is not None else 0
+    if worktree is not None:
+        unpushed_count += worktree.detached_commits
+    if (uncommitted_count or unpushed_count) and not discard:
+        slack_post(slack, channel, thread_ts, kept_reply(name, uncommitted_count, unpushed_count))
+        raise UnsavedWorkError(
+            f"{name} has {uncommitted_count} uncommitted file(s) and "
+            f"{unpushed_count} unpushed commit(s); not closed"
+        )
+
+    if terminal is not None:
+        terminal_host.remove(terminal.address)
+    worktree_removed = False
+    branch_deleted = False
+    try:
+        if worktree is not None:
+            # Without discard, any file left is pan's untracked settings file.
+            has_files = bool(worktree.untracked_paths or worktree.modified_paths)
+            git.remove_worktree(worktree_path, force=discard or has_files)
+            worktree_removed = True
+        elif repo is not None:
+            git.prune_worktrees(repo)
+        if repo is not None and branch is not None:
+            git.delete_branch(repo, name, force=force_branch_delete(branch, discard=discard))
+            branch_deleted = True
+    except GitWorktreeError:
+        # The terminal is gone but the cleanup is not finished: the record keeps its status
+        # and its tie (so `@pan done` retries from where it stopped), and forgets the removed
+        # terminal's address, so nothing is ever sent to a terminal now at that address.
+        thread_map.put(record.model_copy(update={"terminal_address": ""}))
+        slack_post(
+            slack,
+            channel,
+            thread_ts,
+            f"Closed {name}, but could not remove its worktree or branch; "
+            f"send `@pan done` to try again, or remove {worktree_path} by hand.",
+        )
+        raise
+
+    thread_map.update_status(thread_ts, WorkerStatus.DONE, session_name=name)
+    thread_map.untie(thread_ts)
+    slack_post(
+        slack,
+        channel,
+        thread_ts,
+        closed_reply(
+            name,
+            worktree_removed=worktree_removed,
+            branch_deleted=branch_deleted,
+            repo_known=repo is not None,
+        ),
+    )
+    logger.info(
+        f"done session={name} thread={thread_ts} discard={discard} "
+        f"worktree_removed={worktree_removed} branch_deleted={branch_deleted}"
+    )

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from pan.models import (
+    BranchStatus,
     InboxItem,
     InboxThread,
     LaunchdJobState,
@@ -15,6 +16,7 @@ from pan.models import (
     ThreadRecord,
     ThreadSource,
     WorkerStatus,
+    WorktreeStatus,
 )
 
 # Every seam Protocol lives here for a single import point.
@@ -134,9 +136,23 @@ class PendingConfirmations(Protocol):
 
 
 class GitWorktreeAdapter(Protocol):
+    # Creating a worktree raises SpawnError; the other methods raise GitWorktreeError.
     def create_worktree(self, repo: Path, branch: str, base: Path) -> Path: ...
 
-    def remove_worktree(self, path: Path) -> None: ...
+    # Read-only: changes nothing in the worktree or its repository.
+    def worktree_status(self, path: Path) -> WorktreeStatus: ...
+
+    # Read-only. None when the repository has no such local branch.
+    def branch_status(self, repo: Path, branch: str) -> BranchStatus | None: ...
+
+    # `force` also removes a worktree holding uncommitted or untracked files.
+    def remove_worktree(self, path: Path, *, force: bool) -> None: ...
+
+    # Drop the repository's records of worktrees whose folders are gone.
+    def prune_worktrees(self, repo: Path) -> None: ...
+
+    # `force` (-D) also deletes a branch whose commits are not merged (-d refuses it).
+    def delete_branch(self, repo: Path, branch: str, *, force: bool) -> None: ...
 
 
 class AgentLauncher(Protocol):

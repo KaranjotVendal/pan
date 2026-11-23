@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget, send to a named session or propose one for the person to confirm, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls, the proposal of a session for an inexact `to <name>:`, and whether a message asks for its answer in the Slack thread.
+description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget / done, send to a named session or propose one for the person to confirm, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls, the proposal of a session for an inexact `to <name>:`, and whether a message asks for its answer in the Slack thread.
 ---
 
 # Orchestrating loop
@@ -11,9 +11,10 @@ through your pane, only through the durable inbox. On each nudge, run this loop 
 
 You own **only** the fuzzy judgments: which repo a new task belongs to, comprehending the task
 well enough to write the worker's brief, proposing which live session a `to <name>:` meant when
-`<name>` matches none exactly (r5; the person confirms before anything is sent), and whether a
+`<name>` matches none exactly (r6; the person confirms before anything is sent), and whether a
 message asks for its answer in the Slack thread (the reply mode; step 2). Whether a message starts
-a new session or goes to an existing one is **not** yours to judge: it follows from the route words and the thread's tie (below).
+a new session or goes to an existing one is **not** yours to judge: it follows from the route words
+and the thread's tie (below).
 **Every other step is a deterministic `pan` subcommand** — never reimplement parsing, spawning,
 state, or posting by hand, and never decide a task's *mode* yourself.
 
@@ -29,12 +30,13 @@ has five fields:
 - `item` — the inbox event (`id`, `slack_user`, `channel`, `thread_ts`, `is_thread_reply`,
   `raw_text`, `received_at`, `source`).
 - `route` — the route words, parsed in code by `parse_route` (the gateway parses them when the
-  message arrives): `kind` (`task`, `new`, `to`, `sessions`, `forget`, `check`, `notice` or
-  `confirm`), `session` (the name after `to`), `text` (the message without the mention and the route
-  word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack"; a
-  hint, see "Reply in Slack by meaning" in step 2),
-  `notice` (for `kind == "notice"`, the exact reply to post) and `choice` (for `kind == "confirm"`:
-  `yes`, a number, or `no`). The drain sets `confirm` itself: a `yes`, `y` or 1-3 reply, or a
+  message arrives): `kind` (`task`, `new`, `to`, `sessions`, `forget`, `check`, `done`, `notice`
+  or `confirm`), `session` (the name after `to`), `text` (the message without the mention and the
+  route word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack";
+  a hint, see "Reply in Slack by meaning" in step 2), `notice` (for `kind == "notice"`, the exact
+  reply to post), `choice` (for `kind == "confirm"`: `yes`, a number, or `no`) and `discard` (for
+  `kind == "done"`: the message was `done --discard`). The drain sets `confirm` itself: a `yes`,
+  `y` or 1-3 reply, or a
   decline (`no`, `n`, `cancel`, `stop`; choice `no`), in a thread where pan asked "Send this to
   ...?" or "Which session?" less than 30 minutes ago.
 - `directive` — the result of the deterministic `parse_directive`, run on `route.text`: `mode`
@@ -100,7 +102,7 @@ If `cancels_confirmation` is true, first drop pan's open question in the thread 
 
     pan confirm --thread <thread_ts> --channel <channel> --cancel
 
-Act on `route.kind` first. In (r2) to (r6) the `pan` command posts its own reply through the single
+Act on `route.kind` first. In (r2) to (r7) the `pan` command posts its own reply through the single
 Slack egress (INV-4), as is — never summarize, reword or repost its output.
 
 ### (r1) `route.kind == "notice"` — post the notice, do nothing else
@@ -133,7 +135,36 @@ Touch no session.
 
 It unties the thread and posts one line. It never stops the session.
 
-### (r5) `route.kind == "to"` — send to the named session and tie the thread to it
+### (r5) `route.kind == "done"` — close the thread's session
+
+    pan done --thread <thread_ts> --channel <channel> [--discard]
+
+Pass `--discard` when `route.discard` is true (the message was `done --discard`). It posts its own
+one-line reply in every case; do nothing more, whatever its exit code:
+
+- Untied thread: "This thread has no session." Nothing is touched.
+- A session pan did not start: it only unties the thread ("Untied this thread from desk-x; pan never
+  closes sessions it didn't start."). pan never closes it.
+- pan's own session while it is working (exit 26) or waiting on a prompt (exit 23): refused,
+  unless `--discard`.
+- pan's own session with unsaved work: kept, exit 29, unless `--discard` ("pan-7 has 2 uncommitted
+  files and 1 unpushed commit; kept it. ..."). Unsaved work is uncommitted or untracked files (the
+  untracked `.claude/settings.json` pan writes at spawn does not count; a tracked one the session
+  changed does), or branch commits its upstream lacks. An upstream deleted after a merge counts as
+  holding them; with no upstream, commits merged into neither the repo's default branch nor the
+  branch it was created from count.
+- Otherwise it removes the session's terminal (if still there), its worktree and its branch, then
+  marks the record `done` and unties the thread ("Closed pan-7 and removed its worktree and
+  branch."). With the worktree folder already gone it still deletes the branch from the repository.
+- Exit 30: a git command failed. The terminal may be gone, but the thread stays tied with its status
+  unchanged, so the person can send `@pan done` again to finish; the reply says so.
+- Exit 31: the session's folder is outside pan's worktree folder or is a repository's main checkout.
+  pan never removes it, and retrying will not change that; the reply says so.
+
+`pan stop` stays the kill switch (it marks the thread `failed` and never touches the worktree);
+never use it for `done`.
+
+### (r6) `route.kind == "to"` — send to the named session and tie the thread to it
 
     pan send --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack]
 
@@ -170,7 +201,7 @@ Never spawn, retry `pan send`, or fall back to the tie for a `to` route.
 `to <name>:` from X is refused before it reaches you (the route is a notice): X may only start new
 sessions.
 
-### (r6) `route.kind == "confirm"` — the person answered pan's question
+### (r7) `route.kind == "confirm"` — the person answered pan's question
 
 When `route.choice` is `no`, the person declined. Run only this (it posts `Not sent.`), and do
 nothing else with the message: it is not a task.
@@ -188,12 +219,12 @@ picks nothing (`yes` to several, a number out of range) gets "Reply 1 or 2 to ch
 question stays open; a chosen session that has ended gets a one-line reply (exit 20). Do nothing
 more in every case.
 
-### (r7) `route.kind == "new"` — start a new session even in a tied thread
+### (r8) `route.kind == "new"` — start a new session even in a tied thread
 
 Go to (c) below with `directive.cleaned_text` as the task. In a tied thread the tie moves to the
 new session; the old session keeps running, untied.
 
-### (r8) `route.kind == "task"` — no route words
+### (r9) `route.kind == "task"` — no route words
 
 Use `directive.mode`, then the tie:
 
@@ -322,7 +353,8 @@ every turn end; otherwise Slack hears nothing more until someone writes `@pan ch
 Mechanical (always a `pan` subcommand — never hand-rolled): draining the inbox, reading the parsed
 route and directive, reading/writing the thread map, spawning, sending to a named session
 (`pan send`), asking and acting on a confirmation (`pan propose`, `pan confirm`), checking
-(`pan check`), listing (`pan sessions`), untying (`pan forget`), posting to Slack. The
+(`pan check`), listing (`pan sessions`), untying (`pan forget`), closing a session (`pan done`),
+posting to Slack. The
 gateway already authenticated the sender and added the `:eyes:` ack before the item reached the
 inbox — you never re-authenticate. Relaying into a live worker is `pan relay` too; never shell
 `hc` directly.
