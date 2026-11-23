@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import SecretStr
+from service_manager_fakes import FakeServiceManager
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 from typer.testing import CliRunner
 
@@ -19,6 +22,7 @@ from pan.errors import (
     InboxError,
     NotPanSessionError,
     PanError,
+    ServiceError,
     SessionBusyError,
     SlackPostError,
     SpawnError,
@@ -37,6 +41,7 @@ from pan.inbox import FileInboxStore
 from pan.models import (
     AgentStatus,
     InboxItem,
+    LaunchdJobState,
     PanConfig,
     ReplyMode,
     Route,
@@ -605,6 +610,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (TerminalNameTakenError("x"), 24),
         (NotPanSessionError("x"), 25),
         (SessionBusyError("x"), 26),
+        (ServiceError("x"), 27),
         (PanError("x"), 1),
     ],
 )
@@ -1054,3 +1060,72 @@ def test_inbox_drain_refuses_a_to_route_from_x(
     assert entry["route"]["notice"] == (
         "messages from X cannot use to <name>: yet; they can only start new sessions"
     )
+
+
+@pytest.fixture
+def service_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeServiceManager:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(shutil, "which", lambda _name: "/opt/tools/bin/pan")
+    manager = FakeServiceManager(home / "Library" / "LaunchAgents")
+    monkeypatch.setattr(cli, "build_service_manager", lambda _home: manager)
+    return manager
+
+
+def test_service_install_loads_every_agent_with_the_resolved_binary(
+    service_manager: FakeServiceManager,
+) -> None:
+    result = runner.invoke(cli.app, ["service", "install"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[:3] == [
+        "loaded com.pan.gateway",
+        "loaded com.pan.watcher",
+        "loaded com.pan.up",
+    ]
+    assert "/opt/tools/bin/pan" in result.output
+    assert "<string>/opt/tools/bin/pan</string>" in service_manager.plists["com.pan.gateway"]
+
+
+def test_service_uninstall_reports_each_agent(service_manager: FakeServiceManager) -> None:
+    service_manager.plists["com.pan.gateway"] = "<plist/>"
+    service_manager.loaded["com.pan.gateway"] = LaunchdJobState(pid=412)
+
+    result = runner.invoke(cli.app, ["service", "uninstall"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "com.pan.up: was not loaded, no plist",
+        "com.pan.watcher: was not loaded, no plist",
+        "com.pan.gateway: unloaded, plist deleted",
+    ]
+
+
+def test_service_status_lists_each_agent(service_manager: FakeServiceManager) -> None:
+    service_manager.plists["com.pan.gateway"] = "<plist/>"
+    service_manager.loaded["com.pan.gateway"] = LaunchdJobState(pid=412, last_exit_code=0)
+
+    result = runner.invoke(cli.app, ["service", "status"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].split() == ["com.pan.gateway", "installed", "loaded", "pid=412", "last_exit=0"]
+    assert lines[1].split() == [
+        "com.pan.watcher",
+        "not",
+        "installed",
+        "not",
+        "loaded",
+        "pid=-",
+        "last_exit=-",
+    ]
+
+
+def test_service_install_failure_maps_to_service_exit_code(
+    monkeypatch: pytest.MonkeyPatch, service_manager: FakeServiceManager
+) -> None:
+    service_manager.fail_bootstrap_for = "com.pan.gateway"
+    monkeypatch.setattr(sys, "argv", ["pan", "service", "install"])
+
+    assert cli._run() == 27

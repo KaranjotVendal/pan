@@ -7,6 +7,7 @@ from typing import Protocol
 from pan.models import (
     InboxItem,
     InboxThread,
+    LaunchdJobState,
     Terminal,
     TerminalRead,
     ThreadRecord,
@@ -137,3 +138,26 @@ class InboxWatcher(Protocol):
     def on_inbox_changed(self) -> None: ...
 
     def start(self) -> None: ...
+
+
+class ServiceManager(Protocol):
+    # pan's per-user launchd agents (see `pan service`). Only the launchd adapter in
+    # src/pan/adapters/launchd.py runs launchctl or writes the LaunchAgents folder. Failures
+    # raise ServiceError.
+    def plist_installed(self, label: str) -> bool: ...
+
+    # Write the agent's plist into the LaunchAgents folder and return its path.
+    def write_plist(self, label: str, content: str) -> Path: ...
+
+    # Delete the agent's plist; returns False when there was none.
+    def remove_plist(self, label: str) -> bool: ...
+
+    def ensure_directory(self, path: Path) -> None: ...
+
+    # None when launchd has no job of that label loaded.
+    def job_state(self, label: str) -> LaunchdJobState | None: ...
+
+    def bootstrap(self, plist_path: Path) -> None: ...
+
+    # Unload the job; a job that is already gone counts as unloaded.
+    def bootout(self, label: str) -> None: ...

@@ -54,6 +54,18 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- `pan service install|uninstall|status`: pan starts by itself after a login or reboot on macOS.
+  `install` renders the gateway, watcher and up LaunchAgents into
+  `~/Library/LaunchAgents/com.pan.<name>.plist` (home directory and the absolute path of the
+  installed `pan` filled in), creates `~/.pan/logs`, and loads each with `launchctl bootstrap
+  gui/<uid>` in the order gateway, watcher, up; a loaded agent is booted out first, so running it
+  again reinstalls. `uninstall` boots each out (a job that is not loaded is skipped) and deletes its
+  plist. `status` prints, per agent, whether its plist is installed, whether it is loaded, its pid and
+  its last exit code (from `launchctl print`). launchctl and the plist files sit behind the
+  `ServiceManager` seam (`src/pan/adapters/launchd.py`); a launchctl failure raises `ServiceError`
+  (exit 27). The templates moved from `launchd/` into the package (`src/pan/launchd/`) so an
+  installed pan finds them, and the program path is now a `<PAN_BIN>` placeholder. `service` is
+  left out of the Slack help listing, like `gateway` and `watcher`.
 - Reaching sessions pan did not start ("desk sessions"). `to <name>:` (`pan send --to`) now reaches
   any live session. A desk session gets a thread record with `started_by_pan` false and its own
   folder as `worktree_path`, tied to the thread (one thread per session still holds).

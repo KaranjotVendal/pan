@@ -9,7 +9,16 @@ from pan.config import (
 )
 from pan.help import HelpRequest, parse_help_request, render_cli_help
 
-_INFRA_COMMANDS = ("gateway", "watcher", "hook", "inbox", "threads", "spawn", "slack-post")
+_INFRA_COMMANDS = (
+    "gateway",
+    "watcher",
+    "service",
+    "hook",
+    "inbox",
+    "threads",
+    "spawn",
+    "slack-post",
+)
 # Rich's box-drawing frame is exactly what must NOT reach a Slack code block.
 _BOX_DRAWING = ("╭", "╮", "│", "╰", "╯", "─")
 

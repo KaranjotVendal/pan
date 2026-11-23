@@ -65,6 +65,10 @@ class NotPanSessionError(PanError): ...
 class SessionBusyError(PanError): ...
 
 
+# Installing, loading, unloading or reading pan's launchd agents failed (`pan service`).
+class ServiceError(PanError): ...
+
+
 class TargetAmbiguousError(PanError):
     # Carries the ambiguous candidates so the CLI boundary and the orchestrator can list
     # each one's address, name and Herdr app label for the user to re-target by a precise
