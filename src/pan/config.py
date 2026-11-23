@@ -70,6 +70,9 @@ INBOX_THREAD_TASK_MAX_LENGTH = 60
 # A worker's brief is the Inbox preamble, this marker, then the task. `pan sessions` cuts a
 # brief back to its task when it shows the session's last ask.
 WORKER_BRIEF_TASK_MARKER = "\n\nTask:\n"
+# The Slack plugin's read-thread tool, named in the brief of a new session started from a reply
+# inside a Slack thread: the session reads the thread itself, pan never fetches it.
+SLACK_READ_THREAD_TOOL_NAME = "mcp__plugin_slack_slack__slack_read_thread"
 # `pan sessions` shows the last thing each session was asked on one line, cut to this length.
 SESSION_LAST_ASK_MAX_LENGTH = 80
 

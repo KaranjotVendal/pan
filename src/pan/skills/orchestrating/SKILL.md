@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget, send to a named session or propose one for the person to confirm, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls and the proposal of a session for an inexact `to <name>:`.
+description: Use on every inbox nudge in the persistent pan-orchestrator session — drain the pan inbox, read each item's route (parsed in code), directive and thread tie, and act on it (run check / sessions / forget, send to a named session or propose one for the person to confirm, start a new session, or send a follow-up to the tied session). Every mechanical step is a `pan` subcommand; the model makes only the repo / task-comprehension calls, the proposal of a session for an inexact `to <name>:`, and whether a message asks for its answer in the Slack thread.
 ---
 
 # Orchestrating loop
@@ -10,9 +10,10 @@ fixed, content-free nudge whenever the inbox changes (INV-2) — the actual requ
 through your pane, only through the durable inbox. On each nudge, run this loop once.
 
 You own **only** the fuzzy judgments: which repo a new task belongs to, comprehending the task
-well enough to write the worker's brief, and proposing which live session a `to <name>:` meant when
-`<name>` matches none exactly (r5; the person confirms before anything is sent). Whether a message starts a new session or goes to an
-existing one is **not** yours to judge: it follows from the route words and the thread's tie (below).
+well enough to write the worker's brief, proposing which live session a `to <name>:` meant when
+`<name>` matches none exactly (r5; the person confirms before anything is sent), and whether a
+message asks for its answer in the Slack thread (the reply mode; step 2). Whether a message starts
+a new session or goes to an existing one is **not** yours to judge: it follows from the route words and the thread's tie (below).
 **Every other step is a deterministic `pan` subcommand** — never reimplement parsing, spawning,
 state, or posting by hand, and never decide a task's *mode* yourself.
 
@@ -30,7 +31,8 @@ has five fields:
 - `route` — the route words, parsed in code by `parse_route` (the gateway parses them when the
   message arrives): `kind` (`task`, `new`, `to`, `sessions`, `forget`, `check`, `notice` or
   `confirm`), `session` (the name after `to`), `text` (the message without the mention and the route
-  word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack"),
+  word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack"; a
+  hint, see "Reply in Slack by meaning" in step 2),
   `notice` (for `kind == "notice"`, the exact reply to post) and `choice` (for `kind == "confirm"`:
   `yes`, a number, or `no`). The drain sets `confirm` itself: a `yes`, `y` or 1-3 reply, or a
   decline (`no`, `n`, `cancel`, `stop`; choice `no`), in a thread where pan asked "Send this to
@@ -63,7 +65,19 @@ INV-3 has one bounded exception, the target of a `to <name>:` that `pan send` ca
 (exit 28). There you read the message and the live sessions and propose up to 3 of them with
 `pan propose`; you never send. `pan propose` keeps only live terminal addresses, the person must
 reply `yes` or a number in the thread, and on that reply `pan confirm` checks the chosen session is
-still the same live terminal before sending. Nothing else about routing is yours to judge.
+still the same live terminal before sending.
+
+**Reply in Slack by meaning.** INV-3 has a second bounded exception, the reply mode only.
+`route.reply_in_slack` is the exact phrase "reply in slack", matched in code; treat it as a hint,
+not the whole rule. Pass `--reply-in-slack` (to `pan spawn`, `pan send` and `pan propose`) when `route.reply_in_slack` is true, AND also when the
+message's meaning plainly asks for the answer or result in this Slack thread: "share it here", "post
+it here", "send the link here", "reply here", "let me know here", "drop the result in this thread".
+Do not pass it when the message does not ask for that: "here" meaning a place in the code, a
+repository or a page ("fix the bug here", "the config is here"), or a message that only asks for the
+work to be done. When unsure, leave it off: the person can still `@pan check`. This judgment sets the
+reply mode and nothing else; it never changes the route, the mode or the target.
+
+Nothing else about routing is yours to judge.
 
 ## 3. The thread's tie
 
@@ -120,7 +134,8 @@ It unties the thread and posts one line. It never stops the session.
 
     pan send --thread <thread_ts> --channel <channel> --to '<route.session>' --task '<route.text>' --requester <item.slack_user> [--reply-in-slack]
 
-Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.text` is sent verbatim — do not
+Pass `--reply-in-slack` when `route.reply_in_slack` is true or the message's meaning asks for the
+answer in this thread (step 2, "Reply in Slack by meaning"). `route.text` is sent verbatim — do not
 rewrite it.
 The session may be one pan started or one of the person's own desk sessions. `pan send` sends only
 to an exact match: the session's address, name, or Herdr label or space. It types the text only if
@@ -279,9 +294,14 @@ started), so a plain message starts a new session in a new worktree.
 
 Comprehend the task and pick the repo (**your fuzzy calls**), then:
 
-    pan spawn --thread <thread_ts> --task '<cleaned_text>' --channel <channel> --requester <item.slack_user> --request-text '<item.raw_text>' [--stream <target_stream>] [--repo <path>] [--reply-in-slack]
+    pan spawn --thread <thread_ts> --task '<cleaned_text>' --channel <channel> --requester <item.slack_user> --request-text '<item.raw_text>' [--stream <target_stream>] [--repo <path>] [--reply-in-slack] [--thread-reply]
 
-Pass `--reply-in-slack` when `route.reply_in_slack` is true. `pan spawn` creates the git worktree,
+Pass `--reply-in-slack` when `route.reply_in_slack` is true or the message's meaning asks for the
+answer in this thread (step 2, "Reply in Slack by meaning"). Pass `--thread-reply` when
+`item.is_thread_reply` is true: the message was a reply inside a Slack thread, so the worker's brief
+names the channel and thread ts and tells the session to read the whole thread first with its own
+Slack read-thread tool (`slack_read_thread`), only to read. You do not read or summarize the thread
+yourself. `pan spawn` creates the git worktree,
 starts the worker Claude session in its own hc terminal, ties the thread to it, and posts one start
 notice through the single Slack egress path (INV-4), naming the session and its Plannotator Inbox
 thread (`Started pan-7 in a new worktree · Inbox thread: "pan-7: <short task>"`). The worker's brief
@@ -300,6 +320,6 @@ inbox — you never re-authenticate. Relaying into a live worker is `pan relay` 
 `hc` directly.
 
 Yours to judge (and the only place model reasoning belongs): which repo a new task targets,
-writing a clear worker brief from the task prose, and which sessions to propose after `pan send`
-exits 28. Whether to send to the tied session, a named session or a new one is never a judgment:
+writing a clear worker brief from the task prose, which sessions to propose after `pan send`
+exits 28, and whether the message asks for its answer in the Slack thread (`--reply-in-slack`). Whether to send to the tied session, a named session or a new one is never a judgment:
 follow the `route`, then the `tie`; a proposed session gets the task only after the person replies. Keep every other step deterministic.

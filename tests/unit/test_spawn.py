@@ -17,6 +17,7 @@ from pan.spawn import (
     desk_session_ended_reply,
     inbox_thread_name,
     reopen_worker,
+    slack_thread_paragraph,
     spawn_worker,
     worker_brief,
     worker_terminal_name,
@@ -93,6 +94,7 @@ def _spawn(
     task: str = "do the thing",
     request_text: str | None = None,
     reply_in_slack: bool = False,
+    from_thread_reply: bool = False,
 ) -> ThreadRecord:
     return spawn_worker(
         thread_ts=_THREAD,
@@ -112,6 +114,7 @@ def _spawn(
         requester="U0TEST",
         request_text=request_text,
         reply_in_slack=reply_in_slack,
+        from_thread_reply=from_thread_reply,
     )
 
 
@@ -510,3 +513,38 @@ def test_worker_brief_says_who_replies_in_slack(
     assert preamble.endswith(expected_sentence)
     assert unwanted_text not in preamble
     assert "Do not post to Slack." not in preamble
+
+
+@pytest.mark.parametrize(
+    ("from_thread_reply", "expects_thread_paragraph"),
+    [(False, False), (True, True)],
+    ids=["top-level-mention", "thread-reply"],
+)
+def test_spawn_brief_names_the_slack_thread_only_for_a_thread_reply(
+    tmp_path: Path, from_thread_reply: bool, expects_thread_paragraph: bool
+) -> None:
+    terminal_host = FakeTerminalHost()
+
+    _spawn(
+        base=tmp_path,
+        terminal_host=terminal_host,
+        git=FakeGit(terminal_host.timeline),
+        from_thread_reply=from_thread_reply,
+    )
+
+    (run,) = terminal_host.runs
+    preamble, task = run.argv[1].split("\n\nTask:\n")
+    assert task == "do the thing"
+    assert ("channel C1" in preamble) is expects_thread_paragraph
+    assert (f"thread ts {_THREAD}" in preamble) is expects_thread_paragraph
+    assert ("slack_read_thread" in preamble) is expects_thread_paragraph
+
+
+def test_slack_thread_paragraph_says_read_every_message_and_never_post() -> None:
+    paragraph = slack_thread_paragraph("C1", _THREAD)
+
+    assert "channel C1 with thread ts 1718000000.000200" in paragraph
+    assert "every message, following pagination until there are no more" in paragraph
+    assert "slack_read_thread" in paragraph
+    assert "do not post to Slack" in paragraph
+    assert "If the tool is unavailable, say so in the Inbox thread" in paragraph

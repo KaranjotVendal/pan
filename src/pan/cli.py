@@ -308,9 +308,15 @@ def spawn(
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
+    thread_reply: bool = typer.Option(
+        False,
+        "--thread-reply",
+        help="the message was a reply inside a Slack thread; the brief says to read the thread",
+    ),
 ) -> None:
     """Create worktree + hc terminal + worker session; tie the thread to it; post the start
-    notice naming its Inbox thread."""
+    notice naming its Inbox thread. With --thread-reply the brief tells the session to read the
+    Slack thread first with its own Slack read-thread tool."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
     clock = SystemClock()
@@ -335,6 +341,7 @@ def spawn(
         requester=requester,
         request_text=request_text,
         reply_in_slack=reply_in_slack,
+        from_thread_reply=thread_reply,
     )
 
 

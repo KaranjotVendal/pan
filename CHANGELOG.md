@@ -66,6 +66,19 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Added
 
+- A new session started from a reply inside a Slack thread reads that thread first. The
+  orchestrator passes the new `pan spawn --thread-reply` when the inbox item's `is_thread_reply`
+  is true, and the worker brief then adds a paragraph (`slack_thread_paragraph`) naming the
+  channel and thread ts and telling the session to read the whole thread, every message and every
+  page, with the Slack read-thread tool (`slack_read_thread`, `SLACK_READ_THREAD_TOOL_NAME`), only
+  to read and never to post; if the tool is unavailable it says so in its Inbox thread and goes on
+  with the task text. pan itself does not fetch the thread. Top-level mentions, follow-ups, reopens
+  and `to` sends are unchanged.
+- The orchestrator passes `--reply-in-slack` (to `pan spawn`, `pan send` and `pan propose`) when a
+  message plainly asks for its result in the Slack thread ("share it here", "post it here", "send
+  the link here", "reply here"), as well as when it says "reply in slack". `wants_slack_reply`
+  stays the code-level hint; the new judgment is the orchestrator's second bounded exception to
+  INV-3, stated in SKILL.md next to the confirm exception, and it sets the reply mode only.
 - `to <name>:` with no exact match asks before sending. The name stays one token, so a sentence
   such as "to be clear: ..." is still a plain task. `pan send --to` still sends at once to an exact
   match (address, terminal name, or Herdr label or space); otherwise it sends and posts nothing and exits

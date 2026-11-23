@@ -300,6 +300,38 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert captured["base"] == config.orchestrator.worktree_base
     assert captured["app_space"] == "sp42"
     assert isinstance(captured["terminal_host"], ShellHcAdapter)
+    assert captured["from_thread_reply"] is False
+
+
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_from_thread_reply"),
+    [([], False), (["--thread-reply"], True)],
+    ids=["top-level", "thread-reply"],
+)
+def test_spawn_passes_thread_reply_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra_arguments: list[str],
+    expected_from_thread_reply: bool,
+) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda: _make_config(tmp_path))
+    monkeypatch.setattr(
+        cli,
+        "load_credentials",
+        lambda path: SlackCredentials(
+            bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
+        ),
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "spawn_worker", lambda **kwargs: captured.update(kwargs))
+
+    result = runner.invoke(
+        cli.app,
+        ["spawn", "--thread", "t-1", "--task", "build it", "--channel", "C1", *extra_arguments],
+    )
+
+    assert result.exit_code == 0
+    assert captured["from_thread_reply"] is expected_from_thread_reply
 
 
 def test_watcher_builds_from_config_and_starts(

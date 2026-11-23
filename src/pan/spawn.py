@@ -12,6 +12,7 @@ from pan.config import (
     PAN_THREAD_LABEL,
     PLANNOTATOR_INBOX_TOOL_NAME,
     REPL_TOOL_NAME,
+    SLACK_READ_THREAD_TOOL_NAME,
     TERMINAL_NAME_MAX_LENGTH,
     WORKER_BRIEF_TASK_MARKER,
     WORKER_NAME_PREFIX,
@@ -89,6 +90,17 @@ _SLACK_REPLY_SENTENCES: dict[ReplyMode, str] = {
     ),
 }
 
+# Added to the brief of a new session started from a reply inside a Slack thread, so the
+# session reads the earlier messages for context. pan does not fetch the thread: the session
+# reads it with its own Slack tool, only to read.
+_SLACK_THREAD_PARAGRAPH = (
+    "This request came from a reply in the Slack thread in channel {channel} with thread ts "
+    "{thread_ts}. Before you start, read the whole thread (every message, following pagination "
+    "until there are no more) with the Slack read-thread tool ({tool_name}). Use it only to "
+    "read; do not post to Slack. If the tool is unavailable, say so in the Inbox thread and "
+    "continue with the task text."
+)
+
 _NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
 
 
@@ -120,10 +132,25 @@ def slack_reply_sentence(reply_mode: ReplyMode) -> str:
     return _SLACK_REPLY_SENTENCES[reply_mode]
 
 
-def worker_brief(inbox_thread: str, task: str, reply_mode: ReplyMode) -> str:
+def slack_thread_paragraph(channel: str, thread_ts: str) -> str:
+    return _SLACK_THREAD_PARAGRAPH.format(
+        channel=channel, thread_ts=thread_ts, tool_name=SLACK_READ_THREAD_TOOL_NAME
+    )
+
+
+def worker_brief(
+    inbox_thread: str,
+    task: str,
+    reply_mode: ReplyMode,
+    *,
+    thread_paragraph: str | None = None,
+) -> str:
+    # `thread_paragraph` (slack_thread_paragraph) goes after the preamble, before the task.
     preamble = _WORKER_BRIEF_PREAMBLE.format(
         inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
     )
+    if thread_paragraph is not None:
+        preamble = f"{preamble}\n\n{thread_paragraph}"
     return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
 
 
@@ -203,9 +230,12 @@ def spawn_worker(
     requester: str | None = None,
     request_text: str | None = None,
     reply_in_slack: bool = False,
+    from_thread_reply: bool = False,
 ) -> ThreadRecord:
     # `request_text` is the original message; it asks for Slack replies when it contains
     # "reply in slack" (falls back to the task when absent). `reply_in_slack` forces it.
+    # `from_thread_reply` marks a request that was a reply inside a Slack thread: the brief
+    # then tells the session to read that thread first.
     name = worker_terminal_name(stream, id_gen)
     created_at = clock.now()
     inbox_thread = inbox_thread_name(name, task)
@@ -213,6 +243,7 @@ def spawn_worker(
         request_text if request_text is not None else task
     )
     reply_mode = ReplyMode.SLACK if asks_for_slack_reply else ReplyMode.ON_DEMAND
+    thread_paragraph = slack_thread_paragraph(channel, thread_ts) if from_thread_reply else None
 
     try:
         _ensure_name_free(terminal_host, name)
@@ -223,7 +254,7 @@ def spawn_worker(
         terminal = launcher.launch(
             name,
             worktree_path,
-            worker_brief(inbox_thread, task, reply_mode),
+            worker_brief(inbox_thread, task, reply_mode, thread_paragraph=thread_paragraph),
             worker_labels(thread_ts, channel, app_space),
         )
     except (SpawnError, TerminalHostError) as error:
