@@ -12,16 +12,21 @@ as it works (see `AGENT_LOOP.md` step 9).
 - The inbox-link hook now records the Inbox link for a worker in Claude Code's code mode, which
   calls the Inbox from inside its `REPL` tool. The worker's PostToolUse matcher also matches
   `REPL` (`mcp__plannotator__plannotator_inbox|REPL`, built from `PLANNOTATOR_INBOX_TOOL_NAME`
-  and the new `REPL_TOOL_NAME`); a REPL call counts only when its code names the Inbox tool or
-  its result holds the Inbox's prose line, and any other REPL call is skipped with a log line.
-  When no JSON result is found, the thread id and url are read from the prose line
-  ("Plannotator Inbox (thread <id>, <url>)", also "Already sent ..." and "... asking 1 question
-  ..."); the first match wins. A recorded link is still kept.
-- A desk session in a new terminal no longer joins the record of an earlier terminal with the
-  same name (killed but never forgotten), which reused that record's Inbox thread name. A record
-  joins a terminal by name only when it holds no terminal address (legacy records); one whose
-  address names another terminal never does. Applies to `to <name>:` (`_session_record_for`)
-  and to `pan sessions` (`_match_record`).
+  and the new `REPL_TOOL_NAME`). A REPL call counts only when its code holds
+  `plannotator_inbox` (any accessor) or its result holds the Inbox's send line; any other REPL
+  call is skipped with a log line. A REPL result yields a link only from the send line at the
+  start of a line ("Sent to the Plannotator Inbox (thread <id>, <url>)", also "Already sent ..."
+  and "... asking 1 question ..."), never from JSON, so a thread read or listing is never
+  recorded; the first match wins. The direct tool reads its JSON result first and that line
+  second. A recorded link is kept unless the send names the record's own Inbox thread: the
+  direct tool's `thread` input, or for a REPL call the thread name appearing in its code.
+- A session record joins a live terminal only when it belongs to it, in one rule shared by
+  `to <name>:` (`_session_record_for`) and `pan sessions` (`_match_record`): by address only
+  when the names also agree (hc can reuse an address), and by name only for a record with no
+  address (legacy records) or a pan worker back at a new address in its own worktree. The
+  worktree fallback no longer joins a record whose address names another terminal unless the
+  names match. A desk session in a new terminal named like a killed one no longer reuses the
+  old record's Inbox thread name.
 - A trailing client signature such as "\n*Sent using* <@U0EXAMPLE|Claude>" (added by some Slack
   clients and connectors, any letter case, with optional `*`/`_` emphasis, `>` quote and `|label`)
   is stripped in `_clean_message` before route parsing, so `check`, `sessions` and `forget` match

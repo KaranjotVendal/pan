@@ -376,28 +376,57 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
 
 
 @pytest.mark.parametrize(
-    "earlier_address, expected_inbox_thread_name",
+    "earlier, terminal, expected_inbox_thread_name",
     [
-        ("", "desk-test: fix the build"),
-        ("t9", "desk-test: add the tests"),
+        (
+            _record(terminal_name="desk-test", terminal_address="", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "desk-test: add the tests",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t10", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-old", terminal_address="t10", started_by_pan=False),
+            make_terminal("t10", name="desk-test"),
+            "desk-test: add the tests",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9"),
+            make_terminal("t10", name="desk-test", cwd=Path("/tmp/wt/pan-7")),
+            "pan-7: fix the login page",
+        ),
+        (
+            _record(terminal_name="desk-test", terminal_address="t9"),
+            make_terminal("t10", name="desk-test", cwd=Path("/tmp/elsewhere")),
+            "desk-test: add the tests",
+        ),
     ],
-    ids=["legacy-record-without-address-joins-by-name", "stale-record-of-a-killed-terminal"],
+    ids=[
+        "legacy-record-without-address-joins-by-name",
+        "stale-record-of-a-killed-terminal",
+        "same-address-and-name",
+        "address-reused-by-another-name",
+        "pan-worker-back-at-a-new-address-in-its-worktree",
+        "pan-worker-name-outside-its-worktree",
+    ],
 )
-def test_send_joins_a_record_by_name_only_when_it_has_no_terminal_address(
-    tmp_path: Path, earlier_address: str, expected_inbox_thread_name: str
+def test_send_joins_a_session_record_only_to_its_own_terminal(
+    tmp_path: Path,
+    earlier: ThreadRecord,
+    terminal: object,
+    expected_inbox_thread_name: str,
 ) -> None:
-    # A new terminal reusing the name of a killed one (whose record was never forgotten) is
-    # a new session: it gets its own Inbox thread name, not the old record's.
-    desk_folder = Path("/tmp/desk/test")
-    earlier = _record(
-        terminal_name="desk-test",
-        terminal_address=earlier_address,
-        started_by_pan=False,
-        worktree_path=desk_folder,
-        inbox_thread_name="desk-test: fix the build",
-    )
+    # A joined record keeps its Inbox thread name; a new session gets one of its own.
     thread_map = _thread_map(tmp_path, earlier)
-    terminal_host = _host(make_terminal("t10", name="desk-test", cwd=desk_folder))
+    terminal_host = _host(terminal)
 
     _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
 

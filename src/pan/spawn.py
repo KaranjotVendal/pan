@@ -53,7 +53,8 @@ logger = initialise_logger(__name__)
 # `pan read --full`); PostToolUse on the Inbox tool (or on code mode's REPL tool, which wraps
 # Inbox calls) records the session's Inbox thread id and link. The matcher is a regex
 # alternation of the tool names. Non-tool events take a list of {hooks: [{type, command}]}
-# objects (matcher omitted). The `pan hook` commands resolve the thread from the worker's cwd via the thread map.
+# objects (matcher omitted). The `pan hook` commands resolve the thread from the worker's cwd
+# via the thread map.
 _WORKER_SETTINGS = {
     "hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "pan hook session-start"}]}],

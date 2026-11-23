@@ -25,7 +25,7 @@ from pan.models import (
     WorkerStatus,
 )
 from pan.seams import Clock, InboxDirectory, SlackAdapter, TerminalHost, ThreadMap
-from pan.sessions import worker_status_for
+from pan.sessions import joins_terminal, worker_status_for
 from pan.spawn import desk_session_ended_reply, inbox_thread_name
 from pan.transcript import last_assistant_text
 
@@ -71,19 +71,9 @@ def _session_name(terminal: Terminal) -> str:
 
 def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
     # The record pan keeps for the session in this terminal (pan's own or a desk session),
-    # joined by address, or by terminal name for a record with no address (legacy records).
-    # A record whose address names another terminal never joins by name: it belongs to an
-    # earlier terminal of the same name. A tied record wins, then the newest.
-    matches = [
-        record
-        for record in records
-        if (record.terminal_address and record.terminal_address == terminal.address)
-        or (
-            not record.terminal_address
-            and terminal.name is not None
-            and record.terminal_name == terminal.name
-        )
-    ]
+    # joined by address or by name under the rules of joins_terminal; a tied record wins,
+    # then the newest.
+    matches = [record for record in records if joins_terminal(record, terminal)]
     for record in matches:
         if record.tied:
             return record

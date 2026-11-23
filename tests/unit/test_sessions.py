@@ -48,26 +48,41 @@ def _terminal_host_with(*terminals: object) -> FakeTerminalHost:
     return terminal_host
 
 
+def _desk(record: ThreadRecord) -> ThreadRecord:
+    return record.model_copy(update={"started_by_pan": False})
+
+
 @pytest.mark.parametrize(
     "terminal, record",
     [
-        # Address recorded at spawn: the most precise join.
         (
-            make_terminal("t5", name="renamed", cwd=Path("/tmp/elsewhere")),
+            make_terminal("t5", name="pan-a", cwd=Path("/tmp/elsewhere")),
             _record("t-1", "pan-a", "t5", "/tmp/worktree"),
         ),
-        # Address unknown (e.g. recreated), but the stream name still matches.
+        (
+            make_terminal("t5", cwd=Path("/tmp/elsewhere")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
         (
             make_terminal("t6", name="pan-a", cwd=Path("/tmp/elsewhere")),
             _record("t-1", "pan-a", "", "/tmp/worktree"),
         ),
-        # Neither matches, but the terminal runs in the worker's worktree.
+        (
+            make_terminal("t6", name="pan-a", cwd=Path("/tmp/worktree")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
         (
             make_terminal("t7", cwd=Path("/tmp/worktree")),
-            _record("t-1", "pan-z", "t99", "/tmp/worktree"),
+            _record("t-1", "pan-z", "", "/tmp/worktree"),
         ),
     ],
-    ids=["address", "name", "cwd"],
+    ids=[
+        "address-and-name",
+        "address-of-an-unnamed-terminal",
+        "name-of-a-record-without-address",
+        "name-of-a-worker-back-at-a-new-address-in-its-worktree",
+        "worktree-of-a-record-without-address",
+    ],
 )
 def test_collect_sessions_joins_pan_owned_terminals(terminal: object, record: ThreadRecord) -> None:
     summaries = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([record]))
@@ -77,6 +92,46 @@ def test_collect_sessions_joins_pan_owned_terminals(terminal: object, record: Th
     assert summary.thread_ts == "t-1"
     assert summary.pan_status is WorkerStatus.RUNNING
     assert summary.drift is False
+
+
+@pytest.mark.parametrize(
+    "terminal, record",
+    [
+        (
+            make_terminal("t5", name="pan-b", cwd=Path("/tmp/elsewhere")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
+        (
+            make_terminal("t10", name="desk-test", cwd=Path("/tmp/desk/test")),
+            _desk(_record("t-1", "desk-test", "t9", "/tmp/desk/test")),
+        ),
+        (
+            make_terminal("t6", name="pan-a", cwd=Path("/tmp/elsewhere")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
+        (
+            make_terminal("t6", name="pan-b", cwd=Path("/tmp/worktree")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
+        (
+            make_terminal("t6", cwd=Path("/tmp/worktree")),
+            _record("t-1", "pan-a", "t5", "/tmp/worktree"),
+        ),
+    ],
+    ids=[
+        "address-reused-by-another-name",
+        "name-of-a-killed-desk-terminal",
+        "name-of-a-worker-outside-its-worktree",
+        "worktree-of-a-killed-worker-under-another-name",
+        "worktree-of-a-killed-worker-unnamed-terminal",
+    ],
+)
+def test_collect_sessions_does_not_join_a_record_of_another_terminal(
+    terminal: object, record: ThreadRecord
+) -> None:
+    (summary,) = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([record]))
+
+    assert summary.thread_ts is None
 
 
 def test_collect_sessions_shows_a_tied_desk_session_as_external_with_its_thread() -> None:
@@ -96,20 +151,6 @@ def test_collect_sessions_shows_a_tied_desk_session_as_external_with_its_thread(
     assert desk_summary.drift is False
     # Another terminal in the desk session's folder is not joined to its record.
     assert other_summary.thread_ts is None
-
-
-def test_collect_sessions_does_not_join_a_record_of_another_terminal_by_name() -> None:
-    # A record whose address names an earlier (killed) terminal of the same name belongs to
-    # that terminal, not to the new one.
-    terminal = make_terminal("t10", name="desk-test", cwd=Path("/tmp/desk/test"))
-    stale_record = _record("t-1", "desk-test", "t9", "/tmp/desk/test").model_copy(
-        update={"started_by_pan": False}
-    )
-
-    (summary,) = collect_sessions(_terminal_host_with(terminal), FakeThreadMap([stale_record]))
-
-    assert summary.thread_ts is None
-    assert summary.is_pan_owned is False
 
 
 def test_collect_sessions_marks_external_terminal() -> None:
