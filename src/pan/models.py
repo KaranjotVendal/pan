@@ -80,8 +80,8 @@ class RouteKind(StrEnum):
     # The route words at the start of a message (see directive.parse_route). TASK means no
     # route word: the thread's tie decides. NOTICE means pan only replies with Route.notice
     # (a retired flag, or a route word with no task) and does nothing else. CONFIRM is a reply
-    # (`yes`, `y` or 1-3) to pan's open question in the thread asking which session to send a
-    # task to; only `pan inbox drain` sets it, because only it knows whether a question is open.
+    # (`yes`, `y`, 1-3, or a decline: `no`, `n`, `cancel`, `stop`) to pan's open question in
+    # the thread asking which session to send a task to; only `pan inbox drain` sets it, because only it knows whether a question is open.
     TASK = "task"
     NEW = "new"
     TO = "to"
@@ -101,7 +101,7 @@ class Route(BaseModel, frozen=True):
     # "reply in slack" appears in the message.
     reply_in_slack: bool = False
     notice: str | None = None
-    # For CONFIRM: the reply, `yes` or a number from 1 to 3.
+    # For CONFIRM: the reply, `yes`, a number from 1 to 3, or `no` (a decline).
     choice: str | None = None
 
 

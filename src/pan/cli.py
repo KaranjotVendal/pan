@@ -27,7 +27,13 @@ from pan.confirmations import (
     propose_sessions,
 )
 from pan.credentials import load_credentials, save_credentials
-from pan.directive import parse_confirm_reply, parse_directive, parse_route, route_for_source
+from pan.directive import (
+    CONFIRM_NO,
+    parse_confirm_reply,
+    parse_directive,
+    parse_route,
+    route_for_source,
+)
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -704,7 +710,7 @@ def confirm(
     thread: str = typer.Option(..., "--thread"),
     channel: str = typer.Option(..., "--channel"),
     choice: str | None = typer.Option(
-        None, "--choice", help="the reply to the open question: yes, or 1 to 3"
+        None, "--choice", help="the reply to the open question: yes, 1 to 3, or no"
     ),
     cancel: bool = typer.Option(
         False, "--cancel", help="drop the open question and post Not sent."
@@ -712,16 +718,16 @@ def confirm(
 ) -> None:
     """Act on the person's reply to the thread's open question from pan propose. --choice sends
     the stored task to the chosen session (busy and prompt refusals still apply) and ties the
-    thread to it; --cancel drops the question and posts Not sent."""
+    thread to it; --cancel (or --choice no) drops the question and posts Not sent."""
     if cancel == (choice is not None):
         raise typer.BadParameter("pass exactly one of --choice or --cancel")
-    # The same reading as a Slack reply: any case, surrounding spaces, y for yes.
+    # The same reading as a Slack reply: any case, surrounding spaces, y for yes, n for no.
     normalized_choice = parse_confirm_reply(choice) if choice is not None else None
     if choice is not None and normalized_choice is None:
-        raise typer.BadParameter("--choice must be yes, y, or a number from 1 to 3")
+        raise typer.BadParameter("--choice must be yes, y, a number from 1 to 3, or no")
     config = _config()
     clock = SystemClock()
-    if normalized_choice is None:
+    if normalized_choice is None or normalized_choice == CONFIRM_NO:
         cancel_confirmation(
             thread_ts=thread,
             channel=channel,

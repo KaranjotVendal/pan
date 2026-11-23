@@ -32,8 +32,9 @@ has five fields:
   `confirm`), `session` (the name after `to`), `text` (the message without the mention and the route
   word: the task, or the text to send), `reply_in_slack` (the message says "reply in slack"),
   `notice` (for `kind == "notice"`, the exact reply to post) and `choice` (for `kind == "confirm"`:
-  `yes` or a number). The drain sets `confirm` itself: a `yes`, `y` or 1-3 reply in a thread where
-  pan asked "Send this to ...?" or "Which session?" less than 30 minutes ago.
+  `yes`, a number, or `no`). The drain sets `confirm` itself: a `yes`, `y` or 1-3 reply, or a
+  decline (`no`, `n`, `cancel`, `stop`; choice `no`), in a thread where pan asked "Send this to
+  ...?" or "Which session?" less than 30 minutes ago.
 - `directive` — the result of the deterministic `parse_directive`, run on `route.text`: `mode`
   (`delegate`/`sessions`/`relay`/`read`), `target_stream` (from `--stream <name>`), `agent`,
   `target` (the relay/read selector), `message` (the relay text), `full` (read the full transcript),
@@ -45,7 +46,7 @@ has five fields:
   "this thread's work belongs to pan-7 (idle); send follow-ups there; never start a second session for
   the same work". Read when the inbox is drained, so it is current. Follow it.
 - `cancels_confirmation` — true when pan has an open "Send this to ...?" question in the thread and
-  this message is not a `yes`/number reply to it. Handle it before the route (step 4).
+  this message is not a `yes`/number/decline reply to it. Handle it before the route (step 4).
 
 If the list is empty, stop — there is nothing to do. Process the entries in the order returned.
 
@@ -152,6 +153,13 @@ Never spawn, retry `pan send`, or fall back to the tie for a `to` route.
 sessions.
 
 ### (r6) `route.kind == "confirm"` — the person answered pan's question
+
+When `route.choice` is `no`, the person declined. Run only this (it posts `Not sent.`), and do
+nothing else with the message: it is not a task.
+
+    pan confirm --thread <thread_ts> --channel <channel> --cancel
+
+Otherwise (`yes` or a number):
 
     pan confirm --thread <thread_ts> --channel <channel> --choice <route.choice>
 

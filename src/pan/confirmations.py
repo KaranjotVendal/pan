@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pan.config import CONFIRMATION_MAX_CANDIDATES, CONFIRMATION_TIMEOUT
-from pan.directive import CONFIRM_YES, parse_confirm_reply
+from pan.directive import CONFIRM_NO, CONFIRM_YES, parse_confirm_reply
 from pan.errors import NoExactMatchError, TargetNotFoundError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
@@ -136,7 +136,8 @@ class OpenQuestions:
 def route_with_pending(
     route: Route, raw_text: str, pending: PendingConfirmation | None, now: datetime
 ) -> tuple[Route, bool]:
-    # With a live question open in the thread, a `yes`/`y`/1-3 reply becomes a CONFIRM route;
+    # With a live question open in the thread, a `yes`/`y`/1-3 reply becomes a CONFIRM route,
+    # and so does a decline (`no`, `n`, `cancel`, `stop`; choice `no`), which only cancels;
     # any other message keeps its route and cancels the question (the bool). With no live
     # question (none, or expired) nothing changes, so a plain `yes` in a tied thread still
     # goes to the tied session.
@@ -303,6 +304,11 @@ def confirm_session(
     # the question stays open and the reply says to answer again later. A chosen session no
     # longer running clears the question, gets a reply and TargetNotFoundError. An expired
     # question is cleared with a reply; with no question at all nothing is posted.
+    if choice == CONFIRM_NO:
+        cancel_confirmation(
+            thread_ts=thread_ts, channel=channel, confirmations=confirmations, slack=slack
+        )
+        return None
     stored = confirmations.get(ThreadSource.SLACK, thread_ts)
     if stored is None:
         logger.info(f"confirm with no open question thread={thread_ts}")

@@ -83,8 +83,10 @@ as it works (see `AGENT_LOOP.md` step 9).
 - Replies to that question are decided in code. `pan inbox drain` turns a `yes`, `y` or 1-3 reply
   (`directive.parse_confirm_reply`, any case, optional mention) in a thread with a question younger
   than `CONFIRMATION_TIMEOUT` (30 minutes) into the new route kind `confirm` (`Route.choice`), and
-  marks any other message there `cancels_confirmation`; the questions are read before the inbox is
-  drained, an unreadable `confirmations.json` counts as none (no item is ever lost to it), and once
+  turns a decline (`no`, `n`, `cancel`, `stop`) into `confirm` with choice `no`, which
+  `pan confirm --cancel` (or `--choice no`) answers with "Not sent." and nothing more, so a "no" in
+  an untied thread never starts a session; it marks any other message there
+  `cancels_confirmation`; the questions are read before the inbox is drained, an unreadable `confirmations.json` counts as none (no item is ever lost to it), and once
   an item answers or cancels a thread's question, later items in the same batch see none. A plain
   `yes` with no open question is unchanged (it still goes to the tied session). The new
   `pan confirm --choice <yes|y|n>` (read like a reply: any case, spaces trimmed) sends the stored

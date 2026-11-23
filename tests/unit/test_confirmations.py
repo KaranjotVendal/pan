@@ -174,10 +174,11 @@ def test_store_reads_a_folder_in_its_place_as_no_questions(tmp_path: Path) -> No
     "replies, expected",
     [
         (["yes", "yes"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
-        (["no", "2"], [(RouteKind.TASK, True), (RouteKind.TASK, False)]),
+        (["no", "2"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
+        (["no thanks", "2"], [(RouteKind.TASK, True), (RouteKind.TASK, False)]),
         (["2", "no"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
     ],
-    ids=["answered-once", "cancelled-then-number", "answered-then-other"],
+    ids=["answered-once", "declined-then-number", "cancelled-then-number", "answered-then-other"],
 )
 def test_open_questions_close_once_answered_in_a_batch(
     replies: list[str], expected: list[tuple[RouteKind, bool]]
@@ -230,11 +231,21 @@ def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Pa
             Route(kind=RouteKind.CONFIRM, choice="2"),
             False,
         ),
+        ("no", _question(_PAN_CANDIDATE), 5, Route(kind=RouteKind.CONFIRM, choice="no"), False),
         ("no thanks", _question(_PAN_CANDIDATE), 5, Route(text="no thanks"), True),
         ("yes", _question(_PAN_CANDIDATE), 30, Route(text="yes"), False),
         ("yes", None, 0, Route(text="yes"), False),
+        ("no", None, 0, Route(text="no"), False),
     ],
-    ids=["yes", "number", "anything-else-cancels", "expired", "no-question"],
+    ids=[
+        "yes",
+        "number",
+        "decline",
+        "anything-else-cancels",
+        "expired",
+        "no-question",
+        "no-without-a-question",
+    ],
 )
 def test_route_with_pending(
     raw_text: str,
@@ -384,6 +395,19 @@ def test_confirm_with_a_reply_that_picks_nothing_asks_again(
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
     assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
+
+
+def test_confirm_with_a_decline_only_cancels(tmp_path: Path) -> None:
+    _store(tmp_path).put(_question(_PAN_CANDIDATE))
+    terminal_host = _host(_pan_session())
+    slack = RecordingSlack()
+
+    assert _confirm(tmp_path, terminal_host, slack, "no") is None
+
+    assert terminal_host.sent == []
+    assert terminal_host.runs == []
+    assert slack.texts() == [NOT_SENT_REPLY]
+    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
 
 
 def test_confirm_with_no_question_posts_nothing(tmp_path: Path) -> None:

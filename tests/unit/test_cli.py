@@ -1109,11 +1109,27 @@ def _store_question(config: PanConfig, asked_minutes_ago: int) -> None:
     [
         ("<@U0TEST> Yes", 1, "confirm", "yes", False),
         ("2", 1, "confirm", "2", False),
-        ("no", 1, "task", None, True),
+        ("no", 1, "confirm", "no", False),
+        ("<@U0TEST> Cancel!", 1, "confirm", "no", False),
+        ("n", 1, "confirm", "no", False),
+        ("stop.", 1, "confirm", "no", False),
+        ("no thanks", 1, "task", None, True),
         ("to desk-api: add the docs", 1, "to", None, True),
         ("yes", 31, "task", None, False),
+        ("no", 31, "task", None, False),
     ],
-    ids=["yes-with-mention", "number", "no-cancels", "new-route-cancels", "expired-question"],
+    ids=[
+        "yes-with-mention",
+        "number",
+        "no-declines",
+        "cancel-declines",
+        "n-declines",
+        "stop-declines",
+        "other-text-cancels",
+        "new-route-cancels",
+        "expired-question",
+        "no-after-expiry-is-a-task",
+    ],
 )
 def test_inbox_drain_turns_a_reply_to_an_open_question_into_a_confirm_route(
     monkeypatch: pytest.MonkeyPatch,
@@ -1237,8 +1253,9 @@ def test_propose_command_wires_to_propose_sessions(
         (["--choice", " Y "], "confirm_session", "yes"),
         (["--choice", "YES"], "confirm_session", "yes"),
         (["--cancel"], "cancel_confirmation", None),
+        (["--choice", "No"], "cancel_confirmation", None),
     ],
-    ids=["number", "y-with-spaces", "upper-case-yes", "cancel"],
+    ids=["number", "y-with-spaces", "upper-case-yes", "cancel", "choice-no-cancels"],
 )
 def test_confirm_command_wires_the_reply(
     monkeypatch: pytest.MonkeyPatch,
