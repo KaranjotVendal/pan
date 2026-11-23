@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,10 @@ from pan.adapters.claude_transcripts import ClaudeTranscriptFolders
 _SESSION_ID = "0b6f3c1e-1111-4222-8333-444455556666"
 
 
-def _write_transcript(projects_root: Path, session_id: str, lines: list[str]) -> Path:
-    project = projects_root / "-tmp-repo"
+def _write_transcript(
+    projects_root: Path, session_id: str, lines: list[str], project_name: str = "-tmp-repo"
+) -> Path:
+    project = projects_root / project_name
     project.mkdir(parents=True, exist_ok=True)
     transcript = project / f"{session_id}.jsonl"
     transcript.write_text("".join(f"{line}\n" for line in lines))
@@ -52,3 +55,21 @@ def test_folder_of_an_unknown_or_malformed_session_is_none(tmp_path: Path, sessi
     _write_transcript(tmp_path, _SESSION_ID, [json.dumps({"cwd": "/tmp/repo"})])
 
     assert ClaudeTranscriptFolders(tmp_path).folder_of(session_id) is None
+
+
+@pytest.mark.parametrize(
+    "newer_project, expected",
+    [("-tmp-first", Path("/tmp/first")), ("-tmp-second", Path("/tmp/second"))],
+    ids=["first-is-newer", "second-is-newer"],
+)
+def test_folder_of_prefers_the_most_recently_written_transcript(
+    tmp_path: Path, newer_project: str, expected: Path
+) -> None:
+    for project_name, folder in (("-tmp-first", "/tmp/first"), ("-tmp-second", "/tmp/second")):
+        transcript = _write_transcript(
+            tmp_path, _SESSION_ID, [json.dumps({"cwd": folder})], project_name
+        )
+        modified_at = 2_000_000_000 if project_name == newer_project else 1_000_000_000
+        os.utime(transcript, (modified_at, modified_at))
+
+    assert ClaudeTranscriptFolders(tmp_path).folder_of(_SESSION_ID) == expected

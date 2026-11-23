@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from inbox_fakes import FakeInboxDirectory, FakeSessionFolders
 from terminal_host_fakes import make_terminal
 
+from pan import routing
 from pan.config import INBOX_ROUTE_MAX_PROJECTS
 from pan.errors import (
     InboxThreadAmbiguousError,
-    PanError,
     TargetAmbiguousError,
     TargetNotFoundError,
     ThreadSessionNotRunningError,
@@ -109,59 +111,81 @@ def test_route_by_inbox_thread_reaches_the_session_that_writes_it() -> None:
     assert routed == RoutedSession(terminal=writer, inbox_thread=_SLACK_THREAD)
 
 
-@pytest.mark.parametrize(
-    "selector, terminals, listings, sessions, folders, expected_error",
-    [
-        (
-            "pan with slack",
-            [make_terminal("t4", cwd=_OTHER_REPO)],
-            {_OTHER_REPO: [_SLACK_THREAD]},
-            {"thr_1": "session-1"},
-            {"session-1": _REPO},
-            ThreadSessionNotRunningError,
-        ),
-        (
-            "pan with slack",
-            [make_terminal("t3", cwd=_REPO), make_terminal("t4", cwd=_REPO)],
-            {_REPO: [_SLACK_THREAD]},
-            {"thr_1": "session-1"},
-            {"session-1": _REPO},
-            TargetAmbiguousError,
-        ),
-        (
-            "pan",
-            [make_terminal("t3", cwd=_REPO)],
-            {_REPO: [_SLACK_THREAD, InboxThread(thread_id="thr_9", name="pan docs")]},
-            {},
-            {},
-            InboxThreadAmbiguousError,
-        ),
-        (
+# The thread step's refusals, each with what the words step finds after it.
+_THREAD_REFUSALS = {
+    "writer-not-running": (
+        "pan with slack",
+        [make_terminal("t4", cwd=_OTHER_REPO)],
+        {_OTHER_REPO: [_SLACK_THREAD]},
+        ThreadSessionNotRunningError,
+    ),
+    "several-sessions-in-the-writers-folder": (
+        "pan with slack",
+        [make_terminal("t3", cwd=_REPO), make_terminal("t4", cwd=_REPO)],
+        {_REPO: [_SLACK_THREAD]},
+        TargetAmbiguousError,
+    ),
+    "several-threads-match": (
+        "pan",
+        [make_terminal("t3", cwd=_REPO)],
+        {_REPO: [_SLACK_THREAD, InboxThread(thread_id="thr_9", name="pan docs")]},
+        InboxThreadAmbiguousError,
+    ),
+}
+# Terminals only the words step can find (not Claude, so the thread step never lists them).
+_WORD_MATCHES = {
+    "no-word-match": [],
+    "one-word-match": [
+        make_terminal("t20", name="pan-with-slack-a", cwd=Path("/tmp/words-a"), agent="zsh")
+    ],
+    "several-word-matches": [
+        make_terminal("t20", name="pan-with-slack-a", cwd=Path("/tmp/words-a"), agent="zsh"),
+        make_terminal("t21", name="pan-with-slack-b", cwd=Path("/tmp/words-b"), agent="zsh"),
+    ],
+}
+
+
+@pytest.mark.parametrize("word_case", list(_WORD_MATCHES))
+@pytest.mark.parametrize("refusal_case", list(_THREAD_REFUSALS))
+def test_a_thread_step_refusal_falls_through_to_the_words(
+    refusal_case: str, word_case: str
+) -> None:
+    selector, thread_terminals, listings, refusal = _THREAD_REFUSALS[refusal_case]
+    word_terminals = _WORD_MATCHES[word_case]
+    terminals = [*thread_terminals, *word_terminals]
+
+    def route() -> RoutedSession:
+        return _route(
+            selector,
+            terminals,
+            listings=listings,
+            sessions={"thr_1": "session-1"},
+            folders={"session-1": _REPO},
+        )
+
+    if word_case == "one-word-match":
+        # One word match wins over the thread step's refusal.
+        assert route() == RoutedSession(terminal=word_terminals[0])
+    elif word_case == "several-word-matches":
+        # The words' pick list wins over the thread step's refusal.
+        with pytest.raises(TargetAmbiguousError) as raised:
+            route()
+        assert [candidate.address for candidate in raised.value.candidates] == ["t20", "t21"]
+    else:
+        # With no word match, the thread step's refusal is reported.
+        with pytest.raises(refusal):
+            route()
+
+
+def test_only_claude_sessions_are_reached_by_inbox_thread() -> None:
+    with pytest.raises(TargetNotFoundError):
+        _route(
             "pan with slack",
             [make_terminal("t3", cwd=_REPO, agent="zsh")],
-            {_REPO: [_SLACK_THREAD]},
-            {"thr_1": "session-1"},
-            {"session-1": _REPO},
-            TargetNotFoundError,
-        ),
-    ],
-    ids=[
-        "writer-not-running",
-        "several-sessions-in-the-writers-folder",
-        "several-threads-match",
-        "only-claude-sessions-are-listed-and-reached",
-    ],
-)
-def test_route_by_inbox_thread_refusals(
-    selector: str,
-    terminals: list[Terminal],
-    listings: dict[Path, list[InboxThread]],
-    sessions: dict[str, str],
-    folders: dict[str, Path],
-    expected_error: type[PanError],
-) -> None:
-    with pytest.raises(expected_error):
-        _route(selector, terminals, listings=listings, sessions=sessions, folders=folders)
+            listings={_REPO: [_SLACK_THREAD]},
+            sessions={"thr_1": "session-1"},
+            folders={"session-1": _REPO},
+        )
 
 
 @pytest.mark.parametrize(
@@ -201,9 +225,9 @@ def test_inbox_routing_lists_each_folder_once_and_caps_the_folders() -> None:
             session_folders=FakeSessionFolders(),
         )
 
-    assert inbox_directory.listed == [
+    assert sorted(inbox_directory.listed) == sorted(
         Path(f"/tmp/repo-{index}").resolve() for index in range(INBOX_ROUTE_MAX_PROJECTS)
-    ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -213,7 +237,7 @@ def test_inbox_routing_lists_each_folder_once_and_caps_the_folders() -> None:
         ("pan-7", "t7"),
         ("web / one", "t3"),
         ("pan with slack", "t3"),
-        ("api title words", "t9"),
+        ("desk api", "t9"),
     ],
     ids=["address", "name", "herdr-label", "inbox-thread", "words"],
 )
@@ -221,9 +245,7 @@ def test_route_session_resolution_order(selector: str, expected_address: str) ->
     terminals = [
         make_terminal("t7", name="pan-7", cwd=_OTHER_REPO),
         make_terminal("t3", where="web / one", cwd=_REPO),
-        make_terminal("t9", name="desk-api", cwd=Path("/tmp/api")).model_copy(
-            update={"title": "Title words here"}
-        ),
+        make_terminal("t9", name="desk-api", cwd=Path("/tmp/api")),
     ]
 
     routed = _route(
@@ -254,9 +276,7 @@ def test_an_exact_name_wins_before_the_inbox_is_read() -> None:
 _WORD_TERMINALS = [
     make_terminal("t3", where="web / one", cwd=Path("/tmp/web")),
     make_terminal("t4", where="web / two", cwd=Path("/tmp/session-control")),
-    make_terminal("t9", name="desk-api", cwd=Path("/tmp/api")).model_copy(
-        update={"title": "Fix the build"}
-    ),
+    make_terminal("t9", name="desk-api", cwd=Path("/tmp/api")),
     make_terminal("t6", name="finished", state=TerminalState.FINISHED),
 ]
 
@@ -267,11 +287,10 @@ _WORD_TERMINALS = [
         ("desk api", "t9"),
         ("web one", "t3"),
         ("session control", "t4"),
-        ("build fix", "t9"),
         ("finished", None),
         ("nothing", None),
     ],
-    ids=["name-words", "label-words", "folder-words", "title-words", "live-only", "no-match"],
+    ids=["name-words", "label-words", "folder-words", "live-only", "no-match"],
 )
 def test_route_by_words(selector: str, expected_address: str | None) -> None:
     found = route_by_words(selector, _WORD_TERMINALS)
@@ -284,3 +303,79 @@ def test_route_by_words_refuses_several_matches_with_the_candidates() -> None:
         route_by_words("web", _WORD_TERMINALS)
 
     assert [candidate.address for candidate in raised.value.candidates] == ["t3", "t4"]
+
+
+class TimedInboxDirectory:
+    # Lists one thread per folder after that folder's behaviour: answer at once, answer after a
+    # short delay, hang until released, or fail.
+    def __init__(self, behaviours: dict[Path, str], release: threading.Event) -> None:
+        self._behaviours = behaviours
+        self._release = release
+
+    def find_thread(self, project_path: Path, thread_name: str) -> InboxThread | None:
+        return None
+
+    def list_threads(self, project_path: Path) -> list[InboxThread]:
+        behaviour = self._behaviours[project_path]
+        if behaviour == "slow":
+            time.sleep(0.05)
+        elif behaviour == "hanging":
+            self._release.wait(timeout=5)
+        elif behaviour == "failing":
+            raise RuntimeError("listing failed")
+        return [InboxThread(thread_id=f"thr_{project_path.name}", name=f"{project_path.name} work")]
+
+    def latest_agent_session(self, thread_id: str) -> str | None:
+        return f"session-{thread_id.removeprefix('thr_')}"
+
+
+@pytest.mark.parametrize(
+    "writer_behaviour, other_behaviour, expect_routed",
+    [
+        ("quick", "hanging", True),
+        ("slow", "quick", True),
+        ("hanging", "quick", False),
+        ("failing", "quick", False),
+    ],
+    ids=[
+        "a-hanging-project-does-not-block-the-others",
+        "a-slow-project-within-the-budget-counts",
+        "a-hanging-project-is-skipped",
+        "a-failing-project-is-skipped",
+    ],
+)
+def test_inbox_listings_run_at_once_within_one_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    writer_behaviour: str,
+    other_behaviour: str,
+    expect_routed: bool,
+) -> None:
+    monkeypatch.setattr(routing, "INBOX_ROUTE_LISTING_BUDGET_SECONDS", 0.3)
+    writer_folder = Path("/tmp/alpha").resolve()
+    other_folder = Path("/tmp/beta").resolve()
+    writer = make_terminal("t3", cwd=writer_folder)
+    release = threading.Event()
+    inbox_directory = TimedInboxDirectory(
+        {writer_folder: writer_behaviour, other_folder: other_behaviour}, release
+    )
+    started = time.monotonic()
+    try:
+        if expect_routed:
+            routed = route_session(
+                "alpha work",
+                [writer, make_terminal("t4", cwd=other_folder)],
+                inbox_directory=inbox_directory,
+                session_folders=FakeSessionFolders({"session-alpha": writer_folder}),
+            )
+            assert routed.terminal == writer
+        else:
+            with pytest.raises(TargetNotFoundError):
+                route_session(
+                    "alpha work",
+                    [writer, make_terminal("t4", cwd=other_folder)],
+                    inbox_directory=inbox_directory,
+                    session_folders=FakeSessionFolders({"session-alpha": writer_folder}),
+                )
+        assert time.monotonic() - started < 2
+    finally:
+        release.set()

@@ -605,7 +605,7 @@ def send(
     """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
     a notice naming its Inbox thread. --to tries, in order: exact address, exact name, exact
     Herdr label or space, the Inbox thread the session writes (exact name, else every word),
-    then every word in the session's name, label, folder and title. Without --to, send a
+    then every word in the session's name, label and folder. Without --to, send a
     follow-up to the thread's tied session. A busy, blocked, unknown or ambiguous session gets
     a short reply and nothing is typed; a session pan did not start gets one line on top
     saying the text came from Slack and which Inbox thread to use."""

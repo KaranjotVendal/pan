@@ -81,8 +81,9 @@ def _messages(value: Any, depth: int = 0) -> list[dict[str, Any]]:
 
 def latest_agent_session_in(thread: Any) -> str | None:
     # The `author.session` of the newest agent message: the one with the latest `created_at`
-    # (ISO 8601, so it sorts as text), the later one in the listing on a tie or when it has
-    # none. A person's message carries no session, so it never counts.
+    # (ISO 8601, so it sorts as text). The listing runs oldest first, so a later message wins
+    # a tie, and a message with no `created_at` wins over every earlier one. A person's
+    # message carries no session, so it never counts.
     latest_session: str | None = None
     latest_created_at = ""
     for message in _messages(thread):
@@ -91,8 +92,9 @@ def latest_agent_session_in(thread: Any) -> str | None:
         if not isinstance(session, str) or not session or author.get("kind") == "person":
             continue
         created_at = message.get("created_at")
-        created_at = created_at if isinstance(created_at, str) else ""
-        if latest_session is None or created_at >= latest_created_at:
+        if not isinstance(created_at, str) or not created_at:
+            latest_session = session
+        elif latest_session is None or created_at >= latest_created_at:
             latest_session, latest_created_at = session, created_at
     return latest_session
 

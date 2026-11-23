@@ -108,7 +108,6 @@ def _to_terminal(entry: object) -> Terminal | None:
         address=address,
         name=_optional_string(entry.get("name")),
         where=_where(entry),
-        title=_optional_string(entry.get("title")),
         cwd=Path(cwd),
         state=state,
         agent=_agent_name(entry),

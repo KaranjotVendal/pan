@@ -182,9 +182,8 @@ def _message(kind: str, created_at: str, session: str | None = None) -> dict[str
         "author": author,
         "subject": "s",
         "body": "b",
-        "created_at": created_at,
         "thread_name": "pan with Slack and X",
-    }
+    } | ({"created_at": created_at} if created_at else {})
 
 
 def _full_thread(*messages: dict[str, Any]) -> dict[str, Any]:
@@ -219,11 +218,41 @@ def _full_thread(*messages: dict[str, Any]) -> dict[str, Any]:
             ),
             "session-late",
         ),
+        (
+            _full_thread(
+                _message("agent", "2026-01-01T00:02:00.000Z", "session-timed"),
+                _message("agent", "", "session-untimed-later"),
+            ),
+            "session-untimed-later",
+        ),
+        (
+            _full_thread(
+                _message("agent", "", "session-untimed-earlier"),
+                _message("agent", "2026-01-01T00:02:00.000Z", "session-timed"),
+            ),
+            "session-timed",
+        ),
+        (
+            _full_thread(
+                _message("agent", "2026-01-01T00:02:00.000Z", "session-first"),
+                _message("agent", "2026-01-01T00:02:00.000Z", "session-second"),
+            ),
+            "session-second",
+        ),
         (_full_thread(_message("person", "2026-01-01T00:00:00.000Z")), None),
         (_full_thread(), None),
         ("not a thread", None),
     ],
-    ids=["newest-agent-message", "by-time-not-order", "person-only", "empty", "unexpected-shape"],
+    ids=[
+        "newest-agent-message",
+        "by-time-not-order",
+        "untimed-message-after-a-timed-one-wins",
+        "timed-message-after-an-untimed-one-wins",
+        "same-time-later-in-the-listing-wins",
+        "person-only",
+        "empty",
+        "unexpected-shape",
+    ],
 )
 def test_latest_agent_session_in(thread: Any, expected: str | None) -> None:
     assert latest_agent_session_in(thread) == expected

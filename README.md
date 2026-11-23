@@ -195,7 +195,7 @@ first word after the mention, spelled exactly, in any letter case; anything else
 | --- | --- |
 | `<task>` | In a new or untied thread, start a new session in a new worktree. In a tied thread, send it to the tied session. |
 | `new: <task>` | Start a new session even in a tied thread; the tie moves to it, the old session keeps running. The colon is required ("new login page" is a plain task). |
-| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (up to six words) is tried in order: exact address, exact terminal name, exact Herdr label or space, the Plannotator Inbox thread the session writes (exact name, else every word: `to pan with slack:`), then every word in the session's name, label, folder and title. Several matches get a pick list of exact names; an unknown name gets a reply listing close matches; a busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
+| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (up to six words) is tried in order: exact address, exact terminal name, exact Herdr label or space, the Plannotator Inbox thread the session writes (exact name, else every word: `to pan with slack:`), then every word in the session's name, label and folder. If the Inbox thread is found but its session can't be reached, the words are still tried. Several matches get a pick list of exact names; an unknown name gets a reply listing close matches (for a selector of several words, also how to start new work with `new:`; pan never starts a session from `to`); a busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
 | `check` | Post the tied session's latest answer here. The whole message must be just this word. |
 | `sessions` | List live sessions: name, idle or busy, last ask, and the Inbox thread when pan knows it. Also `--sessions`. |
 | `forget` | Untie the thread; the session keeps running. |
@@ -217,8 +217,10 @@ To reach a session by its Inbox thread, pan lists the open threads of the projec
 Claude sessions (`plannotator inbox call read_thread`, read only, at most `INBOX_ROUTE_MAX_PROJECTS`
 projects), reads the matching thread's newest agent message for its Claude session id, finds that
 session's folder from the first lines of its transcript under `~/.claude/projects`, and sends to the
-live Claude session in that folder. When none runs there, pan replies that the session writing the
-thread is not running. Follow-ups in the thread go to
+live Claude session in that folder. The listings run at once and pan waits at most
+`INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8) for them in total; a project that has not answered is
+skipped. When no live session runs in that folder and no session matches the words either, pan
+replies that the session writing the thread is not running. Follow-ups in the thread go to
 the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
 only unties it, and when it has ended pan says so and suggests `new:` or `to <name>:`. Desk sessions
 have no pan hooks, so `check` looks their Inbox thread up by name (`plannotator inbox call

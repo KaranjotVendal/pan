@@ -108,12 +108,14 @@ Pass `--reply-in-slack` when `route.reply_in_slack` is true. `route.session` may
 The session may be one pan started or one of the person's own desk sessions. `pan send` resolves the
 selector against the live sessions, first match wins: exact address, exact name, exact Herdr label
 or space, the Plannotator Inbox thread the session writes (exact name, else every word), then every
-word in the session's name, label, folder and title. It types the text only if the session is idle
+word in the session's name, label and folder (also tried when the thread is found but its session
+can't be reached). It types the text only if the session is idle
 (with one line on top saying it came from Slack and naming its Inbox thread, or, for a desk session
 whose thread pan does not know, saying to use its existing thread or start one), ties this thread
 to that session (its previous thread is untied) and posts "Sent to desk-api · Inbox: ...". When it
-refuses — an unknown selector (it lists close matches), an ambiguous one (it posts a pick list), an
-Inbox thread whose session is not running, a busy session ("<name> is busy; try again, or @pan
+refuses — an unknown selector (it lists close matches; for several words it also says to start new
+work with `@pan new: <your text>`), an ambiguous one (it posts a pick list), an Inbox thread whose
+session is not running, a busy session ("<name> is busy; try again, or @pan
 check"), or a session waiting on a prompt — it posts the short reply itself, types nothing and exits
 non-zero (20, 21, 26 or 23). Do nothing more: never retry, never fall back to spawning or to the
 tie.

@@ -1001,15 +1001,13 @@ def test_send_by_inbox_thread_name_names_that_thread_and_records_it(tmp_path: Pa
             "api",
             [
                 make_terminal("t8", name="desk-api", where="work / api", cwd=Path("/tmp/api")),
-                make_terminal("t9", cwd=Path("/tmp/api-docs")).model_copy(
-                    update={"title": "Write the docs"}
-                ),
+                make_terminal("t9", where="work / docs", cwd=Path("/tmp/api-docs")),
             ],
             FakeInboxDirectory(),
             TargetAmbiguousError,
             "api matches more than one session; use one of these names:\n"
             "- `desk-api` · work / api · folder api\n"
-            '- `t9` · "Write the docs" · folder api-docs',
+            "- `t9` · work / docs · folder api-docs",
         ),
     ],
     ids=["thread-writer-not-running", "several-threads", "pick-list-by-words"],
@@ -1068,3 +1066,65 @@ def test_send_to_a_desk_session_whose_suggested_thread_exists_names_it(tmp_path:
     tied = thread_map.get(_NEW_THREAD)
     assert tied is not None
     assert tied.inbox_thread_id == "thr_9"
+
+
+@pytest.mark.parametrize(
+    "selector, terminals, expected_reply",
+    [
+        (
+            "fix the login bug",
+            [make_terminal("t7", name="pan-7")],
+            'no session matches "fix the login bug"; to start new work send '
+            "`@pan new: <your text>`",
+        ),
+        (
+            "pan 7b",
+            [make_terminal("t7", name="pan-7a")],
+            'no session matches "pan 7b"; close matches: pan-7a; to start new work send '
+            "`@pan new: <your text>`",
+        ),
+        (
+            "pan-8",
+            [make_terminal("t7", name="pan-7")],
+            "no live session named pan-8; close matches: pan-7",
+        ),
+    ],
+    ids=["sentence-no-match", "several-words-with-a-close-match", "one-word-unchanged"],
+)
+def test_send_to_a_selector_matching_nothing_starts_nothing(
+    tmp_path: Path, selector: str, terminals: list[object], expected_reply: str
+) -> None:
+    thread_map = _thread_map(tmp_path)
+    terminal_host = _host(*terminals)
+    slack = RecordingSlack()
+
+    with pytest.raises(TargetNotFoundError):
+        _send(terminal_host, thread_map, slack, selector)
+
+    assert terminal_host.sent == []
+    assert terminal_host.runs == []
+    assert thread_map.get(_NEW_THREAD) is None
+    assert slack.texts() == [expected_reply]
+
+
+def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
+    desk_folder = Path("/tmp/desk/api")
+    earlier = _record(
+        terminal_name="desk-api",
+        terminal_address="t9",
+        started_by_pan=False,
+        worktree_path=desk_folder,
+        inbox_thread_name="desk-api: fix the build",
+    )
+    thread_map = _thread_map(tmp_path, earlier)
+    inbox_directory = FakeInboxDirectory()
+
+    _send(
+        _host(make_terminal("t9", name="desk-api", cwd=desk_folder)),
+        thread_map,
+        RecordingSlack(),
+        "desk-api",
+        inbox_directory=inbox_directory,
+    )
+
+    assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]

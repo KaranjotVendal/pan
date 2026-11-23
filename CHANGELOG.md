@@ -71,27 +71,35 @@ as it works (see `AGENT_LOOP.md` step 9).
   match wins: exact address, exact terminal name, exact Herdr label or space (as before), then the
   Plannotator Inbox thread the session writes (exact name, else every selector word starts a word of
   the name, ignoring case; resolved threads are not listed), then every selector word in the live
-  session's name, Herdr label, folder name and title. Thread routing lists the open threads of the
-  projects of the distinct folders of live Claude sessions (at most `INBOX_ROUTE_MAX_PROJECTS`, 6),
-  reads the matching thread in full for the `author.session` of its newest agent message, finds that
-  session's folder from the first `cwd` in its transcript (`~/.claude/projects/*/<id>.jsonl`, at most
-  `SESSION_TRANSCRIPT_CWD_MAX_LINES` lines), and sends to the live Claude session in that folder. A
-  step that cannot be read falls through to the next. New seams: `InboxDirectory.list_threads` and
-  `InboxDirectory.latest_agent_session` (ShellPlannotatorInboxAdapter) and `SessionFolders`
-  (adapters/claude_transcripts.py, `ClaudeTranscriptFolders`).
+  session's name, Herdr label and folder name. Thread routing lists the open threads of the projects
+  of the distinct folders of live Claude sessions (at most `INBOX_ROUTE_MAX_PROJECTS`, 6), all at
+  once within one overall budget of `INBOX_ROUTE_LISTING_BUDGET_SECONDS` (8 s; a project that has not
+  answered is skipped with a log line); reads the matching thread in full for the `author.session` of
+  its newest agent message (a message with no `created_at` counts as newer than every earlier one);
+  finds that session's folder from the first `cwd` in its transcript
+  (`~/.claude/projects/*/<id>.jsonl`, the most recently modified when there are several, at most
+  `SESSION_TRANSCRIPT_CWD_MAX_LINES` lines); and sends to the live Claude session in that folder.
+  When the thread step cannot reach one live session (several threads match, several sessions or
+  none run in the folder, or the session or its folder cannot be read), the words are still tried:
+  one match wins, several get their pick list, and only with none is the thread step's refusal
+  posted. New seams: `InboxDirectory.list_threads` and `InboxDirectory.latest_agent_session`
+  (ShellPlannotatorInboxAdapter) and `SessionFolders` (adapters/claude_transcripts.py,
+  `ClaudeTranscriptFolders`).
 - Routing replies: several sessions get a pick list, one line each with the exact name to use, its
-  Herdr label, title and folder; several Inbox threads are listed by name; a thread whose session is
-  not running gets "the session writing "<thread>" is not running; @pan sessions lists them".
-  `InboxThreadAmbiguousError` exits 21, `ThreadSessionNotRunningError` (a `TargetNotFoundError`) 20.
+  Herdr label and folder; several Inbox threads are listed by name; a thread whose session is not
+  running gets "the session writing "<thread>" is not running; @pan sessions lists them". A selector
+  of several words that matches nothing gets 'no session matches "<selector>"; to start new work send
+  `@pan new: <your text>`' (with close matches when there are any); pan never starts a session from
+  `to`. A one-word selector's not-found reply is unchanged. `InboxThreadAmbiguousError` exits 21,
+  `ThreadSessionNotRunningError` (a `TargetNotFoundError`) 20.
 - A session pan did not start is told to use its existing Plannotator Inbox thread for the work if it
   has one, otherwise to start one named `<session>: <task>`, unless pan knows its thread (routed by
   the thread's name, or found earlier, including by a lookup of the suggested name just before
-  typing). A thread found by routing is recorded on the thread record (name and id) so `check` uses
-  it. pan's own workers are unchanged.
+  typing; that lookup is not repeated after the tie). A thread found by routing is recorded on the
+  thread record (name and id) so `check` uses it. pan's own workers are unchanged. Whether pan knows
+  a session's thread is one rule, `sessions.inbox_thread_known`, shared with `pan sessions`.
 - `pan sessions` shows each session's Inbox thread under its row when pan knows it
   (`SessionSummary.inbox_thread_name`), so the person sees what to type after `to`.
-- `Terminal.title`, from hc's `title` when it reports one (`hc get` does, `hc ls` does not).
-
 - `pan service install|uninstall|status`: pan starts by itself after a login or reboot on macOS.
   `install` renders the gateway, watcher and up LaunchAgents into
   `~/Library/LaunchAgents/com.pan.<name>.plist` (home directory and the absolute path of the

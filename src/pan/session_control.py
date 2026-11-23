@@ -37,7 +37,12 @@ from pan.seams import (
     TerminalHost,
     ThreadMap,
 )
-from pan.sessions import joins_by_address, joins_terminal, worker_status_for
+from pan.sessions import (
+    inbox_thread_known,
+    joins_by_address,
+    joins_terminal,
+    worker_status_for,
+)
 from pan.spawn import desk_session_ended_reply, inbox_thread_name, slack_reply_sentence
 from pan.transcript import last_assistant_text
 
@@ -62,6 +67,8 @@ FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER = (
 # Claude session (see _is_ready).
 _READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
 _CLOSE_MATCH_LIMIT = 3
+# How to start new work instead, offered when a several-word `to` selector matches nothing.
+NEW_WORK_HINT = "@pan new: <your text>"
 _CLOSE_MATCH_CUTOFF = 0.6
 # A screen line made only of box-drawing characters (Claude Code's dividers and banner frame),
 # ASCII rule characters and whitespace carries nothing worth posting.
@@ -76,12 +83,6 @@ _STATE_SENTENCES: dict[WorkerStatus, str] = {
     WorkerStatus.DONE: "{name} has finished.",
     WorkerStatus.FAILED: "{name} has ended.",
 }
-
-
-def inbox_thread_known(record: ThreadRecord) -> bool:
-    # pan knows the session's Inbox thread when it named it (its own workers) or found it (an
-    # id is recorded). A desk session given only a suggested name may report elsewhere.
-    return record.started_by_pan or record.inbox_thread_id is not None
 
 
 def inbox_reference(record: ThreadRecord) -> str | None:
@@ -112,6 +113,9 @@ def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> Thre
 
 
 def _not_found_reply(selector: str, terminals: list[Terminal]) -> str:
+    # A selector of several words may be the start of a sentence that was meant as new work
+    # ("to fix the login bug: ..."), so its reply says how to start new work; pan never
+    # guesses and starts it.
     names = [_session_name(terminal) for terminal in terminals]
     close = [name for name in names if selector.lower() in name.lower()]
     for name in difflib.get_close_matches(
@@ -119,15 +123,20 @@ def _not_found_reply(selector: str, terminals: list[Terminal]) -> str:
     ):
         if name not in close:
             close.append(name)
-    if close:
-        return f"no live session named {selector}; close matches: {', '.join(close[:_CLOSE_MATCH_LIMIT])}"
+    close_matches = f"close matches: {', '.join(close[:_CLOSE_MATCH_LIMIT])}" if close else None
+    if len(selector.split()) > 1:
+        reply = f'no session matches "{selector}"'
+        if close_matches is not None:
+            reply = f"{reply}; {close_matches}"
+        return f"{reply}; to start new work send `{NEW_WORK_HINT}`"
+    if close_matches is not None:
+        return f"no live session named {selector}; {close_matches}"
     return f"no live session named {selector}; @pan sessions lists them"
 
 
 def _pick_line(candidate: Terminal) -> str:
     # One candidate of a pick list: the exact token to use, then what `sessions` shows of it.
-    details = [candidate.where, f'"{candidate.title}"' if candidate.title else None]
-    details.append(f"folder {candidate.cwd.name}" if candidate.cwd.name else None)
+    details = [candidate.where, f"folder {candidate.cwd.name}" if candidate.cwd.name else None]
     shown = " · ".join(detail for detail in details if detail)
     token = f"`{_session_name(candidate)}`"
     return f"- {token} · {shown}" if shown else f"- {token}"
@@ -301,6 +310,7 @@ def send_to_session(
     name = _session_name(target)
     session_record = _session_record_for(target, thread_map.records())
     found_thread = routed.inbox_thread
+    looked_up_name: str | None = None
     if (
         found_thread is None
         and session_record is not None
@@ -308,7 +318,8 @@ def send_to_session(
         and not inbox_thread_known(session_record)
     ):
         # A name pan suggested earlier: if the session created that thread, it is now known.
-        found_thread = inbox_directory.find_thread(target.cwd, session_record.inbox_thread_name)
+        looked_up_name = session_record.inbox_thread_name
+        found_thread = inbox_directory.find_thread(target.cwd, looked_up_name)
     if found_thread is not None:
         inbox_thread, thread_known = found_thread.name, True
     elif session_record is not None and session_record.inbox_thread_name:
@@ -367,7 +378,9 @@ def send_to_session(
     if found_thread is not None:
         tied_record = _with_found_thread(tied_record, found_thread)
     thread_map.tie(tied_record)
-    tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
+    if looked_up_name is None or tied_record.inbox_thread_name != looked_up_name:
+        # Not looked up yet in this send (a lookup that just missed would miss again).
+        tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
     slack_post(slack, channel, thread_ts, sent_notice(tied_record))
     logger.info(
         f"sent to session terminal={target.address} thread={thread_ts} "

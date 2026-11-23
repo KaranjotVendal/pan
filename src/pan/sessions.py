@@ -140,14 +140,17 @@ def last_ask_for(record: ThreadRecord | None) -> str | None:
     return one_line or None
 
 
+def inbox_thread_known(record: ThreadRecord) -> bool:
+    # pan knows the session's Inbox thread when it named it (its own workers) or found it (an
+    # id is recorded). A desk session given only a suggested name may report elsewhere.
+    return record.started_by_pan or record.inbox_thread_id is not None
+
+
 def _known_inbox_thread_name(record: ThreadRecord | None) -> str | None:
-    # The session's Inbox thread when pan named it (its own workers) or found it (an id is
-    # recorded); a name pan only suggested to a desk session is not shown.
-    if record is None or record.inbox_thread_name is None:
+    # The session's Inbox thread when pan knows it; a name pan only suggested is not shown.
+    if record is None or record.inbox_thread_name is None or not inbox_thread_known(record):
         return None
-    if record.started_by_pan or record.inbox_thread_id is not None:
-        return record.inbox_thread_name
-    return None
+    return record.inbox_thread_name
 
 
 def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list[SessionSummary]:

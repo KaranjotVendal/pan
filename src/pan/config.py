@@ -90,6 +90,9 @@ INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
 # `to <selector>:` routing by Inbox thread name lists the open threads of the projects of at
 # most this many distinct folders among the live Claude sessions (one plannotator call each).
 INBOX_ROUTE_MAX_PROJECTS = 6
+# Those listings run at once; any that has not answered within this many seconds in total is
+# skipped, so routing never waits on the Inbox for longer than this.
+INBOX_ROUTE_LISTING_BUDGET_SECONDS = 8.0
 # A `to` selector is at most this many words (`to pan with slack: <task>`), so a long sentence
 # that happens to start with "to" and hold a colon stays a plain task.
 TO_ROUTE_SELECTOR_MAX_WORDS = 6

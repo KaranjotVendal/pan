@@ -49,10 +49,24 @@ class ClaudeTranscriptFolders:
         if not _SESSION_ID.fullmatch(session_id):
             logger.warning("session folder lookup refused a malformed session id")
             return None
-        transcripts = sorted(self._projects_root.glob(f"*/{session_id}.jsonl"))
+        try:
+            transcripts = sorted(
+                self._projects_root.glob(f"*/{session_id}.jsonl"),
+                key=lambda transcript: transcript.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError as e:
+            logger.warning(f"session transcripts unreadable: {type(e).__name__}")
+            return None
         if not transcripts:
             logger.info(f"session folder lookup found no transcript session={session_id}")
             return None
+        if len(transcripts) > 1:
+            # The same session id under several projects: the most recently written one wins.
+            logger.info(
+                f"session folder lookup found {len(transcripts)} transcripts session={session_id}; "
+                "using the newest"
+            )
         try:
             folder = cwd_in_transcript(transcripts[0], self._max_lines)
         except OSError as e:
