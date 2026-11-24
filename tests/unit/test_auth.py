@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from pan.errors import UnauthorizedSenderError
-from pan.gateway.auth import auth_check
+from pan.gateway.auth import auth_check, is_authorized
 from pan.models import UserPolicy
 
 _USERS = {
@@ -45,3 +45,20 @@ def test_denied_raises_unauthorized(
 ) -> None:
     with pytest.raises(UnauthorizedSenderError):
         auth_check(slack_user, channel, users)
+
+
+@pytest.mark.parametrize(
+    "slack_user, channel, users, expected",
+    [
+        ("U_wild", "C999", _USERS, True),
+        ("U_scoped", "C2", _USERS, True),
+        ("U_stranger", "C1", _USERS, False),
+        ("U_scoped", "C3", _USERS, False),
+        ("U_empty", "C1", {"U_empty": UserPolicy(channels=[])}, False),
+    ],
+    ids=["wildcard", "listed-channel", "non-allowlisted", "outside-channel", "empty-channels"],
+)
+def test_is_authorized_matches_the_allowlist(
+    slack_user: str, channel: str, users: dict[str, UserPolicy], expected: bool
+) -> None:
+    assert is_authorized(slack_user, channel, users) is expected

@@ -9,6 +9,15 @@ logger = initialise_logger(__name__)
 _CHANNEL_WILDCARD = "*"
 
 
+def is_authorized(slack_user: str, channel: str, users: dict[str, UserPolicy]) -> bool:
+    # The allowlist decision alone, without auth_check's warning: the gateway's message
+    # handler drops other people's thread chatter with it, which is not worth a warning.
+    policy = users.get(slack_user)
+    return policy is not None and (
+        _CHANNEL_WILDCARD in policy.channels or channel in policy.channels
+    )
+
+
 def auth_check(slack_user: str, channel: str, users: dict[str, UserPolicy]) -> None:
     policy = users.get(slack_user)
     if policy is None:
