@@ -265,7 +265,7 @@ def _open_question_fact(pending: PendingConfirmation, answered: bool) -> dict[st
         "selector": pending.selector,
         "task": pending.task,
         "requester": pending.requester,
-        "asked_at": pending.created_at.isoformat(),
+        "asked_at": pending.last_asked_at().isoformat(),
         "candidates": [
             {"number": number, "label": candidate.label, "address": candidate.address}
             for number, candidate in enumerate(pending.candidates, start=1)
@@ -304,15 +304,31 @@ def _record_drained(config: PanConfig, items: list[InboxItem], now: datetime) ->
         logger.warning(f"could not record the drained items: {type(e).__name__}")
 
 
+def _newest_drained_item(config: PanConfig, item_id: str | None) -> InboxItem | None:
+    # The item as pan drained it, only while it is the newest message pan drained in its
+    # thread and channel: an older message cannot authorize what a later one may have changed.
+    if item_id is None:
+        return None
+    drained_log = _drained_log(config)
+    item = drained_log.get(item_id)
+    if item is None:
+        logger.info(f"no drained item id={item_id}")
+        return None
+    newest = drained_log.newest_in(item.thread_ts, item.channel)
+    if newest is None or newest.id != item.id:
+        logger.info(f"drained item id={item_id} is not the newest in thread={item.thread_ts}")
+        return None
+    return item
+
+
 def _drained_item(
     config: PanConfig, item_id: str | None, thread: str, channel: str
 ) -> InboxItem | None:
-    # The item as pan drained it, only when it was sent in this thread and channel.
-    if item_id is None:
-        return None
-    item = _drained_log(config).get(item_id)
+    # The newest drained item, only when it was sent in this thread and channel.
+    item = _newest_drained_item(config, item_id)
     if item is None or item.thread_ts != thread or item.channel != channel:
-        logger.info(f"no drained item id={item_id} in thread={thread}")
+        if item is not None:
+            logger.info(f"drained item id={item_id} is not from thread={thread}")
         return None
     return item
 
@@ -461,16 +477,21 @@ def reopen(
         "--reply-in-slack",
         help="switch the thread to posting the answer in Slack at every turn end",
     ),
+    item: str | None = typer.Option(
+        None, "--item", help="the inbox item id (item.id) of the person's follow-up"
+    ),
 ) -> None:
     """Reopen a thread's finished or lost worker in its existing worktree, continuing its
     last Claude conversation with the follow-up task; post the ack. --reply-in-slack switches
-    the thread to posting answers in Slack (never back)."""
+    the thread to posting answers in Slack (never back). A thread from X (its record, or the
+    --item pan drained) exits 35: X may only start new sessions."""
     config = _config()
     clock = SystemClock()
     thread_map = FileThreadMap(config.paths.threads, clock)
     record = thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
+    _refuse_x(thread_map, thread, _drained_item(config, item, thread, record.channel))
     credentials = load_credentials(config.paths.credentials)
     terminal_host = build_terminal_host(config.terminal_host)
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
@@ -804,14 +825,22 @@ def done(
     cleanup exits 30 and keeps the thread tied for a retry; a folder pan never removes (outside
     the worktree folder, or a main repository) exits 31. With the worktree folder already gone
     it still deletes the branch. A session pan did not start is only untied, never closed.
-    --discard needs --item, a drained message in this thread that is exactly done --discard;
-    otherwise nothing is touched or posted and it exits 33."""
+    --discard needs --item: the newest message pan drained in this thread, sent by the
+    thread's requester, and exactly done --discard; otherwise nothing is touched or posted and
+    it exits 33."""
     config = _config()
     if discard:
         drained = _drained_item(config, item, thread, channel)
-        if drained is None or not asks_to_discard(drained.raw_text):
+        record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
+        if (
+            drained is None
+            or record is None
+            or record.requester is None
+            or drained.slack_user != record.requester
+            or not asks_to_discard(drained.raw_text)
+        ):
             raise DiscardNotRequestedError(
-                f"--discard refused for thread {thread}: the person did not send done --discard"
+                f"--discard refused for thread {thread}: its requester did not send done --discard"
             )
     done_thread(
         thread_ts=thread,
@@ -914,8 +943,8 @@ def propose(
     requester: str = typer.Option(
         ..., "--requester", help="the sender's Slack user id; only their reply answers"
     ),
-    item: str | None = typer.Option(
-        None, "--item", help="the inbox item id (item.id) of the person's message"
+    item: str = typer.Option(
+        ..., "--item", help="the inbox item id (item.id) of the person's message"
     ),
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
@@ -925,13 +954,13 @@ def propose(
     28. One candidate: "Send this to <session>? Reply yes."; several: a numbered list to pick
     1-3 from. Nothing is typed into any session until the requester replies. Candidates that
     are not live terminal addresses are dropped; with none left it says no session matches.
-    A thread from X exits 35: X may only start new sessions."""
+    --item must be the newest message pan drained in this thread, from --requester; otherwise
+    nothing is asked and it exits 28. A thread from X exits 35: X may only start new sessions."""
     config = _config()
-    _refuse_x(
-        FileThreadMap(config.paths.threads, SystemClock()),
-        thread,
-        _drained_item(config, item, thread, channel),
-    )
+    drained = _drained_item(config, item, thread, channel)
+    _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), thread, drained)
+    if drained is None or drained.slack_user != requester:
+        raise NoExactMatchError(f"no message from {requester} to propose for in thread {thread}")
     propose_sessions(
         thread_ts=thread,
         channel=channel,
@@ -997,9 +1026,20 @@ _TARGET_HELP = "session selector: hc address | terminal name | Herdr app space l
 def relay(
     target: str = typer.Argument(..., help=_TARGET_HELP),
     message: str = typer.Argument(..., help="text to send into the target terminal"),
+    item: str = typer.Option(
+        ..., "--item", help="the inbox item id (item.id) of the person's message"
+    ),
 ) -> None:
-    """Relay a message into a live terminal (pan-owned or external)."""
+    """Relay a message into a live terminal (pan-owned or external). --item must be the newest
+    message pan drained in its thread and hold the target as a whole word or phrase; otherwise
+    nothing is sent and it exits 28. A thread from X exits 35."""
     config = _config()
+    drained = _newest_drained_item(config, item)
+    if drained is not None:
+        _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), drained.thread_ts, drained)
+    if drained is None or not names_selector(drained.raw_text, target):
+        logger.info(f"relay target not in the person's drained message item={item}")
+        raise NoExactMatchError(f"'{target}' is not named in the person's message")
     terminal_host = build_terminal_host(config.terminal_host)
     resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
     typer.echo(

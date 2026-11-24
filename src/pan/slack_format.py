@@ -192,22 +192,25 @@ def split_for_slack(text: str, max_length: int = SLACK_MESSAGE_PART_MAX_LENGTH) 
     return parts
 
 
-# A local path in a public post: one under /Users, /home or ~. It must start a word: a `/`,
-# `.`, `~`, `-` or word character before it means it is part of a URL (`https://x/home/a`,
-# `file:///Users/a`) or a longer path, which is left alone; a `:` before it is a boundary
-# (`path:/Users/a`). A space stays in the path when the next run holds a `/` before any `:`, so
-# `/Users/me/My Project/x.py` is cut whole while a following URL or word is not.
+# A local path in a public post: one under /Users, /home or ~, or a file:// URL. It must
+# start a word: a `/`, `.`, `~`, `-` or word character before it means it is part of a web URL
+# (`https://x/home/a`) or a longer path, which is left alone; a `:` before it is a boundary
+# (`path:/Users/a`). In prose a path ends at whitespace. In code and in double quotes, where a
+# path is written whole, it continues past a space when the next run holds a `/` before any `:`
+# and does not start a new path, so `/Users/me/My Project/x.py` is cut whole.
 _PATH_CHARACTER = r"[^\s<>|`'\"()\[\]{}&]"
-_LOCAL_PATH = re.compile(
-    rf"(?<![\w/.~-])(?:/Users/|/home/|~/)(?:{_PATH_CHARACTER}| (?=[^\s<>|`'\"()\[\]{{}}&:]*/))*"
+_PATH_START = r"(?<![\w/.~-])(?:file://|/Users/|/home/|~/)"
+_LOCAL_PATH = re.compile(rf"{_PATH_START}{_PATH_CHARACTER}*")
+_LOCAL_PATH_WITH_SPACES = re.compile(
+    rf"{_PATH_START}(?:{_PATH_CHARACTER}| (?![/~])(?=[^\s<>|`'\"()\[\]{{}}&:]*/))*"
 )
 # Code (fenced or inline) is not rendered as Slack entities, so its `<`/`>` are plain text.
 _CODE_SPAN = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+_QUOTED_SPAN = re.compile(r'"[^"\n]*"')
 # A Slack entity `<target>` or `<target|label>`. The target has no spaces.
 _SLACK_ENTITY_SPAN = re.compile(r"<([^\s<>|]+)(?:\|([^<>\n]*))?>")
 _MENTION_PREFIXES = ("@", "#", "!")
-_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-_LOCAL_SCHEMES = ("file:",)
+_LOCAL_TARGET_PREFIXES = ("/", "~", ".", "file:")
 _PATH_TRAILING_PUNCTUATION = ".,;:!?"
 REDACTED_PATH_PREFIX = ".../"
 # The block keys whose string values are shown to readers.
@@ -215,7 +218,7 @@ _BLOCK_TEXT_KEY = "text"
 
 
 def _last_part(path: str) -> str:
-    last_part = path.rstrip("/").rsplit("/", 1)[-1]
+    last_part = path.removeprefix("file://").rstrip("/").rsplit("/", 1)[-1]
     return "..." if last_part in ("", "~") else f"{REDACTED_PATH_PREFIX}{last_part}"
 
 
@@ -225,50 +228,56 @@ def _shortened_path(match: re.Match[str]) -> str:
     return f"{_last_part(trimmed)}{path[len(trimmed) :]}"
 
 
-def _cut_paths(text: str) -> str:
-    return _LOCAL_PATH.sub(_shortened_path, text)
+def _cut_paths_whole(text: str) -> str:
+    # Code and quotes: a path may hold spaces.
+    return _LOCAL_PATH_WITH_SPACES.sub(_shortened_path, text)
 
 
-def _is_local_target(target: str) -> bool:
-    if target.startswith(_MENTION_PREFIXES):
-        return False
-    if target.lower().startswith(_LOCAL_SCHEMES):
-        return True
-    return _URL_SCHEME.match(target) is None
+def _cut_paths_in_prose(text: str) -> str:
+    # Prose: a path ends at whitespace, except inside double quotes.
+    pieces: list[str] = []
+    position = 0
+    for quoted in _QUOTED_SPAN.finditer(text):
+        pieces.append(_LOCAL_PATH.sub(_shortened_path, text[position : quoted.start()]))
+        pieces.append(_cut_paths_whole(quoted.group(0)))
+        position = quoted.end()
+    pieces.append(_LOCAL_PATH.sub(_shortened_path, text[position:]))
+    return "".join(pieces)
 
 
 def _redacted_entity(match: re.Match[str]) -> str:
-    # A link to a local file (`</Users/me/x.py|x.py>`, a relative or file: target) becomes its
-    # label, or the target's last part; links with a real scheme and mentions are kept.
+    # A mention keeps its target and has paths cut from its label. A link to a local file
+    # (target starting with `/`, `~`, `.` or `file:`) becomes its label, or the target's last
+    # part. Any other link (`https:`, `mailto:`, `www.example.com`) is kept as is.
     target, label = match.group(1), match.group(2)
-    if not _is_local_target(target):
+    if target.startswith(_MENTION_PREFIXES):
+        return f"<{target}|{_cut_paths_in_prose(label)}>" if label else match.group(0)
+    if not target.lower().startswith(_LOCAL_TARGET_PREFIXES):
         return match.group(0)
     if label:
-        return _cut_paths(label)
-    if "/" in target:
-        return _last_part(target.removeprefix("file://"))
-    return match.group(0)
+        return _cut_paths_in_prose(label)
+    return _last_part(target)
 
 
 def _redact_outside_code(text: str) -> str:
     pieces: list[str] = []
     position = 0
     for entity in _SLACK_ENTITY_SPAN.finditer(text):
-        pieces.append(_cut_paths(text[position : entity.start()]))
+        pieces.append(_cut_paths_in_prose(text[position : entity.start()]))
         pieces.append(_redacted_entity(entity))
         position = entity.end()
-    pieces.append(_cut_paths(text[position:]))
+    pieces.append(_cut_paths_in_prose(text[position:]))
     return "".join(pieces)
 
 
 def redact_paths(text: str) -> str:
-    # Each local path cut to its last part (`/Users/me/dev/pan` -> `.../pan`), in code too, and
-    # each Slack link to a local file replaced by its label.
+    # Each local path and file:// URL cut to its last part (`/Users/me/dev/pan` -> `.../pan`),
+    # in code too, and each Slack link to a local file replaced by its label.
     pieces: list[str] = []
     position = 0
     for code in _CODE_SPAN.finditer(text):
         pieces.append(_redact_outside_code(text[position : code.start()]))
-        pieces.append(_cut_paths(code.group(0)))
+        pieces.append(_cut_paths_whole(code.group(0)))
         position = code.end()
     pieces.append(_redact_outside_code(text[position:]))
     return "".join(pieces)

@@ -73,7 +73,13 @@ _DECLINE_PHRASE = re.compile(
     r"don'?t send|do not send)\b",
     re.IGNORECASE,
 )
-_NUMBER = re.compile(r"(?<!\w)\d+(?!\w)")
+# A reply saying yes starts with one of these words or phrases (any letter case).
+_YES_START = re.compile(
+    r"^(?:yes|y|yep|yup|yeah|yea|sure|ok|okay|go|go ahead|send it|do it|please do)(?![\w-])",
+    re.IGNORECASE,
+)
+# A reply picking a number starts with it, alone or as `#N`, before any other word.
+_LEADING_NUMBER = re.compile(r"^#?(\d+)(?![\w-])")
 
 
 def names_selector(request_text: str, selector: str) -> bool:
@@ -95,6 +101,12 @@ def is_decline(answer_text: str) -> bool:
     return _DECLINE_START.search(cleaned) is not None or _DECLINE_PHRASE.search(cleaned) is not None
 
 
-def names_number(answer_text: str, number: str) -> bool:
-    # The number appears on its own in the reply ("2", "the 2nd" does not count).
-    return number in _NUMBER.findall(clean_message(answer_text))
+def says_yes(answer_text: str) -> bool:
+    return _YES_START.search(clean_message(answer_text)) is not None
+
+
+def picks_number(answer_text: str, number: str) -> bool:
+    # The reply is the number, or starts with it ("2", "2 please", "#2"); "not 2, 3" and
+    # "the 2nd" pick nothing.
+    leading = _LEADING_NUMBER.search(clean_message(answer_text))
+    return leading is not None and leading.group(1) == number

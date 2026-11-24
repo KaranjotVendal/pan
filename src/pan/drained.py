@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 from datetime import datetime
 from pathlib import Path
 
@@ -47,18 +48,33 @@ class FileDrainedLog:
         # DRAINED_LOG_MAX_ITEMS (the newest). Raises OSError when the file cannot be written.
         if not items:
             return
-        oldest_kept = now - DRAINED_LOG_RETENTION
-        kept = [item for item in self._read_all() if item.received_at >= oldest_kept]
-        kept = [*kept, *items][-DRAINED_LOG_MAX_ITEMS:]
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self._path.with_name(self._path.name + ".tmp")
-        temp_path.write_text("".join(f"{item.model_dump_json()}\n" for item in kept))
-        temp_path.replace(self._path)
+        lock_path = self._path.with_name(self._path.name + ".lock")
+        # An exclusive lock around the read-modify-replace, so two drains never drop each
+        # other's items.
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                oldest_kept = now - DRAINED_LOG_RETENTION
+                kept = [item for item in self._read_all() if item.received_at >= oldest_kept]
+                kept = [*kept, *items][-DRAINED_LOG_MAX_ITEMS:]
+                temp_path = self._path.with_name(self._path.name + ".tmp")
+                temp_path.write_text("".join(f"{item.model_dump_json()}\n" for item in kept))
+                temp_path.replace(self._path)
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
         logger.info(f"drained log recorded count={len(items)} kept={len(kept)}")
 
     def get(self, item_id: str) -> InboxItem | None:
         # The newest record of the item, or None.
         for item in reversed(self._read_all()):
             if item.id == item_id:
+                return item
+        return None
+
+    def newest_in(self, thread_ts: str, channel: str) -> InboxItem | None:
+        # The item drained last in the thread and channel, or None.
+        for item in reversed(self._read_all()):
+            if item.thread_ts == thread_ts and item.channel == channel:
                 return item
         return None

@@ -172,9 +172,9 @@ class PendingConfirmation(BaseModel, frozen=True):
     # thread until it is answered, cancelled or expires (CONFIRMATION_TIMEOUT). It is not kept
     # on the thread's ThreadRecord because a send to a named session in a new thread has no
     # record yet. `answered_at` and `answer_text` (the reply, cleaned) are set by `pan inbox
-    # drain` when the requester (anyone in the thread, for a question stored without one)
-    # replies after the question; `pan confirm --choice` refuses until they are set, and they
-    # are cleared whenever pan asks again.
+    # drain` when the requester replies after pan last asked; `pan confirm --choice` refuses
+    # until they are set, and they are cleared whenever pan asks again. A question stored
+    # without a requester is never answered; it expires.
     thread_ts: str
     channel: str
     source: ThreadSource = ThreadSource.SLACK
@@ -184,8 +184,14 @@ class PendingConfirmation(BaseModel, frozen=True):
     reply_in_slack: bool = False
     candidates: list[ConfirmationCandidate]
     created_at: datetime
+    # When pan last asked: at creation, and again at each re-ask or busy/blocked refusal. None
+    # on questions stored before it existed (created_at is used then).
+    asked_at: datetime | None = None
     answered_at: datetime | None = None
     answer_text: str | None = None
+
+    def last_asked_at(self) -> datetime:
+        return self.asked_at if self.asked_at is not None else self.created_at
 
 
 class Terminal(BaseModel, frozen=True):

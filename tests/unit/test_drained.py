@@ -70,3 +70,37 @@ def test_drained_log_reads_a_damaged_file_as_empty(tmp_path: Path, contents: byt
     assert log.get("Ev1") is None
     log.record([_item("Ev1")], _NOW)
     assert log.get("Ev1") is not None
+
+
+@pytest.mark.parametrize(
+    "thread_ts, channel, expected_id",
+    [
+        ("1700000000.000100", "C000TEST", "Ev3"),
+        ("1700000000.000200", "C000TEST", "Ev2"),
+        ("1700000000.000100", "C000OTHER", None),
+    ],
+    ids=["newest-of-two", "other-thread", "other-channel"],
+)
+def test_drained_log_newest_in_a_thread(
+    tmp_path: Path, thread_ts: str, channel: str, expected_id: str | None
+) -> None:
+    log = _log(tmp_path)
+    log.record(
+        [_item("Ev1"), _item("Ev2").model_copy(update={"thread_ts": "1700000000.000200"})], _NOW
+    )
+    log.record([_item("Ev3")], _NOW)
+
+    newest = log.newest_in(thread_ts, channel)
+
+    assert (newest.id if newest is not None else None) == expected_id
+
+
+def test_drained_log_records_under_a_lock_and_keeps_every_drain(tmp_path: Path) -> None:
+    first_log, second_log = _log(tmp_path), _log(tmp_path)
+
+    first_log.record([_item("Ev1")], _NOW)
+    second_log.record([_item("Ev2")], _NOW)
+
+    assert (tmp_path / "drained.jsonl.lock").exists()
+    assert first_log.get("Ev1") is not None
+    assert first_log.get("Ev2") is not None

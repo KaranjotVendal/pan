@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pan.config import CONFIRMATION_MAX_CANDIDATES, CONFIRMATION_TIMEOUT
-from pan.directive import is_decline, names_number
+from pan.directive import is_decline, picks_number, says_yes
 from pan.errors import (
     NoExactMatchError,
     SessionBusyError,
@@ -116,9 +116,9 @@ class FilePendingConfirmations:
         self._set_answer(source, thread_ts, answered_at, answer_text)
         logger.info(f"confirmation answered thread={thread_ts}")
 
-    def clear_answer(self, source: ThreadSource, thread_ts: str) -> None:
-        # pan asked again: an earlier reply no longer answers the question.
-        self._set_answer(source, thread_ts, None, None)
+    def clear_answer(self, source: ThreadSource, thread_ts: str, asked_at: datetime) -> None:
+        # pan asked again at `asked_at`: an earlier reply no longer answers the question.
+        self._set_answer(source, thread_ts, None, None, asked_at=asked_at)
         logger.info(f"confirmation answer cleared thread={thread_ts}")
 
     def _set_answer(
@@ -127,15 +127,18 @@ class FilePendingConfirmations:
         thread_ts: str,
         answered_at: datetime | None,
         answer_text: str | None,
+        *,
+        asked_at: datetime | None = None,
     ) -> None:
         pending_by_key = self._read_all()
         key = _key(source, thread_ts)
         stored = pending_by_key.get(key)
         if stored is None:
             return
-        pending_by_key[key] = stored.model_copy(
-            update={"answered_at": answered_at, "answer_text": answer_text}
-        )
+        update: dict[str, object] = {"answered_at": answered_at, "answer_text": answer_text}
+        if asked_at is not None:
+            update["asked_at"] = asked_at
+        pending_by_key[key] = stored.model_copy(update=update)
         self._write_all(pending_by_key)
 
     def clear(self, source: ThreadSource, thread_ts: str) -> None:
@@ -153,12 +156,13 @@ def live_pending(pending: PendingConfirmation | None, now: datetime) -> PendingC
 
 
 def is_answer(pending: PendingConfirmation, slack_user: str, received_at: datetime) -> bool:
-    # A message answers the question when the requester sent it after the question was asked
-    # and before it expired. A question stored without a requester (before pan kept one) is
-    # answered by anyone in the thread: the gateway only lets allowed people's messages in.
+    # A message answers the question when the requester sent it after pan last asked and
+    # before the question expired. A question stored without a requester (before pan kept one)
+    # is never answered: it expires.
     return (
-        (pending.requester is None or slack_user == pending.requester)
-        and pending.created_at < received_at
+        pending.requester is not None
+        and slack_user == pending.requester
+        and pending.last_asked_at() < received_at
         and live_pending(pending, received_at) is not None
     )
 
@@ -278,6 +282,7 @@ def propose_sessions(
         candidates=candidates,
         created_at=clock.now(),
     )
+    pending = pending.model_copy(update={"asked_at": pending.created_at})
     confirmations.put(pending)
     slack_post(slack, channel, thread_ts, question_text(candidates))
     logger.info(f"proposed sessions thread={thread_ts} count={len(candidates)}")
@@ -342,7 +347,7 @@ def confirm_session(
     _require_answer_for(pending, choice)
     chosen_index = _chosen_index(choice, len(pending.candidates))
     if chosen_index is None:
-        confirmations.clear_answer(ThreadSource.SLACK, thread_ts)
+        confirmations.clear_answer(ThreadSource.SLACK, thread_ts, clock.now())
         slack_post(slack, channel, thread_ts, _reask_text(pending.candidates))
         return None
     candidate = pending.candidates[chosen_index]
@@ -369,7 +374,7 @@ def confirm_session(
         )
     except SessionBusyError, TargetBlockedError:
         # The question stays open and the reply asked for an answer later: a new one.
-        confirmations.clear_answer(ThreadSource.SLACK, thread_ts)
+        confirmations.clear_answer(ThreadSource.SLACK, thread_ts, clock.now())
         raise
     except NoExactMatchError as error:
         # Gone between the check and the send.
@@ -382,7 +387,7 @@ def confirm_session(
 
 def _require_answer_for(pending: PendingConfirmation, choice: str) -> None:
     # The choice must rest on the requester's own reply since pan last asked: one that does
-    # not decline, and, for a number, one that holds that number.
+    # not decline and that says yes (for `yes`) or starts with the chosen number.
     answer_text = pending.answer_text
     if pending.answered_at is None or answer_text is None:
         logger.info(f"confirm refused, no reply since asked thread={pending.thread_ts}")
@@ -392,10 +397,11 @@ def _require_answer_for(pending: PendingConfirmation, choice: str) -> None:
     if is_decline(answer_text):
         logger.info(f"confirm refused, the reply declines thread={pending.thread_ts}")
         raise UnansweredQuestionError(f"the reply in thread {pending.thread_ts} declines")
-    if choice != CONFIRM_YES and not names_number(answer_text, choice):
-        logger.info(f"confirm refused, the reply lacks the number thread={pending.thread_ts}")
+    picked = says_yes(answer_text) if choice == CONFIRM_YES else picks_number(answer_text, choice)
+    if not picked:
+        logger.info(f"confirm refused, the reply does not pick {choice} thread={pending.thread_ts}")
         raise UnansweredQuestionError(
-            f"the reply in thread {pending.thread_ts} does not name number {choice}"
+            f"the reply in thread {pending.thread_ts} does not pick {choice}"
         )
 
 

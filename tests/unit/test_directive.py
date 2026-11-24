@@ -6,8 +6,9 @@ from pan.directive import (
     asks_to_discard,
     clean_message,
     is_decline,
-    names_number,
     names_selector,
+    picks_number,
+    says_yes,
     wants_slack_reply,
 )
 
@@ -158,16 +159,45 @@ def test_is_decline(answer_text: str, expected: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    "answer_text, expected",
+    [
+        ("yes", True),
+        ("Yes please", True),
+        ("<@U000BOT> y", True),
+        ("yep", True),
+        ("yeah, that one", True),
+        ("sure", True),
+        ("ok", True),
+        ("Okay.", True),
+        ("go ahead", True),
+        ("send it", True),
+        ("1", False),
+        ("the first one", False),
+        ("not yet", False),
+        ("yesterday's one", False),
+        ("i guess yes", False),
+    ],
+)
+def test_says_yes(answer_text: str, expected: bool) -> None:
+    assert says_yes(answer_text) is expected
+
+
+@pytest.mark.parametrize(
     "answer_text, number, expected",
     [
         ("2", "2", True),
         ("<@U000BOT> 2 please", "2", True),
-        ("option 3.", "3", True),
+        ("#2", "2", True),
+        ("2.", "2", True),
         ("2nd", "2", False),
         ("12", "2", False),
         ("the second one", "2", False),
         ("1", "2", False),
+        ("not 2, 3", "2", False),
+        ("not 2, 3", "3", False),
+        ("option 3", "3", False),
+        ("3 not 2", "2", False),
     ],
 )
-def test_names_number(answer_text: str, number: str, expected: bool) -> None:
-    assert names_number(answer_text, number) is expected
+def test_picks_number(answer_text: str, number: str, expected: bool) -> None:
+    assert picks_number(answer_text, number) is expected
