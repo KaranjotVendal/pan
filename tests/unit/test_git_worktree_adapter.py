@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost
 
 from pan.adapters.git_worktree import ShellGitWorktreeAdapter
@@ -410,20 +411,6 @@ class _FixedClock:
         return datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
 
 
-class _RecordingSlack:
-    def __init__(self) -> None:
-        self.texts: list[str] = []
-
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.texts.append(text)
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-
 def _commit_only(worktree: Path, main_repo: Path) -> None:
     _commit_file(worktree, "feature.txt", "work\n")
 
@@ -499,7 +486,7 @@ def test_done_thread_with_real_git(
             updated_at=clock.now(),
         )
     )
-    slack = _RecordingSlack()
+    slack = RecordingSlack()
 
     try:
         done_thread(
@@ -512,11 +499,13 @@ def test_done_thread_with_real_git(
             terminal_host=FakeTerminalHost(),
             git=ShellGitWorktreeAdapter(),
             slack=slack,
+            clock=clock,
         )
     except UnsavedWorkError:
         assert not expect_closed
 
-    assert slack.texts == [expected_reply]
+    assert slack.texts() == [expected_reply]
+    assert slack.status_texts() == (["Closed"] if expect_closed else [])
     assert worktree.exists() is not expect_closed
     branch_listing = _git(main_repo, "branch", "--list", _BRANCH)
     assert (branch_listing == "") is expect_closed

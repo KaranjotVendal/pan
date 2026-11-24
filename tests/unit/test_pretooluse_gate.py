@@ -4,23 +4,14 @@ import io
 import json
 
 import pytest
+from slack_fakes import RecordingSlack
 
 from pan.errors import GatedOpDeniedError
 from pan.hooks.pretooluse_gate import pretooluse_gate
 
 
-class FakeSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
-
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+class FakeSlack(RecordingSlack):
+    pass
 
 
 def _payload(command: str) -> str:

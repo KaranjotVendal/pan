@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pan.models import (
     BranchStatus,
@@ -26,6 +26,19 @@ class SlackAdapter(Protocol):
     def add_reaction(self, channel: str, ts: str, name: str) -> None: ...
 
     def post_message(self, channel: str, thread_ts: str, text: str) -> None: ...
+
+    # A Block Kit message with its plain-text fallback; returns the posted message's ts.
+    def post_blocks(
+        self, channel: str, thread_ts: str, blocks: list[dict[str, Any]], text: str
+    ) -> str: ...
+
+    # Replace a posted message's blocks and fallback text (chat.update).
+    def update_message(
+        self, channel: str, ts: str, blocks: list[dict[str, Any]], text: str
+    ) -> None: ...
+
+    # A message in the thread only `user` sees (chat.postEphemeral).
+    def post_ephemeral(self, channel: str, thread_ts: str, user: str, text: str) -> None: ...
 
     def start(self) -> None: ...
 
@@ -79,6 +92,16 @@ class ThreadMap(Protocol):
     ) -> None: ...
 
     def records(self) -> list[ThreadRecord]: ...
+
+    # The ts of pan's status message in the thread (see ThreadRecord.status_message_ts).
+    def record_status_message(
+        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+    ) -> None: ...
+
+    # The task the status message shows: its short label and when it started.
+    def record_task(
+        self, thread_ts: str, label: str, started_at: datetime, *, session_name: str | None = None
+    ) -> None: ...
 
     def record_session(
         self,

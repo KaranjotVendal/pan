@@ -9,6 +9,11 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Fixed
 
+- Follow-ups typed into a session come from the pan-orchestrator terminal, and a worker took them
+  for another agent and answered with `hc send`. The worker brief and the "from Slack" line typed
+  into a desk session now end with one sentence (`RELAYED_FOLLOW_UP_SENTENCE`): messages from
+  pan-orchestrator are the person's follow-ups relayed from Slack; answer them as usual and never
+  reply with `hc send`.
 - A worker's brief and the "from Slack" line typed into a desk session now say who replies in
   Slack, by the thread's reply mode, instead of a bare "Do not post to Slack." that a worker in
   the reply-in-Slack mode read as a refusal. In that mode they say "Do not post to Slack
@@ -229,6 +234,31 @@ as it works (see `AGENT_LOOP.md` step 9).
 - An `idle` worker status: the session's turn ended and it waits for a follow-up.
 
 ### Changed
+
+- Slack output is redesigned so a shared thread is easy to read. Each thread gets one status
+  message (Block Kit: the state in bold with the task label under it, cut to
+  `STATUS_LABEL_MAX_LENGTH` (80), and a grey context line with the session name, the elapsed time
+  and the update time) that pan edits in place with `chat.update`: Working (spawn, `to`/confirm,
+  a follow-up, reopen), Waiting for you (the Notification hook, with the prompt's text), Finished
+  (the Stop hook), Closed (`done`) and Stopped (`pan stop`, and `check` on an ended session). Its
+  ts, the task label and the task's start are stored on the `ThreadRecord`
+  (`status_message_ts`, `status_label`, `task_started_at`; None on older records). When it cannot
+  be edited, pan posts a new one and stores that ts. A plain `text` fallback is always set. The
+  rendering is pure, in `src/pan/slack_render.py`; posting and editing are in
+  `src/pan/status_message.py`, best effort (a Slack failure is logged, never raised).
+- The answer is its own message. In reply-in-Slack mode the Stop hook posts only the session's
+  final answer, converted to Slack mrkdwn (now also `__bold__`), and nothing when there is no
+  answer (no more "Worker finished."). `check` edits the status message and posts the latest
+  answer alone (or nothing); the "pan-X · Inbox: ..." header and the "pan-X has finished." line
+  are gone. The Notification hook no longer posts the prompt; it shows in the status message.
+- Private details go only to the requester: the session's Inbox thread (with its `localhost`
+  link), its name and its terminal address are sent with `chat.postEphemeral` at start (spawn,
+  `to`/confirm) and on `check`, and skipped when the record has no requester. The start notice
+  ("Started pan-X in a new worktree · Inbox thread: ..."), the "Sent to pan-X · Inbox: ..." notice
+  and the "reopened — stream pan-X" ack are replaced by the status message.
+- `SlackAdapter` gains `post_blocks` (returns the ts), `update_message` and `post_ephemeral`;
+  `ThreadMap` gains `record_status_message` and `record_task`. `check_thread`, `done_thread` and
+  `follow_up_to_session` take a clock. All three Slack calls use the existing `chat:write` scope.
 
 - Thread records are kept per (thread, session) instead of per thread (`record_key`). `new:` in a
   tied thread, or `to <name>:` naming another session, no longer overwrites the old session's

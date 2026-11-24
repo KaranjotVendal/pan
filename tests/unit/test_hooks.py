@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from slack_fakes import RecordingSlack
 
 from pan.errors import ThreadNotFoundError
 from pan.hooks.inbox_link import InboxLink, inbox_link_hook, parse_inbox_link
@@ -27,6 +28,7 @@ class FakeThreadMap:
         self.status_updates: list[tuple[str, WorkerStatus]] = []
         self.sessions: list[tuple[str, str, Path | None]] = []
         self.inbox_threads: list[tuple[str, str, str | None]] = []
+        self.status_messages: list[tuple[str, str]] = []
         # The session name each update named, so a test can see which record was picked.
         self.updated_session_names: list[str | None] = []
         if seed_thread is not None:
@@ -84,42 +86,52 @@ class FakeThreadMap:
             update={"inbox_thread_id": inbox_thread_id, "inbox_thread_url": url}
         )
 
+    def record_status_message(
+        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+    ) -> None:
+        self.status_messages.append((thread_ts, message_ts))
+        record = self.records[thread_ts]
+        self.records[thread_ts] = record.model_copy(update={"status_message_ts": message_ts})
 
-class FakeSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
 
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+class FakeSlack(RecordingSlack):
+    pass
 
 
 _THREAD = "1718000000.000200"
 
 
-def test_stop_hook_on_demand_marks_idle_and_posts_nothing() -> None:
-    thread_map, slack = FakeThreadMap(), FakeSlack()
+@pytest.mark.parametrize("reply_mode", [ReplyMode.ON_DEMAND, ReplyMode.SLACK])
+def test_stop_hook_marks_idle_and_posts_a_finished_status_without_an_answer(
+    reply_mode: ReplyMode,
+) -> None:
+    # No transcript means no answer, so nothing but the status message is posted, in either
+    # mode: no "finished" line and no session name in the thread.
+    thread_map, slack = FakeThreadMap(reply_mode=reply_mode), FakeSlack()
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
     stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
 
     assert slack.posts == []
+    assert slack.status_texts() == ["Finished"]
+    assert thread_map.status_messages == [(_THREAD, "status-1")]
     assert thread_map.status_updates == [(_THREAD, WorkerStatus.IDLE)]
 
 
-def test_stop_hook_in_reply_in_slack_mode_posts_and_marks_idle() -> None:
-    thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
+def test_stop_hook_edits_the_status_message_the_thread_already_has() -> None:
+    thread_map, slack = FakeThreadMap(), FakeSlack()
+    thread_map.records[_THREAD] = thread_map.records[_THREAD].model_copy(
+        update={"status_message_ts": "1718000000.000300", "status_label": "do the thing"}
+    )
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
     stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
 
-    assert slack.posts == [("C1", _THREAD, "Worker finished.")]
-    assert thread_map.status_updates == [(_THREAD, WorkerStatus.IDLE)]
+    assert slack.status_posts == []
+    assert [(channel, ts, text) for channel, ts, _blocks, text in slack.status_updates] == [
+        ("C1", "1718000000.000300", "Finished: do the thing")
+    ]
+    assert thread_map.status_messages == []
 
 
 @pytest.mark.parametrize(
@@ -155,10 +167,12 @@ def test_hook_of_a_session_whose_thread_moved_on_only_updates_its_own_record(
     )
 
     assert slack.posts == []
+    assert slack.status_posts == []
+    assert slack.status_updates == []
     assert thread_map.updated_session_names == ["pan-task"]
 
 
-def test_stop_hook_falls_back_to_default_when_transcript_missing(tmp_path: Path) -> None:
+def test_stop_hook_posts_no_answer_when_the_transcript_is_missing(tmp_path: Path) -> None:
     thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
     payload = json.dumps(
         {
@@ -170,7 +184,8 @@ def test_stop_hook_falls_back_to_default_when_transcript_missing(tmp_path: Path)
 
     stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
 
-    assert slack.posts[0][2] == "Worker finished."
+    assert slack.posts == []
+    assert slack.status_texts() == ["Finished"]
 
 
 def test_stop_hook_extracts_last_assistant_text_from_transcript(tmp_path: Path) -> None:
@@ -188,7 +203,11 @@ def test_stop_hook_extracts_last_assistant_text_from_transcript(tmp_path: Path) 
                 json.dumps(
                     {
                         "type": "assistant",
-                        "message": {"content": [{"type": "text", "text": "final answer"}]},
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "**Done.** See [the PR](https://x.test/1)"}
+                            ]
+                        },
                     }
                 ),
             ]
@@ -201,25 +220,31 @@ def test_stop_hook_extracts_last_assistant_text_from_transcript(tmp_path: Path) 
 
     stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
 
-    assert slack.posts[0][2] == "final answer"
+    # Only the answer, converted to Slack mrkdwn: no session name, no Inbox link.
+    assert slack.posts == [("C1", _THREAD, "*Done.* See <https://x.test/1|the PR>")]
 
 
 @pytest.mark.parametrize(
-    "reply_mode, message, expected_posts",
+    "reply_mode, message, expected_section",
     [
-        (ReplyMode.ON_DEMAND, "Claude needs your approval to run rm", []),
+        (
+            ReplyMode.ON_DEMAND,
+            "Claude needs your approval to run rm",
+            "*Waiting for you*\n_Claude needs your approval to run rm_",
+        ),
         (
             ReplyMode.SLACK,
             "Claude needs your approval to run rm",
-            [("C1", _THREAD, "Claude needs your approval to run rm")],
+            "*Waiting for you*\n_Claude needs your approval to run rm_",
         ),
-        (ReplyMode.SLACK, None, [("C1", _THREAD, "Worker needs input.")]),
+        (ReplyMode.SLACK, None, "*Waiting for you*"),
     ],
-    ids=["on-demand-quiet", "reply-in-slack-posts", "reply-in-slack-default-question"],
+    ids=["on-demand", "reply-in-slack", "no-message"],
 )
-def test_notification_hook_marks_blocked_and_posts_only_in_reply_in_slack_mode(
-    reply_mode: ReplyMode, message: str | None, expected_posts: list[tuple[str, str, str]]
+def test_notification_hook_marks_blocked_and_shows_the_prompt_in_the_status(
+    reply_mode: ReplyMode, message: str | None, expected_section: str
 ) -> None:
+    # The prompt is shown in the status message in both modes; nothing new is posted.
     thread_map, slack = FakeThreadMap(reply_mode=reply_mode), FakeSlack()
     payload_fields: dict[str, str] = {
         "session_id": "s1",
@@ -233,7 +258,8 @@ def test_notification_hook_marks_blocked_and_posts_only_in_reply_in_slack_mode(
         _THREAD, "C1", thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
     )
 
-    assert slack.posts == expected_posts
+    assert slack.posts == []
+    assert [post.blocks[0]["text"]["text"] for post in slack.status_posts] == [expected_section]
     assert thread_map.status_updates == [(_THREAD, WorkerStatus.BLOCKED)]
 
 
@@ -281,7 +307,7 @@ def test_notification_hook_marks_blocked_only_for_a_prompt_waiting_on_the_person
     )
 
     assert [status for _, status in thread_map.status_updates] == expected_statuses
-    assert len(slack.posts) == len(expected_statuses)
+    assert len(slack.status_posts) == len(expected_statuses)
 
 
 @pytest.mark.parametrize(

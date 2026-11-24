@@ -33,10 +33,19 @@ class ThreadSource(StrEnum):
 
 
 class ReplyMode(StrEnum):
-    # ON_DEMAND: Slack gets the start notice and then a reply only when asked. SLACK: the
+    # ON_DEMAND: Slack gets the status message and then a reply only when asked. SLACK: the
     # request asked for a reply in Slack, so the answer is posted at every turn end.
     ON_DEMAND = "on_demand"
     SLACK = "slack"
+
+
+class StatusState(StrEnum):
+    # What pan's one status message in a thread says about the session (slack_render).
+    WORKING = "working"
+    WAITING = "waiting"
+    FINISHED = "finished"
+    CLOSED = "closed"
+    STOPPED = "stopped"
 
 
 class AgentStatus(StrEnum):
@@ -175,6 +184,12 @@ class ThreadRecord(BaseModel):
     inbox_thread_name: str | None = None
     inbox_thread_id: str | None = None
     inbox_thread_url: str | None = None
+    # pan's one status message in the thread (its Slack ts), edited in place as the session's
+    # state changes; the short task label it shows and when that task started. None on records
+    # written before they existed, and status_message_ts until the first status is posted.
+    status_message_ts: str | None = None
+    status_label: str | None = None
+    task_started_at: datetime | None = None
 
     @model_validator(mode="before")
     @classmethod
