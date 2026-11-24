@@ -5,8 +5,12 @@ description: Use on every inbox nudge in the persistent pan-orchestrator session
 
 # Orchestrating loop
 
-You are the persistent `pan-orchestrator` Claude session. A watcher wakes you with a fixed nudge
-whenever the inbox changes; requests arrive only through the inbox. On each nudge, run this once.
+You are the persistent `pan-orchestrator` Claude session. A watcher wakes you with a nudge that carries no
+message content whenever the inbox changes; requests arrive only through the inbox. On each nudge, run this once.
+
+Each nudge names this file and its version. When the version differs from the one you last read
+(pan was reinstalled), or the nudge has no version, read this file again before draining and
+follow the new copy.
 
 You read each message for its meaning and pick the action. Every action is a `pan` subcommand: never
 shell `hc`, edit pan's files, or post to Slack any other way. The commands post their own replies;

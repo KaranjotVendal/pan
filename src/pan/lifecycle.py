@@ -8,20 +8,15 @@ from pan.config import CLAUDE_AGENT_NAMES, ORCHESTRATOR_ROLE, PAN_ROLE_LABEL
 from pan.errors import TerminalGoneError, TerminalHostError, TerminalNameTakenError
 from pan.logging import initialise_logger
 from pan.models import Terminal, TerminalState, WorkerStatus
+from pan.orchestrating_skill import (
+    SkillVersion,
+    orchestrating_skill,
+    orchestrator_boot_brief,
+    wake_instruction,
+)
 from pan.seams import TerminalHost, ThreadMap
-from pan.watcher import WAKE_INSTRUCTION
 
 logger = initialise_logger(__name__)
-
-# The first task given to a freshly started orchestrator. It is stateless by design (all
-# state is in the inbox and the thread map), so a fresh session after a reboot is correct.
-# It drains once on boot because a send to a booting agent can be dropped, and anything
-# that arrived while pan was down is already waiting in the inbox.
-ORCHESTRATOR_BOOT_BRIEF = (
-    "You are the persistent pan orchestrator. Read src/pan/skills/orchestrating/SKILL.md and "
-    "follow it: run its drain-classify-route loop once now, then again each time you are "
-    "woken with a new-inbox-item message."
-)
 
 # Records in these statuses expect a live worker terminal behind them.
 _LIVE_STATUSES = frozenset(
@@ -44,7 +39,7 @@ def _find(terminal_host: TerminalHost, terminal: str) -> Terminal | None:
 
 
 def _ensure_orchestrator(
-    terminal_host: TerminalHost, terminal: str, cwd: Path, command: list[str]
+    terminal_host: TerminalHost, terminal: str, cwd: Path, command: list[str], skill: SkillVersion
 ) -> tuple[Terminal, bool]:
     # Returns the orchestrator terminal and whether it was started now. A live Claude
     # session under the name is left alone; a finished one is removed and replaced. A live
@@ -63,7 +58,7 @@ def _ensure_orchestrator(
     started = terminal_host.run(
         name=terminal,
         cwd=cwd,
-        argv=[*command, ORCHESTRATOR_BOOT_BRIEF],
+        argv=[*command, orchestrator_boot_brief(skill)],
         labels={PAN_ROLE_LABEL: ORCHESTRATOR_ROLE},
     )
     logger.info(f"orchestrator started terminal={started.address}")
@@ -105,12 +100,15 @@ def bring_up(
 ) -> UpReport:
     # Idempotent: ensure the orchestrator runs, reconcile workers lost while pan was down,
     # and wake an already-running orchestrator once so a backlog in the inbox is drained.
-    orchestrator, started = _ensure_orchestrator(terminal_host, terminal, cwd, command)
+    # The skill is read once, before any side effect; an unreadable one gives no version and
+    # the boot brief or wake asks the orchestrator to read the file again.
+    skill = orchestrating_skill()
+    orchestrator, started = _ensure_orchestrator(terminal_host, terminal, cwd, command, skill)
     lost = reconcile_lost_workers(terminal_host, thread_map)
     woke = False
     if not started:
         try:
-            terminal_host.send(orchestrator.address, WAKE_INSTRUCTION)
+            terminal_host.send(orchestrator.address, wake_instruction(skill))
             woke = True
         except TerminalHostError as error:
             logger.warning(f"pan up could not wake orchestrator: {type(error).__name__}")
