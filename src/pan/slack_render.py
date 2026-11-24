@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pan.config import (
+    CLAUDE_AGENT_NAMES,
     SESSION_LAST_ASK_MAX_LENGTH,
     SESSIONS_COMPACT_LINE_MAX_LENGTH,
     STATUS_LABEL_MAX_LENGTH,
@@ -202,25 +203,34 @@ _SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
     AgentStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
     AgentStatus.ERROR: STATUS_TITLES[StatusState.STOPPED],
 }
-# For an agent hc reports no known status for: what pan recorded.
+# For a live agent hc reports no known status for: what pan recorded. The terminal is live,
+# so never Stopped (as in _STATE_FOR_LIVE_RECORD): a recorded failure reads as idle.
 _SESSIONS_GROUP_FOR_PAN_STATUS: dict[WorkerStatus, str] = {
     WorkerStatus.SPAWNING: STATUS_TITLES[StatusState.WORKING],
     WorkerStatus.RUNNING: STATUS_TITLES[StatusState.WORKING],
     WorkerStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
     WorkerStatus.IDLE: SESSIONS_IDLE_TITLE,
     WorkerStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
-    WorkerStatus.FAILED: STATUS_TITLES[StatusState.STOPPED],
+    WorkerStatus.FAILED: SESSIONS_IDLE_TITLE,
 }
+# Emphasis characters that would garble text shown inside **bold** or _italic_.
+_EMPHASIS_CHARACTERS = re.compile(r"[*~`]")
+# An underscore not inside a word (`snake_case` is safe), which Slack can read as italics.
+_LOOSE_UNDERSCORE = re.compile(r"(?<![^\W_])_|_(?![^\W_])")
 
 
 def session_group(summary: SessionSummary) -> str | None:
-    # The group a session is listed under; None for a terminal with no agent running (a
-    # plain shell), unless it is a pan worker still booting. An unknown agent status falls
-    # back to pan's record, else counts as working.
+    # The group a session is listed under; None for a plain shell (no status and not a Claude
+    # agent), unless it is a pan worker still booting. A Claude session reports no status
+    # until its first turn ends (see session_control._is_ready), so it and an unknown status
+    # fall back to pan's record, else count as working.
     group = _SESSIONS_GROUP_FOR_AGENT.get(summary.agent_status)
     if group is not None:
         return group
-    if summary.agent_status is AgentStatus.NONE:
+    plain_shell = (
+        summary.agent_status is AgentStatus.NONE and summary.agent not in CLAUDE_AGENT_NAMES
+    )
+    if plain_shell:
         booting = summary.pan_status is WorkerStatus.SPAWNING
         return STATUS_TITLES[StatusState.WORKING] if booting else None
     if summary.pan_status is not None:
@@ -239,6 +249,24 @@ def listed_sessions(
     ]
 
 
+def linked_sessions(
+    summaries: list[SessionSummary], orchestrator_name: str
+) -> list[SessionSummary]:
+    # The listed sessions shown one per line with their thread link (not the compact groups).
+    return [
+        summary
+        for summary in listed_sessions(summaries, orchestrator_name)
+        if session_group(summary) not in SESSIONS_COMPACT_GROUPS
+    ]
+
+
+def plain_mrkdwn(text: str) -> str:
+    # Free text made safe to wrap in **bold** or _italic_: control characters escaped and
+    # emphasis characters dropped.
+    without_emphasis = _EMPHASIS_CHARACTERS.sub("", escape_mrkdwn(text))
+    return " ".join(_LOOSE_UNDERSCORE.sub("", without_emphasis).split())
+
+
 def session_display_name(summary: SessionSummary) -> str:
     # Words, never an address or a path: the task label, the Inbox thread, the terminal name,
     # the Herdr location without its tab number, then the folder name.
@@ -249,7 +277,7 @@ def session_display_name(summary: SessionSummary) -> str:
 def _compact_group_line(group: str, members: list[SessionSummary]) -> str:
     # `**Idle (21):** a, b, c`, names only; past the length limit the rest is counted.
     prefix = f"**{group} ({len(members)}):** "
-    names = [escape_mrkdwn(session_display_name(summary)) for summary in members]
+    names = [plain_mrkdwn(session_display_name(summary)) for summary in members]
     shown: list[str] = []
     for index, name in enumerate(names):
         remaining = len(names) - index - 1
@@ -264,14 +292,14 @@ def _compact_group_line(group: str, members: list[SessionSummary]) -> str:
 
 
 def _session_lines(summary: SessionSummary, permalinks: dict[str, str]) -> list[str]:
-    line = f"• **{escape_mrkdwn(session_display_name(summary))}**"
+    line = f"• **{plain_mrkdwn(session_display_name(summary))}**"
     link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
     if link:
         line += f" · <{link}|thread>"
     lines = [line]
     if summary.last_ask:
         lines.append(
-            f"    _{escape_mrkdwn(status_label(summary.last_ask, SESSION_LAST_ASK_MAX_LENGTH))}_"
+            f"    _{plain_mrkdwn(status_label(summary.last_ask, SESSION_LAST_ASK_MAX_LENGTH))}_"
         )
     return lines
 

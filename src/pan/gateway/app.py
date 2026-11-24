@@ -86,10 +86,14 @@ class BoltSlackAdapter:
 
     def permalink(self, channel: str, ts: str) -> str | None:
         # Best effort: a message without a link is still listed, so a failure is only logged.
+        # Any failure, an API error or a transport one (timeout, connection reset), only loses
+        # the link, never the reply it would go in.
         try:
             response = self._client.chat_getPermalink(channel=channel, message_ts=ts)
-        except SlackApiError as error:
-            logger.warning(f"permalink unavailable channel={channel} ts={ts}: {error}")
+        except Exception as e:
+            logger.warning(
+                f"permalink unavailable channel={channel} ts={ts}: {type(e).__name__}: {e}"
+            )
             return None
         link = response.get("permalink")
         if not isinstance(link, str) or not link:

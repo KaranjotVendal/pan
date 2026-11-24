@@ -320,36 +320,51 @@ def _render(*sessions: SessionSummary, permalinks: dict[str, str] | None = None)
 
 
 @pytest.mark.parametrize(
-    "agent_status, pan_status, expected",
+    "agent_status, agent, pan_status, expected",
     [
-        (AgentStatus.BLOCKED, None, "Waiting for you"),
-        (AgentStatus.WORKING, None, "Working"),
-        (AgentStatus.IDLE, WorkerStatus.IDLE, "Idle"),
-        (AgentStatus.DONE, None, "Finished"),
-        (AgentStatus.ERROR, WorkerStatus.FAILED, "Stopped"),
-        (AgentStatus.NONE, WorkerStatus.SPAWNING, "Working"),
-        (AgentStatus.NONE, WorkerStatus.RUNNING, None),
-        (AgentStatus.NONE, None, None),
-        (AgentStatus.UNKNOWN, WorkerStatus.BLOCKED, "Waiting for you"),
-        (AgentStatus.UNKNOWN, None, "Working"),
+        (AgentStatus.BLOCKED, "claude-code", None, "Waiting for you"),
+        (AgentStatus.WORKING, "claude-code", None, "Working"),
+        (AgentStatus.IDLE, "claude-code", WorkerStatus.IDLE, "Idle"),
+        (AgentStatus.DONE, "claude-code", None, "Finished"),
+        (AgentStatus.ERROR, "claude-code", WorkerStatus.FAILED, "Stopped"),
+        (AgentStatus.NONE, "zsh", WorkerStatus.SPAWNING, "Working"),
+        (AgentStatus.NONE, "zsh", WorkerStatus.RUNNING, None),
+        (AgentStatus.NONE, None, None, None),
+        (AgentStatus.NONE, "zsh", None, None),
+        (AgentStatus.NONE, "claude-code", WorkerStatus.RUNNING, "Working"),
+        (AgentStatus.NONE, "claude", WorkerStatus.BLOCKED, "Waiting for you"),
+        (AgentStatus.NONE, "claude-code", None, "Working"),
+        (AgentStatus.UNKNOWN, "claude-code", WorkerStatus.BLOCKED, "Waiting for you"),
+        (AgentStatus.UNKNOWN, "claude-code", WorkerStatus.FAILED, "Idle"),
+        (AgentStatus.UNKNOWN, "claude-code", None, "Working"),
     ],
     ids=[
         "blocked",
         "working",
         "idle",
-        "done",
         "error",
+        "done",
         "booting-worker",
         "dropped-to-a-shell",
+        "no-program",
         "plain-shell",
+        "claude-first-turn-uses-the-record",
+        "claude-first-turn-blocked-record",
+        "claude-first-turn-without-a-record",
         "unknown-uses-the-record",
+        "unknown-live-failed-record-is-never-stopped",
         "unknown-without-a-record",
     ],
 )
 def test_session_group(
-    agent_status: AgentStatus, pan_status: WorkerStatus | None, expected: str | None
+    agent_status: AgentStatus,
+    agent: str | None,
+    pan_status: WorkerStatus | None,
+    expected: str | None,
 ) -> None:
-    assert session_group(_session(agent_status=agent_status, pan_status=pan_status)) == expected
+    summary = _session(agent_status=agent_status, agent=agent, pan_status=pan_status)
+
+    assert session_group(summary) == expected
 
 
 @pytest.mark.parametrize(
@@ -530,3 +545,29 @@ def test_render_sessions_for_slack_cuts_a_long_quiet_group() -> None:
     shown_count = idle_line.count("stream-")
     assert idle_line.endswith(f"stream-{shown_count:02d} and {60 - shown_count} more")
     assert len(idle_line) <= 400
+
+
+@pytest.mark.parametrize(
+    "session, expected_lines",
+    [
+        (
+            _session(label="**urgent** fix", last_ask="make *all* tests pass"),
+            ["• **urgent fix**", "    _make all tests pass_"],
+        ),
+        (
+            _session(label="_draft_ ~old~ `plan`", last_ask="keep snake_case_names"),
+            ["• **draft old plan**", "    _keep snake_case_names_"],
+        ),
+    ],
+    ids=["asterisks", "underscores-tildes-backticks"],
+)
+def test_render_sessions_for_slack_drops_emphasis_from_free_text(
+    session: SessionSummary, expected_lines: list[str]
+) -> None:
+    assert _render(session).splitlines()[2:4] == expected_lines
+
+
+def test_render_sessions_for_slack_drops_emphasis_from_a_compact_line() -> None:
+    session = _session(label="*fix* the _build_", agent_status=AgentStatus.IDLE)
+
+    assert _render(session).splitlines()[1] == "**Idle (1):** fix the build"

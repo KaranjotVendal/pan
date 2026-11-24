@@ -93,7 +93,7 @@ from pan.session_control import (
     send_to_session,
 )
 from pan.sessions import collect_sessions, worker_status_for
-from pan.slack_render import listed_sessions, render_sessions_for_slack
+from pan.slack_render import linked_sessions, render_sessions_for_slack
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.status_message import publish_status
 from pan.threadmap import FileThreadMap, tie_note
@@ -602,11 +602,16 @@ def sessions(
         slack = _slack_adapter(config)
         orchestrator_name = config.orchestrator.terminal
         permalinks: dict[str, str] = {}
-        for summary in listed_sessions(summaries, orchestrator_name):
-            if summary.thread_ts and summary.thread_channel:
-                link = slack.permalink(summary.thread_channel, summary.thread_ts)
-                if link:
-                    permalinks[summary.thread_ts] = link
+        fetched_threads: set[str] = set()
+        for summary in linked_sessions(summaries, orchestrator_name):
+            if not summary.thread_ts or not summary.thread_channel:
+                continue
+            if summary.thread_ts in fetched_threads:
+                continue
+            fetched_threads.add(summary.thread_ts)
+            link = slack.permalink(summary.thread_channel, summary.thread_ts)
+            if link:
+                permalinks[summary.thread_ts] = link
         slack_post_parts(
             slack,
             channel,

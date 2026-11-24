@@ -4,6 +4,7 @@ import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
+from urllib.error import URLError
 
 import pytest
 from pydantic import SecretStr
@@ -27,6 +28,7 @@ class FakeWebClient:
         self.reaction_error: SlackApiError | None = None
         self.post_error: SlackApiError | None = None
         self.post_response: dict[str, Any] = {"ok": True, "ts": "1718000000.000900"}
+        self.permalink_error: Exception | None = None
         self.permalink_response: dict[str, Any] = {
             "ok": True,
             "permalink": "https://example.slack.com/archives/C000TEST/p1700000000000100",
@@ -59,8 +61,8 @@ class FakeWebClient:
         self._timeline.append(("ephemeral", (channel, thread_ts, user, text)))
 
     def chat_getPermalink(self, *, channel: str, message_ts: str) -> dict[str, Any]:
-        if self.post_error is not None:
-            raise self.post_error
+        if self.permalink_error is not None:
+            raise self.permalink_error
         return self.permalink_response
 
 
@@ -398,15 +400,26 @@ def test_permalink_returns_the_message_link() -> None:
     assert link == "https://example.slack.com/archives/C000TEST/p1700000000000100"
 
 
-@pytest.mark.parametrize("failure", ["api-error", "no-link"])
+@pytest.mark.parametrize(
+    "error, response",
+    [
+        (SlackApiError("boom", {"ok": False, "error": "channel_not_found"}), None),
+        (URLError("connection reset"), None),
+        (TimeoutError("timed out"), None),
+        (None, {"ok": True}),
+    ],
+    ids=["api-error", "transport-error", "timeout", "no-link"],
+)
 def test_permalink_failure_is_logged_not_raised(
-    failure: str, app_logger_capture: None, caplog: pytest.LogCaptureFixture
+    error: Exception | None,
+    response: dict[str, Any] | None,
+    app_logger_capture: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     adapter, client, _inbox, _timeline = _make_adapter({})
-    if failure == "api-error":
-        client.post_error = SlackApiError("boom", {"ok": False, "error": "channel_not_found"})
-    else:
-        client.permalink_response = {"ok": True}
+    client.permalink_error = error
+    if response is not None:
+        client.permalink_response = response
 
     link = adapter.permalink("C000TEST", "1700000000.000100")
 

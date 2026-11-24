@@ -1060,6 +1060,53 @@ def test_sessions_posts_a_short_list_to_a_thread(
     assert "pan-orchestrator" not in text
 
 
+class _CountingSlack(_RecordingSlack):
+    def __init__(self) -> None:
+        super().__init__()
+        self.permalink_requests: list[tuple[str, str]] = []
+
+    def permalink(self, channel: str, ts: str) -> str | None:
+        self.permalink_requests.append((channel, ts))
+        return super().permalink(channel, ts)
+
+
+def test_sessions_fetches_links_only_for_sessions_shown_one_per_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+
+    def threaded(address: str, agent_status: AgentStatus, thread_ts: str) -> SessionSummary:
+        return _summary().model_copy(
+            update={
+                "address": address,
+                "agent_status": agent_status,
+                "thread_ts": thread_ts,
+                "thread_channel": "C000TEST",
+            }
+        )
+
+    summaries = [
+        threaded("t2", AgentStatus.BLOCKED, "1700000000.000200"),
+        threaded("t3", AgentStatus.WORKING, "1700000000.000200"),
+        threaded("t4", AgentStatus.WORKING, "1700000000.000300"),
+        threaded("t5", AgentStatus.IDLE, "1700000000.000400"),
+        threaded("t6", AgentStatus.DONE, "1700000000.000500"),
+    ]
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
+    slack = _CountingSlack()
+    monkeypatch.setattr(cli, "_slack_adapter", lambda config: slack)
+
+    result = runner.invoke(
+        cli.app, ["sessions", "--thread", "1700000000.000100", "--channel", "C000TEST"]
+    )
+
+    assert result.exit_code == 0
+    assert slack.permalink_requests == [
+        ("C000TEST", "1700000000.000200"),
+        ("C000TEST", "1700000000.000300"),
+    ]
+
+
 def test_check_command_posts_through_the_thread_map(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
