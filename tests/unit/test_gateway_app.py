@@ -27,6 +27,10 @@ class FakeWebClient:
         self.reaction_error: SlackApiError | None = None
         self.post_error: SlackApiError | None = None
         self.post_response: dict[str, Any] = {"ok": True, "ts": "1718000000.000900"}
+        self.permalink_response: dict[str, Any] = {
+            "ok": True,
+            "permalink": "https://example.slack.com/archives/C000TEST/p1700000000000100",
+        }
 
     def reactions_add(self, *, channel: str, timestamp: str, name: str) -> None:
         if self.reaction_error is not None:
@@ -53,6 +57,11 @@ class FakeWebClient:
         if self.post_error is not None:
             raise self.post_error
         self._timeline.append(("ephemeral", (channel, thread_ts, user, text)))
+
+    def chat_getPermalink(self, *, channel: str, message_ts: str) -> dict[str, Any]:
+        if self.post_error is not None:
+            raise self.post_error
+        return self.permalink_response
 
 
 class FakeInbox:
@@ -379,3 +388,27 @@ def test_gateway_writes_the_parsed_route_on_the_item(text: str, expected_route: 
     (item,) = inbox.items
     assert item.route == expected_route
     assert item.raw_text == text
+
+
+def test_permalink_returns_the_message_link() -> None:
+    adapter, _client, _inbox, _timeline = _make_adapter({})
+
+    link = adapter.permalink("C000TEST", "1700000000.000100")
+
+    assert link == "https://example.slack.com/archives/C000TEST/p1700000000000100"
+
+
+@pytest.mark.parametrize("failure", ["api-error", "no-link"])
+def test_permalink_failure_is_logged_not_raised(
+    failure: str, app_logger_capture: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    adapter, client, _inbox, _timeline = _make_adapter({})
+    if failure == "api-error":
+        client.post_error = SlackApiError("boom", {"ok": False, "error": "channel_not_found"})
+    else:
+        client.permalink_response = {"ok": True}
+
+    link = adapter.permalink("C000TEST", "1700000000.000100")
+
+    assert link is None
+    assert "permalink" in caplog.text

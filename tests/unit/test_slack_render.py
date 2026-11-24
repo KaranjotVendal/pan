@@ -6,12 +6,25 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import make_terminal
 
-from pan.models import AgentStatus, StatusState, TerminalState, ThreadRecord, WorkerStatus
+from pan.models import (
+    AgentStatus,
+    SessionSummary,
+    StatusState,
+    TerminalState,
+    ThreadRecord,
+    WorkerStatus,
+)
+from pan.slack_format import to_slack_mrkdwn
 from pan.slack_render import (
+    SESSIONS_EMPTY_TEXT,
+    SESSIONS_FOOTER,
     check_state,
     elapsed_text,
     escape_mrkdwn,
     private_details_text,
+    render_sessions_for_slack,
+    session_display_name,
+    session_group,
     slack_time,
     status_blocks,
     status_label,
@@ -283,3 +296,237 @@ def test_private_details_text_without_a_terminal_address() -> None:
     assert private_details_text(_record(terminal_address="")) == (
         'Details for pan-login (only visible to you)\nInbox thread: "pan-login: fix the login page"'
     )
+
+
+_ORCHESTRATOR = "pan-orchestrator"
+_THREAD_LINK = "https://example.slack.com/archives/C000TEST/p1700000000000100"
+
+
+def _session(**updates: object) -> SessionSummary:
+    session = SessionSummary(
+        address="t12",
+        name="pan-sizing",
+        cwd=Path("/tmp/wt/pan-sizing"),
+        agent="claude-code",
+        agent_status=AgentStatus.WORKING,
+    )
+    return session.model_copy(update=updates)
+
+
+def _render(*sessions: SessionSummary, permalinks: dict[str, str] | None = None) -> str:
+    return render_sessions_for_slack(
+        list(sessions), permalinks or {}, orchestrator_name=_ORCHESTRATOR
+    )
+
+
+@pytest.mark.parametrize(
+    "agent_status, pan_status, expected",
+    [
+        (AgentStatus.BLOCKED, None, "Waiting for you"),
+        (AgentStatus.WORKING, None, "Working"),
+        (AgentStatus.IDLE, WorkerStatus.IDLE, "Idle"),
+        (AgentStatus.DONE, None, "Finished"),
+        (AgentStatus.ERROR, WorkerStatus.FAILED, "Stopped"),
+        (AgentStatus.NONE, WorkerStatus.SPAWNING, "Working"),
+        (AgentStatus.NONE, WorkerStatus.RUNNING, None),
+        (AgentStatus.NONE, None, None),
+        (AgentStatus.UNKNOWN, WorkerStatus.BLOCKED, "Waiting for you"),
+        (AgentStatus.UNKNOWN, None, "Working"),
+    ],
+    ids=[
+        "blocked",
+        "working",
+        "idle",
+        "done",
+        "error",
+        "booting-worker",
+        "dropped-to-a-shell",
+        "plain-shell",
+        "unknown-uses-the-record",
+        "unknown-without-a-record",
+    ],
+)
+def test_session_group(
+    agent_status: AgentStatus, pan_status: WorkerStatus | None, expected: str | None
+) -> None:
+    assert session_group(_session(agent_status=agent_status, pan_status=pan_status)) == expected
+
+
+@pytest.mark.parametrize(
+    "updates, expected",
+    [
+        (
+            {"label": "Google Doc for the plan", "inbox_thread_name": "pan-sizing: plan"},
+            "Google Doc for the plan",
+        ),
+        ({"inbox_thread_name": "pan-sizing: plan"}, "pan-sizing: plan"),
+        ({}, "pan-sizing"),
+        ({"name": None}, "pan-sizing"),
+        ({"name": None, "where": "jiracli-generate / 1"}, "jiracli-generate"),
+        ({"name": None, "where": "moshi-browser / pan"}, "moshi-browser / pan"),
+        ({"name": None, "where": "moshi-browser / pan 2"}, "moshi-browser / pan 2"),
+        ({"name": "pan", "where": "moshi-browser / pan"}, "pan"),
+        ({"name": None, "cwd": Path("/Users/someone/dev/api")}, "api"),
+    ],
+    ids=[
+        "label",
+        "inbox-thread",
+        "terminal-name",
+        "folder-of-a-worktree",
+        "where-without-its-tab-number",
+        "where-with-a-named-tab",
+        "where-ending-in-a-word-and-number",
+        "terminal-name-before-where",
+        "folder",
+    ],
+)
+def test_session_display_name(updates: dict[str, object], expected: str) -> None:
+    assert session_display_name(_session(**updates)) == expected
+
+
+def test_render_sessions_for_slack_groups_needs_action_first() -> None:
+    sessions = [
+        _session(
+            address="t3",
+            name="pan-sizing",
+            label="Google Doc for the plan",
+            agent_status=AgentStatus.BLOCKED,
+            thread_ts="1700000000.000100",
+            thread_channel="C000TEST",
+            last_ask="make a google doc of the sizing plan",
+        ),
+        _session(address="t5", name="herdr-core-migration", cwd=Path("/tmp/wt/herdr")),
+        _session(
+            address="t8",
+            name=None,
+            cwd=Path("/Users/someone/dev/api"),
+            agent_status=AgentStatus.DONE,
+        ),
+    ]
+
+    text = to_slack_mrkdwn(_render(*sessions, permalinks={"1700000000.000100": _THREAD_LINK}))
+
+    assert text == (
+        "*3 sessions*\n"
+        "*Waiting for you*\n"
+        f"• *Google Doc for the plan* · <{_THREAD_LINK}|thread>\n"
+        "    _make a google doc of the sizing plan_\n"
+        "*Working*\n"
+        "• *herdr-core-migration*\n"
+        "*Finished (1):* api\n"
+        f"{SESSIONS_FOOTER}"
+    )
+    for hidden_detail in ["t3", "t5", "t8", "/Users/", "/tmp/", "C000TEST|"]:
+        assert hidden_detail not in text.replace(_THREAD_LINK, "")
+
+
+@pytest.mark.parametrize(
+    "sessions",
+    [
+        [],
+        [_session(name=_ORCHESTRATOR)],
+        [_session(agent="zsh", agent_status=AgentStatus.NONE)],
+    ],
+    ids=["none", "only-the-orchestrator", "only-a-plain-shell"],
+)
+def test_render_sessions_for_slack_with_nothing_to_list(sessions: list[SessionSummary]) -> None:
+    assert _render(*sessions) == SESSIONS_EMPTY_TEXT
+
+
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        _session(address="t1", name=_ORCHESTRATOR),
+        _session(address="t1", name="zsh-1", agent="zsh", agent_status=AgentStatus.NONE),
+    ],
+    ids=["orchestrator", "plain-shell"],
+)
+def test_render_sessions_for_slack_hides_terminals_without_a_listed_session(
+    hidden: SessionSummary,
+) -> None:
+    text = _render(_session(), hidden)
+
+    assert text.startswith("**1 session**\n")
+    assert str(hidden.name) not in text
+
+
+@pytest.mark.parametrize(
+    "thread_ts, permalinks, expected_line",
+    [
+        (
+            "1700000000.000100",
+            {"1700000000.000100": _THREAD_LINK},
+            f"• **pan-sizing** · <{_THREAD_LINK}|thread>",
+        ),
+        ("1700000000.000100", {}, "• **pan-sizing**"),
+        (None, {"1700000000.000100": _THREAD_LINK}, "• **pan-sizing**"),
+    ],
+    ids=["link", "no-link-from-slack", "no-thread"],
+)
+def test_render_sessions_for_slack_links_the_thread_when_known(
+    thread_ts: str | None, permalinks: dict[str, str], expected_line: str
+) -> None:
+    text = _render(_session(thread_ts=thread_ts), permalinks=permalinks)
+
+    assert text.splitlines()[2] == expected_line
+
+
+@pytest.mark.parametrize(
+    "last_ask, expected_line",
+    [
+        ("fix the login page", "    _fix the login page_"),
+        ("a" * 120, f"    _{'a' * 77}..._"),
+        ("compare <a> & <b>", "    _compare &lt;a&gt; &amp; &lt;b&gt;_"),
+        (None, None),
+    ],
+    ids=["short", "cut-short", "escaped", "none"],
+)
+def test_render_sessions_for_slack_shows_the_last_ask(
+    last_ask: str | None, expected_line: str | None
+) -> None:
+    lines = _render(_session(last_ask=last_ask)).splitlines()
+
+    assert (lines[3] if lines[3] != SESSIONS_FOOTER else None) == expected_line
+
+
+def _quiet_session(index: int, agent_status: AgentStatus = AgentStatus.IDLE) -> SessionSummary:
+    return _session(
+        address=f"t{index}",
+        name=f"stream-{index:02d}",
+        agent_status=agent_status,
+        thread_ts="1700000000.000100",
+        last_ask="not shown for a quiet session",
+    )
+
+
+@pytest.mark.parametrize(
+    "agent_status, title",
+    [
+        (AgentStatus.IDLE, "Idle"),
+        (AgentStatus.DONE, "Finished"),
+        (AgentStatus.ERROR, "Stopped"),
+    ],
+)
+def test_render_sessions_for_slack_lists_a_quiet_group_on_one_line(
+    agent_status: AgentStatus, title: str
+) -> None:
+    sessions = [_quiet_session(index, agent_status) for index in range(1, 4)]
+
+    text = _render(*sessions, permalinks={"1700000000.000100": _THREAD_LINK})
+
+    assert text.splitlines() == [
+        "**3 sessions**",
+        f"**{title} (3):** stream-01, stream-02, stream-03",
+        SESSIONS_FOOTER,
+    ]
+
+
+def test_render_sessions_for_slack_cuts_a_long_quiet_group() -> None:
+    sessions = [_quiet_session(index) for index in range(1, 61)]
+
+    idle_line = _render(*sessions).splitlines()[1]
+
+    assert idle_line.startswith("**Idle (60):** stream-01, stream-02, ")
+    shown_count = idle_line.count("stream-")
+    assert idle_line.endswith(f"stream-{shown_count:02d} and {60 - shown_count} more")
+    assert len(idle_line) <= 400

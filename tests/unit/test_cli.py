@@ -1023,24 +1023,41 @@ def _use_slack(monkeypatch: pytest.MonkeyPatch) -> _RecordingSlack:
     return slack
 
 
-def test_sessions_posts_the_table_to_a_thread(
+def test_sessions_posts_a_short_list_to_a_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    summary = _summary().model_copy(update={"last_ask": "fix the login page"})
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [summary])
+    summary = _summary().model_copy(
+        update={
+            "last_ask": "fix the login page",
+            "thread_ts": "1700000000.000200",
+            "thread_channel": "C000TEST",
+        }
+    )
+    orchestrator = _summary().model_copy(update={"address": "t1", "name": "pan-orchestrator"})
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map: [summary, orchestrator]
+    )
     slack = _use_slack(monkeypatch)
+    slack.permalinks["1700000000.000200"] = "https://example.slack.com/archives/C000TEST/p1"
 
     result = runner.invoke(
-        cli.app, ["sessions", "--thread", "1700000000.000100", "--channel", "C0TEST"]
+        cli.app, ["sessions", "--thread", "1700000000.000100", "--channel", "C000TEST"]
     )
 
     assert result.exit_code == 0
     assert result.stdout == ""
     ((channel, thread_ts, text),) = slack.posts
-    assert (channel, thread_ts) == ("C0TEST", "1700000000.000100")
-    assert text.startswith("```\nTERMINAL")
-    assert text.endswith("fix the login page\n```")
+    assert (channel, thread_ts) == ("C000TEST", "1700000000.000100")
+    assert text == (
+        "*1 session*\n"
+        "*Working*\n"
+        "• *pan-a* · <https://example.slack.com/archives/C000TEST/p1|thread>\n"
+        "    _fix the login page_\n"
+        "_Full details: run `pan sessions` on the Mac._"
+    )
+    assert "t12" not in text
+    assert "pan-orchestrator" not in text
 
 
 def test_check_command_posts_through_the_thread_map(

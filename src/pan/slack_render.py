@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pan.config import STATUS_LABEL_MAX_LENGTH
+from pan.config import (
+    SESSION_LAST_ASK_MAX_LENGTH,
+    SESSIONS_COMPACT_LINE_MAX_LENGTH,
+    STATUS_LABEL_MAX_LENGTH,
+)
 from pan.models import (
     AgentStatus,
+    SessionSummary,
     StatusState,
     Terminal,
     TerminalState,
@@ -163,4 +169,132 @@ def private_details_text(record: ThreadRecord) -> str:
     lines.append(_inbox_line(record))
     if record.terminal_address:
         lines.append(f"Terminal: {escape_mrkdwn(record.terminal_address)}")
+    return "\n".join(lines)
+
+
+# `@pan sessions` in Slack: one line per session, grouped by state, needs-action first. The
+# text is GFM (**bold**), turned into Slack mrkdwn at the single egress (slack_post).
+SESSIONS_IDLE_TITLE = "Idle"
+SESSIONS_GROUP_ORDER: tuple[str, ...] = (
+    STATUS_TITLES[StatusState.WAITING],
+    STATUS_TITLES[StatusState.WORKING],
+    SESSIONS_IDLE_TITLE,
+    STATUS_TITLES[StatusState.FINISHED],
+    STATUS_TITLES[StatusState.STOPPED],
+)
+# Groups that need no action are listed on one line each, names only.
+SESSIONS_COMPACT_GROUPS = frozenset(
+    {
+        SESSIONS_IDLE_TITLE,
+        STATUS_TITLES[StatusState.FINISHED],
+        STATUS_TITLES[StatusState.STOPPED],
+    }
+)
+# A Herdr location's tab number ("jiracli-generate / 1"), which says nothing to a reader.
+_WHERE_TAB_NUMBER = re.compile(r" / \d+$")
+SESSIONS_FOOTER = "_Full details: run `pan sessions` on the Mac._"
+SESSIONS_EMPTY_TEXT = "No sessions running."
+
+_SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
+    AgentStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
+    AgentStatus.WORKING: STATUS_TITLES[StatusState.WORKING],
+    AgentStatus.IDLE: SESSIONS_IDLE_TITLE,
+    AgentStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
+    AgentStatus.ERROR: STATUS_TITLES[StatusState.STOPPED],
+}
+# For an agent hc reports no known status for: what pan recorded.
+_SESSIONS_GROUP_FOR_PAN_STATUS: dict[WorkerStatus, str] = {
+    WorkerStatus.SPAWNING: STATUS_TITLES[StatusState.WORKING],
+    WorkerStatus.RUNNING: STATUS_TITLES[StatusState.WORKING],
+    WorkerStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
+    WorkerStatus.IDLE: SESSIONS_IDLE_TITLE,
+    WorkerStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
+    WorkerStatus.FAILED: STATUS_TITLES[StatusState.STOPPED],
+}
+
+
+def session_group(summary: SessionSummary) -> str | None:
+    # The group a session is listed under; None for a terminal with no agent running (a
+    # plain shell), unless it is a pan worker still booting. An unknown agent status falls
+    # back to pan's record, else counts as working.
+    group = _SESSIONS_GROUP_FOR_AGENT.get(summary.agent_status)
+    if group is not None:
+        return group
+    if summary.agent_status is AgentStatus.NONE:
+        booting = summary.pan_status is WorkerStatus.SPAWNING
+        return STATUS_TITLES[StatusState.WORKING] if booting else None
+    if summary.pan_status is not None:
+        return _SESSIONS_GROUP_FOR_PAN_STATUS[summary.pan_status]
+    return STATUS_TITLES[StatusState.WORKING]
+
+
+def listed_sessions(
+    summaries: list[SessionSummary], orchestrator_name: str
+) -> list[SessionSummary]:
+    # The sessions Slack lists: not pan's own orchestrator, not plain shells.
+    return [
+        summary
+        for summary in summaries
+        if summary.name != orchestrator_name and session_group(summary) is not None
+    ]
+
+
+def session_display_name(summary: SessionSummary) -> str:
+    # Words, never an address or a path: the task label, the Inbox thread, the terminal name,
+    # the Herdr location without its tab number, then the folder name.
+    where = _WHERE_TAB_NUMBER.sub("", summary.where) if summary.where else None
+    return summary.label or summary.inbox_thread_name or summary.name or where or summary.cwd.name
+
+
+def _compact_group_line(group: str, members: list[SessionSummary]) -> str:
+    # `**Idle (21):** a, b, c`, names only; past the length limit the rest is counted.
+    prefix = f"**{group} ({len(members)}):** "
+    names = [escape_mrkdwn(session_display_name(summary)) for summary in members]
+    shown: list[str] = []
+    for index, name in enumerate(names):
+        remaining = len(names) - index - 1
+        tail = f" and {remaining} more" if remaining else ""
+        candidate = prefix + ", ".join([*shown, name]) + tail
+        if shown and len(candidate) > SESSIONS_COMPACT_LINE_MAX_LENGTH:
+            break
+        shown.append(name)
+    hidden_count = len(names) - len(shown)
+    line = prefix + ", ".join(shown)
+    return f"{line} and {hidden_count} more" if hidden_count else line
+
+
+def _session_lines(summary: SessionSummary, permalinks: dict[str, str]) -> list[str]:
+    line = f"• **{escape_mrkdwn(session_display_name(summary))}**"
+    link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
+    if link:
+        line += f" · <{link}|thread>"
+    lines = [line]
+    if summary.last_ask:
+        lines.append(
+            f"    _{escape_mrkdwn(status_label(summary.last_ask, SESSION_LAST_ASK_MAX_LENGTH))}_"
+        )
+    return lines
+
+
+def render_sessions_for_slack(
+    summaries: list[SessionSummary], permalinks: dict[str, str], *, orchestrator_name: str
+) -> str:
+    # `permalinks` maps a session's thread_ts to its thread's link; a session without one is
+    # listed without a link.
+    listed = listed_sessions(summaries, orchestrator_name)
+    if not listed:
+        return SESSIONS_EMPTY_TEXT
+    noun = "session" if len(listed) == 1 else "sessions"
+    lines = [f"**{len(listed)} {noun}**"]
+    for group in SESSIONS_GROUP_ORDER:
+        members = [summary for summary in listed if session_group(summary) == group]
+        if not members:
+            continue
+        if group in SESSIONS_COMPACT_GROUPS:
+            lines.append(_compact_group_line(group, members))
+            continue
+        lines.append(f"**{group}**")
+        for summary in members:
+            lines.extend(_session_lines(summary, permalinks))
+    lines.append(SESSIONS_FOOTER)
     return "\n".join(lines)

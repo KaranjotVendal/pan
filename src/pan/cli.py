@@ -17,7 +17,7 @@ from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.adapters.launchd import build_service_manager
 from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.adapters.terminal_host import build_terminal_host
-from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.confirmations import (
     FilePendingConfirmations,
     OpenQuestions,
@@ -93,6 +93,7 @@ from pan.session_control import (
     send_to_session,
 )
 from pan.sessions import collect_sessions, worker_status_for
+from pan.slack_render import listed_sessions, render_sessions_for_slack
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.status_message import publish_status
 from pan.threadmap import FileThreadMap, tie_note
@@ -588,7 +589,7 @@ def sessions(
 ) -> None:
     """List all live hc terminals with the last thing each was asked, reconciled against the
     pan thread map, flagging status drift. --json emits the SessionSummary list; --thread and
-    --channel post the table to that Slack thread as is."""
+    --channel post a short list of the sessions, grouped by state, to that Slack thread."""
     config = _config()
     summaries = collect_sessions(
         build_terminal_host(config.terminal_host),
@@ -597,13 +598,23 @@ def sessions(
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
-    table = _render_sessions_table(summaries)
     if thread is not None and channel is not None:
+        slack = _slack_adapter(config)
+        orchestrator_name = config.orchestrator.terminal
+        permalinks: dict[str, str] = {}
+        for summary in listed_sessions(summaries, orchestrator_name):
+            if summary.thread_ts and summary.thread_channel:
+                link = slack.permalink(summary.thread_channel, summary.thread_ts)
+                if link:
+                    permalinks[summary.thread_ts] = link
         slack_post_parts(
-            _slack_adapter(config), channel, thread, f"{CODE_FENCE}\n{table}\n{CODE_FENCE}"
+            slack,
+            channel,
+            thread,
+            render_sessions_for_slack(summaries, permalinks, orchestrator_name=orchestrator_name),
         )
         return
-    typer.echo(table)
+    typer.echo(_render_sessions_table(summaries))
 
 
 def _slack_adapter(config: PanConfig) -> BoltSlackAdapter:

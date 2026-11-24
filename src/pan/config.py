@@ -79,6 +79,9 @@ WORKER_BRIEF_TASK_MARKER = "\n\nTask:\n"
 SLACK_READ_THREAD_TOOL_NAME = "mcp__plugin_slack_slack__slack_read_thread"
 # `pan sessions` shows the last thing each session was asked on one line, cut to this length.
 SESSION_LAST_ASK_MAX_LENGTH = 80
+# `@pan sessions` in Slack lists a quiet group (idle, finished, stopped) on one line, cut to
+# about this length with "and N more".
+SESSIONS_COMPACT_LINE_MAX_LENGTH = 400
 
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.

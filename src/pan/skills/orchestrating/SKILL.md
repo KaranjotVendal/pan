@@ -132,8 +132,8 @@ it posts a one-line reply saying so. Touch no session.
 
     pan sessions --thread <thread_ts> --channel <channel>
 
-It posts the table of every live terminal (name, idle or busy, pan-owned or not, last ask) to the
-thread. `directive.mode == "sessions"` covers the older spellings (`--sessions`, "what's running").
+It posts a short list of the live sessions to the thread, grouped by state (waiting for you,
+working, idle, finished, stopped), each with its task, a link to its Slack thread and its last ask. `directive.mode == "sessions"` covers the older spellings (`--sessions`, "what's running").
 Touch no session.
 
 ### (r4) `route.kind == "forget"` — untie the thread

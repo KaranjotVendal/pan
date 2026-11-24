@@ -316,3 +316,27 @@ def test_collect_sessions_shows_the_inbox_thread_pan_knows(
     )
 
     assert summary.inbox_thread_name == expected
+
+
+@pytest.mark.parametrize("status_label", ["Google Doc for the plan", None])
+def test_collect_sessions_carries_the_thread_channel_and_label(status_label: str | None) -> None:
+    record = _record("t-1", "pan-a", "t12", "/tmp/worktree").model_copy(
+        update={"status_label": status_label}
+    )
+
+    (summary,) = collect_sessions(
+        _terminal_host_with(make_terminal("t12", name="pan-a", cwd=Path("/tmp/worktree"))),
+        FakeThreadMap([record]),
+    )
+
+    assert summary.thread_channel == "C1"
+    assert summary.label == status_label
+
+
+def test_collect_sessions_leaves_the_thread_channel_and_label_blank_without_a_record() -> None:
+    (summary,) = collect_sessions(
+        _terminal_host_with(make_terminal("t12", name="desk-api")), FakeThreadMap([])
+    )
+
+    assert summary.thread_channel is None
+    assert summary.label is None
