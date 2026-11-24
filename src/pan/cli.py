@@ -6,6 +6,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from pydantic import SecretStr
@@ -304,33 +305,42 @@ def _record_drained(config: PanConfig, items: list[InboxItem], now: datetime) ->
         logger.warning(f"could not record the drained items: {type(e).__name__}")
 
 
-def _newest_drained_item(config: PanConfig, item_id: str | None) -> InboxItem | None:
-    # The item as pan drained it, only while it is the newest message pan drained in its
-    # thread and channel: an older message cannot authorize what a later one may have changed.
-    if item_id is None:
-        return None
-    drained_log = _drained_log(config)
-    item = drained_log.get(item_id)
-    if item is None:
-        logger.info(f"no drained item id={item_id}")
-        return None
-    newest = drained_log.newest_in(item.thread_ts, item.channel)
-    if newest is None or newest.id != item.id:
-        logger.info(f"drained item id={item_id} is not the newest in thread={item.thread_ts}")
-        return None
-    return item
+# Posted when an action is refused because the message it rests on (--item) cannot be used:
+# unknown, not the sender's newest in the thread, or not from the requester. No session names
+# or paths, so it is safe in any thread.
+UNUSABLE_ITEM_REPLY = "I couldn't act on that message; please send the request again."
 
 
 def _drained_item(
     config: PanConfig, item_id: str | None, thread: str, channel: str
 ) -> InboxItem | None:
-    # The newest drained item, only when it was sent in this thread and channel.
-    item = _newest_drained_item(config, item_id)
+    # The item as pan drained it, only when it was sent in this thread and channel and is the
+    # newest message pan drained there from the same sender: an older message cannot authorize
+    # what the sender's later one may have changed, while someone else's "+1" changes nothing.
+    if item_id is None:
+        return None
+    drained_log = _drained_log(config)
+    item = drained_log.get(item_id)
     if item is None or item.thread_ts != thread or item.channel != channel:
-        if item is not None:
-            logger.info(f"drained item id={item_id} is not from thread={thread}")
+        logger.info(f"no drained item id={item_id} in thread={thread}")
+        return None
+    newest = drained_log.newest_in(thread, channel, item.slack_user)
+    if newest is None or newest.id != item.id:
+        logger.info(f"drained item id={item_id} is not its sender's newest in thread={thread}")
         return None
     return item
+
+
+def _refuse_unusable_item(
+    config: PanConfig, thread: str, channel: str, error: PanError
+) -> NoReturn:
+    # Says so in the thread, so a refusal is never silent, then raises `error`. A failed post
+    # is only logged: the refusal and its exit code stand either way.
+    try:
+        slack_post(_slack_adapter(config), channel, thread, UNUSABLE_ITEM_REPLY)
+    except (CredentialsError, SlackPostError) as e:
+        logger.warning(f"could not post the refusal thread={thread}: {type(e).__name__}")
+    raise error
 
 
 def _refuse_x(thread_map: ThreadMap, thread: str, item: InboxItem | None) -> None:
@@ -825,23 +835,25 @@ def done(
     cleanup exits 30 and keeps the thread tied for a retry; a folder pan never removes (outside
     the worktree folder, or a main repository) exits 31. With the worktree folder already gone
     it still deletes the branch. A session pan did not start is only untied, never closed.
-    --discard needs --item: the newest message pan drained in this thread, sent by the
-    thread's requester, and exactly done --discard; otherwise nothing is touched or posted and
-    it exits 33."""
+    --discard needs --item: the thread requester's newest message pan drained in this thread,
+    exactly done --discard; otherwise nothing is touched and it exits 33 (an unusable item also
+    gets a one-line reply asking to send the request again)."""
     config = _config()
     if discard:
         drained = _drained_item(config, item, thread, channel)
         record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
+        refusal = DiscardNotRequestedError(
+            f"--discard refused for thread {thread}: its requester did not send done --discard"
+        )
         if (
             drained is None
             or record is None
             or record.requester is None
             or drained.slack_user != record.requester
-            or not asks_to_discard(drained.raw_text)
         ):
-            raise DiscardNotRequestedError(
-                f"--discard refused for thread {thread}: its requester did not send done --discard"
-            )
+            _refuse_unusable_item(config, thread, channel, refusal)
+        if not asks_to_discard(drained.raw_text):
+            raise refusal
     done_thread(
         thread_ts=thread,
         channel=channel,
@@ -893,11 +905,11 @@ def send(
     drained = _drained_item(config, item, thread, channel)
     _refuse_x(thread_map, thread, drained)
     if to is not None:
-        if (
-            drained is None
-            or (requester is not None and drained.slack_user != requester)
-            or not names_selector(drained.raw_text, to)
-        ):
+        if drained is None or (requester is not None and drained.slack_user != requester):
+            _refuse_unusable_item(
+                config, thread, channel, NoExactMatchError(f"item {item} cannot be used")
+            )
+        if not names_selector(drained.raw_text, to):
             logger.info(f"selector not in the person's drained message thread={thread}")
             raise NoExactMatchError(f"'{to}' is not named in the person's message")
         requester = drained.slack_user
@@ -954,13 +966,18 @@ def propose(
     28. One candidate: "Send this to <session>? Reply yes."; several: a numbered list to pick
     1-3 from. Nothing is typed into any session until the requester replies. Candidates that
     are not live terminal addresses are dropped; with none left it says no session matches.
-    --item must be the newest message pan drained in this thread, from --requester; otherwise
-    nothing is asked and it exits 28. A thread from X exits 35: X may only start new sessions."""
+    --item must be --requester's newest message pan drained in this thread; otherwise nothing
+    is asked, a one-line reply asks to send the request again, and it exits 28. A thread from X exits 35: X may only start new sessions."""
     config = _config()
     drained = _drained_item(config, item, thread, channel)
     _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), thread, drained)
     if drained is None or drained.slack_user != requester:
-        raise NoExactMatchError(f"no message from {requester} to propose for in thread {thread}")
+        _refuse_unusable_item(
+            config,
+            thread,
+            channel,
+            NoExactMatchError(f"no message from {requester} to propose for in thread {thread}"),
+        )
     propose_sessions(
         thread_ts=thread,
         channel=channel,
@@ -1026,18 +1043,24 @@ _TARGET_HELP = "session selector: hc address | terminal name | Herdr app space l
 def relay(
     target: str = typer.Argument(..., help=_TARGET_HELP),
     message: str = typer.Argument(..., help="text to send into the target terminal"),
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
     item: str = typer.Option(
         ..., "--item", help="the inbox item id (item.id) of the person's message"
     ),
 ) -> None:
-    """Relay a message into a live terminal (pan-owned or external). --item must be the newest
-    message pan drained in its thread and hold the target as a whole word or phrase; otherwise
-    nothing is sent and it exits 28. A thread from X exits 35."""
+    """Relay a message into a live terminal (pan-owned or external). --item must be its
+    sender's newest message pan drained in this thread (otherwise a one-line reply asks to send
+    the request again) and hold the target as a whole word or phrase; otherwise nothing is sent
+    and it exits 28. A thread from X exits 35."""
     config = _config()
-    drained = _newest_drained_item(config, item)
-    if drained is not None:
-        _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), drained.thread_ts, drained)
-    if drained is None or not names_selector(drained.raw_text, target):
+    drained = _drained_item(config, item, thread, channel)
+    _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), thread, drained)
+    if drained is None:
+        _refuse_unusable_item(
+            config, thread, channel, NoExactMatchError(f"item {item} cannot be used")
+        )
+    if not names_selector(drained.raw_text, target):
         logger.info(f"relay target not in the person's drained message item={item}")
         raise NoExactMatchError(f"'{target}' is not named in the person's message")
     terminal_host = build_terminal_host(config.terminal_host)

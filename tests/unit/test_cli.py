@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 import pan.cli as cli
 from pan.adapters.hc import HcError, ShellHcAdapter
 from pan.confirmations import FilePendingConfirmations, confirmations_path
+from pan.directive import asks_to_discard
 from pan.drained import FileDrainedLog, drained_log_path
 from pan.errors import (
     ConfigMissingError,
@@ -488,6 +489,9 @@ def test_sessions_table_shows_the_inbox_thread_under_its_session(
     assert "external" in lines[3]
 
 
+_RELAY_IN_THREAD = ["--thread", "1700000000.000100", "--channel", "C000TEST"]
+
+
 def _live_terminal_host() -> FakeTerminalHost:
     terminal_host = FakeTerminalHost()
     terminal_host.add(make_terminal("t3", where="web / codex"))
@@ -504,7 +508,8 @@ def test_relay_echoes_resolved_name_and_address(
     terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(
-        cli.app, ["relay", "pan-backend", "re-run the failing test", "--item", "Ev1"]
+        cli.app,
+        ["relay", "pan-backend", "re-run the failing test", *_RELAY_IN_THREAD, "--item", "Ev1"],
     )
 
     assert result.exit_code == 0
@@ -533,23 +538,24 @@ def test_relay_failures_propagate_typed_errors(
     terminal_host.errors.update(terminal_host_errors)
     _use_terminal_host(monkeypatch, terminal_host)
 
-    result = runner.invoke(cli.app, ["relay", selector, "hi", "--item", "Ev1"])
+    result = runner.invoke(cli.app, ["relay", selector, "hi", *_RELAY_IN_THREAD, "--item", "Ev1"])
 
     assert isinstance(result.exception, expected_error)
     assert terminal_host.sent == []
 
 
 @pytest.mark.parametrize(
-    "drained_texts, item_args, expected_error",
+    "drained_texts, item_args, expected_error, item_unusable",
     [
-        (["<@U000BOT> relay pan-backend hi"], [], None),
-        (["<@U000BOT> relay pan-backend hi"], ["--item", "Ev9"], NoExactMatchError),
-        (["<@U000BOT> relay pan-backen hi"], ["--item", "Ev1"], NoExactMatchError),
-        (["<@U000BOT> tell the backend one hi"], ["--item", "Ev1"], NoExactMatchError),
+        (["<@U000BOT> relay pan-backend hi"], [], None, False),
+        (["<@U000BOT> relay pan-backend hi"], ["--item", "Ev9"], NoExactMatchError, True),
+        (["<@U000BOT> relay pan-backen hi"], ["--item", "Ev1"], NoExactMatchError, False),
+        (["<@U000BOT> tell the backend one hi"], ["--item", "Ev1"], NoExactMatchError, False),
         (
             ["<@U000BOT> relay pan-backend hi", "<@U000BOT> actually, wait"],
             ["--item", "Ev1"],
             NoExactMatchError,
+            True,
         ),
     ],
     ids=["no-item", "unknown-item", "typo", "described-not-named", "not-the-newest"],
@@ -560,13 +566,17 @@ def test_relay_sends_only_to_a_session_the_person_named(
     drained_texts: list[str],
     item_args: list[str],
     expected_error: type[PanError] | None,
+    item_unusable: bool,
 ) -> None:
+    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if item_unusable else []
     config = _use_config(monkeypatch, tmp_path)
     for index, text in enumerate(drained_texts, start=1):
         _drained(config, text, event_id=f"Ev{index}")
     terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
-    result = runner.invoke(cli.app, ["relay", "pan-backend", "hi", *item_args])
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["relay", "pan-backend", "hi", *_RELAY_IN_THREAD, *item_args])
 
     if expected_error is None:
         assert result.exit_code != 0
@@ -574,6 +584,7 @@ def test_relay_sends_only_to_a_session_the_person_named(
         assert isinstance(result.exception, expected_error)
         assert cli._exit_code_for(result.exception) == 28
     assert terminal_host.sent == []
+    assert [text for _channel, _thread, text in slack.posts] == expected_posts
 
 
 def test_read_recent_echoes_raw_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1409,7 +1420,10 @@ def test_done_command_refuses_discard_the_person_did_not_send(
     assert isinstance(result.exception, DiscardNotRequestedError)
     assert cli._exit_code_for(result.exception) == 33
     assert terminal_host.removed == []
-    assert slack.posts == []
+    # An unusable item gets a one-line reply; a message that is not `done --discard` gets none.
+    unusable = asks_to_discard(drained_text)
+    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if unusable else []
+    assert [text for _channel, _thread, text in slack.posts] == expected_posts
 
 
 def test_done_command_keeps_a_worktree_with_unsaved_work(
@@ -1592,8 +1606,8 @@ def test_send_command_to_a_session_refuses_without_the_persons_recorded_message(
         ([*_FOLLOW_UP, "--item", "Ev1"], True, False),
         ([*_PROPOSE, "--item", "Ev1"], True, False),
         ([*_PROPOSE, "--item", "Ev1"], False, True),
-        (["relay", "pan-7", "hi", "--item", "Ev1"], True, False),
-        (["relay", "pan-7", "hi", "--item", "Ev1"], False, True),
+        (["relay", "pan-7", "hi", *_RELAY_IN_THREAD, "--item", "Ev1"], True, False),
+        (["relay", "pan-7", "hi", *_RELAY_IN_THREAD, "--item", "Ev1"], False, True),
         (["reopen", "--thread", _GATE_THREAD, "--task", "more"], False, True),
         (["reopen", "--thread", _GATE_THREAD, "--task", "more", "--item", "Ev1"], True, False),
     ],
@@ -1885,6 +1899,65 @@ def test_propose_command_refuses_without_the_requesters_newest_message(
     assert result.exit_code != 0
     if item_args:
         assert isinstance(result.exception, NoExactMatchError)
+    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if item_args else []
+    assert [text for _channel, _thread, text in slack.posts] == expected_posts
+
+
+@pytest.mark.parametrize(
+    "arguments, stubbed, drained_text",
+    [
+        (
+            _send_to("pan-7", "--item", "Ev1"),
+            "send_to_session",
+            "<@U000BOT> to pan-7: add the tests",
+        ),
+        ([*_PROPOSE, "--item", "Ev1"], "propose_sessions", "<@U000BOT> to pan docs: add the tests"),
+        (
+            ["relay", "pan-7", "hi", *_RELAY_IN_THREAD, "--item", "Ev1"],
+            "relay_to_session",
+            "<@U000BOT> relay pan-7 hi",
+        ),
+        (
+            [
+                "done",
+                "--thread",
+                _GATE_THREAD,
+                "--channel",
+                "C000TEST",
+                "--discard",
+                "--item",
+                "Ev1",
+            ],
+            "done_thread",
+            "<@U000BOT> done --discard",
+        ),
+    ],
+    ids=["send-to", "propose", "relay", "done-discard"],
+)
+def test_a_later_message_from_someone_else_does_not_block_the_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: list[str],
+    stubbed: str,
+    drained_text: str,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _tie_gate_thread(config)
+    _drained(config, drained_text)
+    _drained(config, "+1", event_id="Ev2", slack_user="U000OTHER")
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(cli, stubbed, lambda *args, **kwargs: calls.append(stubbed))
+    if stubbed == "relay_to_session":
+        monkeypatch.setattr(
+            cli, stubbed, lambda *args, **kwargs: calls.append(stubbed) or make_terminal("t7")
+        )
+
+    result = runner.invoke(cli.app, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert calls == [stubbed]
     assert slack.posts == []
 
 

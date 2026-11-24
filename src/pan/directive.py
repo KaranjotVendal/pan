@@ -73,9 +73,13 @@ _DECLINE_PHRASE = re.compile(
     r"don'?t send|do not send)\b",
     re.IGNORECASE,
 )
-# A reply saying yes starts with one of these words or phrases (any letter case).
-_YES_START = re.compile(
-    r"^(?:yes|y|yep|yup|yeah|yea|sure|ok|okay|go|go ahead|send it|do it|please do)(?![\w-])",
+# A reply saying yes is a yes word, followed by nothing but punctuation, more yes words and
+# polite filler (any letter case): "yes", "ok, thanks!", "yep send it please". Anything else
+# ("ok which one is that?", "go with the docs one instead") is not a yes.
+_YES_WORDS = r"yes|y|yep|yup|yeah|yea|sure|ok|okay"
+_YES_FILLER = r"please|thanks|thank you|thx|go ahead|send it|do it|that one|" + _YES_WORDS
+_YES_REPLY = re.compile(
+    rf"^(?:{_YES_WORDS}|go ahead|send it|do it|go)(?:[\s.,!]*\b(?:{_YES_FILLER})\b)*[\s.,!:)]*$",
     re.IGNORECASE,
 )
 # A reply picking a number starts with it, alone or as `#N`, before any other word.
@@ -102,7 +106,7 @@ def is_decline(answer_text: str) -> bool:
 
 
 def says_yes(answer_text: str) -> bool:
-    return _YES_START.search(clean_message(answer_text)) is not None
+    return _YES_REPLY.match(clean_message(answer_text)) is not None
 
 
 def picks_number(answer_text: str, number: str) -> bool:

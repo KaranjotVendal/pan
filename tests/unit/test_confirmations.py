@@ -16,6 +16,7 @@ from pan.confirmations import (
     candidate_label,
     confirm_session,
     is_answer,
+    live_pending,
     normalize_choice,
     propose_sessions,
     question_text,
@@ -594,3 +595,31 @@ def test_propose_records_when_it_asked(tmp_path: Path) -> None:
 
     assert pending is not None
     assert pending.asked_at == _ASKED_AT
+
+
+@pytest.mark.parametrize(
+    "minutes_after_first_ask, asked_again_minutes, expected_live",
+    [(29, None, True), (31, None, False), (31, 20, True), (51, 20, False)],
+    ids=["within-first-window", "first-window-over", "re-ask-extends", "extended-window-over"],
+)
+def test_question_expiry_counts_from_when_pan_last_asked(
+    tmp_path: Path,
+    minutes_after_first_ask: int,
+    asked_again_minutes: int | None,
+    expected_live: bool,
+) -> None:
+    asked_again_at = (
+        _ASKED_AT + timedelta(minutes=asked_again_minutes)
+        if asked_again_minutes is not None
+        else None
+    )
+    question = _question(_PAN_CANDIDATE, answer=None, asked_again_at=asked_again_at)
+    now = _ASKED_AT + timedelta(minutes=minutes_after_first_ask)
+
+    assert (live_pending(question, now) is not None) is expected_live
+
+    # put() keeps a question that is still live when another is stored.
+    store = _store(tmp_path)
+    store.put(question)
+    store.put(_question(_DOCS_CANDIDATE, thread_ts="1700000000.000999", asked_at=now))
+    assert (store.get(ThreadSource.SLACK, _THREAD) is not None) is expected_live

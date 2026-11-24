@@ -97,11 +97,11 @@ class FilePendingConfirmations:
     def put(self, pending: PendingConfirmation) -> None:
         # Replaces the thread's question, and drops every question that had expired by the
         # time this one was asked, so the file stays small.
-        oldest_live = pending.created_at - CONFIRMATION_TIMEOUT
+        oldest_live = pending.last_asked_at() - CONFIRMATION_TIMEOUT
         pending_by_key = {
             key: stored
             for key, stored in self._read_all().items()
-            if stored.created_at > oldest_live
+            if stored.last_asked_at() > oldest_live
         }
         pending_by_key[_key(pending.source, pending.thread_ts)] = pending
         self._write_all(pending_by_key)
@@ -149,8 +149,9 @@ class FilePendingConfirmations:
 
 
 def live_pending(pending: PendingConfirmation | None, now: datetime) -> PendingConfirmation | None:
-    # The question, unless it has expired.
-    if pending is None or now - pending.created_at >= CONFIRMATION_TIMEOUT:
+    # The question, unless it has expired. Measured from when pan last asked, so asking again
+    # keeps the question open longer.
+    if pending is None or now - pending.last_asked_at() >= CONFIRMATION_TIMEOUT:
         return None
     return pending
 

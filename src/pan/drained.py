@@ -72,9 +72,13 @@ class FileDrainedLog:
                 return item
         return None
 
-    def newest_in(self, thread_ts: str, channel: str) -> InboxItem | None:
-        # The item drained last in the thread and channel, or None.
+    def newest_in(self, thread_ts: str, channel: str, slack_user: str) -> InboxItem | None:
+        # The item the sender sent last in the thread and channel, of those drained, or None.
         for item in reversed(self._read_all()):
-            if item.thread_ts == thread_ts and item.channel == channel:
+            if (
+                item.thread_ts == thread_ts
+                and item.channel == channel
+                and item.slack_user == slack_user
+            ):
                 return item
         return None

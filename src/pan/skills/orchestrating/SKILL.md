@@ -49,8 +49,10 @@ person can ask for a check. On a follow-up or reopen it switches the thread to S
 
 Quote free text in single quotes, writing each `'` inside as `'\''`. `<thread>`, `<channel>` and
 `<requester>` are `item.thread_ts`, `item.channel` and `item.slack_user`; `--item <item.id>` lets pan
-check the person's own message. It must be the newest entry in its thread: if a later entry in this
-drain is in the same thread, act on that one instead.
+check the person's own message. It must be that person's newest entry in the thread: if they sent a
+later entry in this drain, act on that one instead. When pan cannot use the item it says so in the
+thread itself ("I couldn't act on that message; please send the request again."): do nothing more,
+and never retry with a different item.
 
 **Start a new session** (untied thread, or the person asked for a new one; the tie moves):
 
@@ -92,11 +94,12 @@ most likely session, or up to 3 if several fit about equally, most likely first,
     pan propose --thread <thread> --channel <channel> --to '<name as typed>' --task '<task>' --requester <requester> --item <item.id> [--reply-in-slack] [--candidate <address> ...]
 
 It asks the person in the thread and types nothing; their reply arrives as a new item. Exit 28:
-`--item` is not the requester's newest message in the thread; do nothing more.
+`--item` is not the requester's newest message in the thread; pan already said so.
 
 **Answer to an open question** (`open_question` set and `answered_by_requester` true). Read
-`answer_text`: when it starts with yes (yes, y, yep, yeah, sure, ok, go ahead, send it), or starts
-with a candidate's number ("2", "2 please", "#2"), run
+`answer_text`: when it is a plain yes (yes, y, yep, yeah, sure, ok, go ahead, send it, with at most
+"please", "thanks" or "that one" after it), or starts with a candidate's number ("2", "2 please",
+"#2"), run
 
     pan confirm --thread <thread> --channel <channel> --choice <yes|1|2|3>
 
@@ -127,7 +130,7 @@ Exit 32: the private message failed; post "I couldn't send you the sessions list
 pan posts its own reply in every case. Exit 29: unsaved work, kept. Exit 26 or 23: busy or waiting.
 Exit 30: git cleanup failed; the person can say done again. Exit 31: a folder pan never removes.
 Exit 33: `--discard` refused: the message was not exactly `done --discard`, not from the person who
-started the thread's session, or not their newest; do not retry. A session pan did not
+started the thread's session, or not their newest (pan says so in the thread then); do not retry. A session pan did not
 start is only untied. Never use `pan stop` for done; it is the kill switch.
 
 **Read a session**: `pan read '<name>'` prints its recent lines. Summarize them in a few lines and
@@ -138,7 +141,7 @@ the matching names (never addresses) and ask which one.
 
 **Relay** a one-off message into a live session the person names; ties nothing:
 
-    pan relay '<name>' '<message>' --item <item.id>
+    pan relay '<name>' '<message>' --thread <thread> --channel <channel> --item <item.id>
 
 `<name>` is the name exactly as the person typed it. Then post a short ack ("sent to <name>") with `pan slack-post`. Exit 20: no session has that name.
 Exit 28: the name is not in their message; ask which session they mean. Exit 35: a thread from X.

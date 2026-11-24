@@ -176,6 +176,15 @@ def test_is_decline(answer_text: str, expected: bool) -> None:
         ("not yet", False),
         ("yesterday's one", False),
         ("i guess yes", False),
+        ("ok, thanks!", True),
+        ("yep send it please", True),
+        ("yes yes", True),
+        ("do it please", True),
+        ("ok which one is that?", False),
+        ("go with the docs one instead", False),
+        ("yes, but not that one", False),
+        ("sure, after lunch", False),
+        ("goat", False),
     ],
 )
 def test_says_yes(answer_text: str, expected: bool) -> None:

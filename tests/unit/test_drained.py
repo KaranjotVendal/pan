@@ -73,24 +73,26 @@ def test_drained_log_reads_a_damaged_file_as_empty(tmp_path: Path, contents: byt
 
 
 @pytest.mark.parametrize(
-    "thread_ts, channel, expected_id",
+    "thread_ts, channel, slack_user, expected_id",
     [
-        ("1700000000.000100", "C000TEST", "Ev3"),
-        ("1700000000.000200", "C000TEST", "Ev2"),
-        ("1700000000.000100", "C000OTHER", None),
+        ("1700000000.000100", "C000TEST", "U000TEST", "Ev3"),
+        ("1700000000.000100", "C000TEST", "U000OTHER", "Ev4"),
+        ("1700000000.000200", "C000TEST", "U000TEST", "Ev2"),
+        ("1700000000.000100", "C000OTHER", "U000TEST", None),
+        ("1700000000.000100", "C000TEST", "U000NOBODY", None),
     ],
-    ids=["newest-of-two", "other-thread", "other-channel"],
+    ids=["senders-newest", "another-sender", "other-thread", "other-channel", "no-such-sender"],
 )
-def test_drained_log_newest_in_a_thread(
-    tmp_path: Path, thread_ts: str, channel: str, expected_id: str | None
+def test_drained_log_newest_in_a_thread_from_a_sender(
+    tmp_path: Path, thread_ts: str, channel: str, slack_user: str, expected_id: str | None
 ) -> None:
     log = _log(tmp_path)
     log.record(
         [_item("Ev1"), _item("Ev2").model_copy(update={"thread_ts": "1700000000.000200"})], _NOW
     )
-    log.record([_item("Ev3")], _NOW)
+    log.record([_item("Ev3"), _item("Ev4").model_copy(update={"slack_user": "U000OTHER"})], _NOW)
 
-    newest = log.newest_in(thread_ts, channel)
+    newest = log.newest_in(thread_ts, channel, slack_user)
 
     assert (newest.id if newest is not None else None) == expected_id
 
