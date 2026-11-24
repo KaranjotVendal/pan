@@ -297,6 +297,21 @@ def test_sessions_spellings_route_after_a_leading_mention(raw_text: str) -> None
     assert directive.mode is TaskMode.SESSIONS
 
 
+@pytest.mark.parametrize(
+    "raw_text, expected_mode",
+    [
+        ("sessions ocr review", TaskMode.SESSIONS),
+        ("sessions are timing out after login, please investigate", TaskMode.DELEGATE),
+        ("sessions one two three four", TaskMode.DELEGATE),
+    ],
+    ids=["up-to-three-words", "sentence", "four-words"],
+)
+def test_leading_sessions_word_is_a_trigger_only_when_short(
+    raw_text: str, expected_mode: TaskMode
+) -> None:
+    assert parse_directive(raw_text).mode is expected_mode
+
+
 def test_bare_sessions_word_mid_prose_stays_delegate() -> None:
     # The trigger fires only in position 0 (mirrors the leading relay/read grammar), so a
     # `sessions` deeper in a real task is ordinary prose.
@@ -479,6 +494,18 @@ _BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instea
         ("sessions ocr", Route(kind=RouteKind.SESSIONS, text="ocr")),
         ("<@U0TEST> Sessions  OCR review ", Route(kind=RouteKind.SESSIONS, text="OCR review")),
         ("sessions-dashboard fix", Route(text="sessions-dashboard fix")),
+        ("sessions a b c", Route(kind=RouteKind.SESSIONS, text="a b c")),
+        ("sessions a b c d", Route(text="sessions a b c d")),
+        ("sessions ocr?", Route(text="sessions ocr?")),
+        ("sessions ocr, review", Route(text="sessions ocr, review")),
+        (
+            "sessions are timing out after login, please investigate",
+            Route(text="sessions are timing out after login, please investigate"),
+        ),
+        (
+            "sessions keep timing out after login reply in slack",
+            Route(text="sessions keep timing out after login reply in slack", reply_in_slack=True),
+        ),
         ("build the sessions page", Route(text="build the sessions page")),
         ("please check", Route(text="please check")),
         # retired flags

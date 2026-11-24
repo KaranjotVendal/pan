@@ -6,6 +6,7 @@ from typing import Any
 
 from pan.config import (
     CLAUDE_AGENT_NAMES,
+    SESSIONS_MATCH_MIN_WORD_LENGTH,
     SESSIONS_SLACK_MAX_COUNT,
     STATUS_LABEL_MAX_LENGTH,
 )
@@ -193,6 +194,8 @@ _SESSIONS_TIER: dict[str, int] = {
 }
 # A Herdr location's tab number ("jiracli-generate / 1"), which says nothing to a reader.
 _WHERE_TAB_NUMBER = re.compile(r" / \d+$")
+# Splits a field into the tokens a query word is matched against.
+_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 SESSIONS_EMPTY_TEXT = "No sessions running."
 SESSIONS_HEADER = "*Your sessions*"
 
@@ -268,24 +271,35 @@ def session_display_name(summary: SessionSummary) -> str:
 
 
 def match_words(match_text: str | None) -> list[str]:
-    # The words of `@pan sessions <words>`, lowercased, each once, in order.
+    # The words of `@pan sessions <words>`, lowercased, each once, in order; a word shorter
+    # than SESSIONS_MATCH_MIN_WORD_LENGTH matches too much to be useful and is ignored.
     words: list[str] = []
     for word in (match_text or "").lower().split():
-        if word not in words:
+        if len(word) >= SESSIONS_MATCH_MIN_WORD_LENGTH and word not in words:
             words.append(word)
     return words
 
 
 def _matched_word_count(summary: SessionSummary, words: list[str]) -> int:
+    # A word matches a token (a run of letters and digits) that starts with it, so "ocr"
+    # matches "ocr-action" and "api" does not match "rapid".
     fields = [
         session_display_name(summary),
+        summary.name,
         summary.where,
         summary.label,
         summary.inbox_thread_name,
         summary.last_ask,
+        summary.cwd.name,
     ]
-    searchable = " ".join(field for field in fields if field).lower()
-    return sum(1 for word in words if word in searchable)
+    tokens = {
+        token
+        for field in fields
+        if field
+        for token in _NON_ALPHANUMERIC.split(field.lower())
+        if token
+    }
+    return sum(1 for word in words if any(token.startswith(word) for token in tokens))
 
 
 def _recency_key(summary: SessionSummary) -> float:

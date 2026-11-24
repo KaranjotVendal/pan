@@ -81,6 +81,8 @@ SLACK_READ_THREAD_TOOL_NAME = "mcp__plugin_slack_slack__slack_read_thread"
 SESSION_LAST_ASK_MAX_LENGTH = 80
 # `@pan sessions` in Slack lists at most this many sessions, the most relevant first.
 SESSIONS_SLACK_MAX_COUNT = 5
+# `@pan sessions <words>` ignores words shorter than this.
+SESSIONS_MATCH_MIN_WORD_LENGTH = 2
 
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.

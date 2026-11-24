@@ -27,6 +27,7 @@ from pan.errors import (
     NoExactMatchError,
     NotPanSessionError,
     PanError,
+    PrivateMessageError,
     ServiceError,
     SessionBusyError,
     SlackPostError,
@@ -704,6 +705,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (UnsavedWorkError("x"), 29),
         (GitWorktreeError("x"), 30),
         (UnsafeWorktreeError("x"), 31),
+        (PrivateMessageError("x"), 32),
         (PanError("x"), 1),
     ],
 )
@@ -1093,7 +1095,27 @@ def test_sessions_posts_nothing_publicly_when_the_private_list_fails(
 
     result = runner.invoke(cli.app, [*_SESSIONS_IN_THREAD, "--requester", "U000TEST"])
 
-    assert result.exit_code == 0
+    assert isinstance(result.exception, PrivateMessageError)
+    assert cli._exit_code_for(result.exception) == 32
+    assert slack.posts == []
+    assert slack.ephemerals == []
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["--match", "ocr"], ["--requester", "U000TEST"], ["--thread", "1700000000.000100"]],
+    ids=["match", "requester", "thread-without-channel"],
+)
+def test_sessions_rejects_slack_options_without_a_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra_args: list[str]
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["sessions", *extra_args])
+
+    assert result.exit_code != 0
     assert slack.posts == []
     assert slack.ephemerals == []
 

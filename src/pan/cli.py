@@ -43,6 +43,7 @@ from pan.errors import (
     NoExactMatchError,
     NotPanSessionError,
     PanError,
+    PrivateMessageError,
     ServiceError,
     SessionBusyError,
     SlackPostError,
@@ -141,6 +142,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     UnsavedWorkError: 29,
     GitWorktreeError: 30,
     UnsafeWorktreeError: 31,
+    PrivateMessageError: 32,
 }
 
 
@@ -595,8 +597,9 @@ def sessions(
 ) -> None:
     """List all live hc terminals with the last thing each was asked, reconciled against the
     pan thread map, flagging status drift. --json emits the SessionSummary list; --thread,
-    --channel and --requester send the requester alone a few sessions to pick from (those
-    matching --match, else the ones needing them and the most recently used)."""
+    --channel and --requester send the requester alone up to 5 sessions to pick from: those
+    matching --match, else waiting for them, working, idle, then finished or stopped, the
+    most recently used first within each. Exit 32: the private message failed."""
     config = _config()
     summaries = collect_sessions(
         build_terminal_host(config.terminal_host),
@@ -611,6 +614,9 @@ def sessions(
             raise typer.BadParameter("--requester is required with --thread and --channel")
         _send_sessions_privately(config, summaries, channel, thread, requester, match)
         return
+    if any(option is not None for option in (thread, channel, requester, match)):
+        # The Slack options are used together; one alone is a mistake, not a terminal listing.
+        raise typer.BadParameter("--thread, --channel, --requester and --match go together")
     typer.echo(_render_sessions_table(summaries))
 
 
@@ -641,7 +647,9 @@ def _send_sessions_privately(
         slack.post_ephemeral(channel, thread_ts, requester, text)
     except SlackPostError as e:
         logger.error(f"sessions list could not be sent privately thread={thread_ts}: {e}")
-        return
+        raise PrivateMessageError(
+            f"sessions list could not be sent privately to thread {thread_ts}"
+        ) from e
     logger.info(f"sessions list sent privately thread={thread_ts} count={len(selected)}")
 
 

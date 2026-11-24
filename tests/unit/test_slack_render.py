@@ -454,6 +454,7 @@ def test_select_sessions_for_slack_with_words(match_text: str, expected_names: l
         _session(name=None, where="moshi-browser / pan"),
         _session(name="billing", last_ask="check the invoices"),
     ]
+    sessions = [session.model_copy(update={"cwd": Path("/tmp/wt/stream")}) for session in sessions]
 
     selected = select_sessions_for_slack(sessions, _ORCHESTRATOR, match_text)
 
@@ -575,3 +576,34 @@ def test_render_sessions_for_slack_drops_emphasis_from_a_name() -> None:
     text = render_sessions_for_slack([_session(label="**urgent** fix")], {})
 
     assert text.splitlines()[1] == "• *urgent fix* · Working"
+
+
+@pytest.mark.parametrize(
+    "updates, match_text, matches",
+    [
+        ({"name": "ocr-action"}, "ocr", True),
+        ({"name": "rapid-fix"}, "api", False),
+        ({"name": "api-client"}, "API", True),
+        ({"label": "Fix the login page", "name": "pan-x"}, "pan", True),
+        ({"name": None, "where": "work / 1", "cwd": Path("/tmp/wt/billing-sync")}, "billing", True),
+        ({"name": "x-stream"}, "x", True),
+        ({"name": "x-stream"}, "x st", True),
+        ({"name": "pan-a", "last_ask": "fix the OCR step"}, "ocr", True),
+    ],
+    ids=[
+        "token-prefix",
+        "not-inside-a-token",
+        "case-insensitive",
+        "terminal-name-behind-a-label",
+        "folder-name",
+        "only-short-words-list-unfiltered",
+        "short-word-ignored-others-kept",
+        "last-ask",
+    ],
+)
+def test_select_sessions_for_slack_matches_word_starts(
+    updates: dict[str, object], match_text: str, matches: bool
+) -> None:
+    session = _session(**{"cwd": Path("/tmp/wt/stream"), **updates})
+
+    assert (select_sessions_for_slack([session], _ORCHESTRATOR, match_text) == [session]) is matches

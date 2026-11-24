@@ -114,10 +114,11 @@ def parse_directive(raw_text: str) -> Directive:
             full=full,
             cleaned_text="",
         )
-    if verb_tokens and verb_tokens[0] == "sessions":
-        # Bare leading `sessions` is a SESSIONS trigger (mirrors the leading relay/read
-        # verbs and the `--sessions` flag). Recognized only in position 0, so a `sessions`
-        # deeper in a task stays prose; it carries no target/message (cleaned_text="").
+    if verb_tokens and verb_tokens[0] == "sessions" and _SESSIONS_ROUTE.match(stripped_text):
+        # Leading `sessions`, alone or with up to 3 words (see _SESSIONS_ROUTE), is a SESSIONS
+        # trigger (mirrors the leading relay/read verbs and the `--sessions` flag). Recognized
+        # only in position 0, so a `sessions` deeper in a task stays prose, and a sentence
+        # starting with it stays a task; it carries no target/message (cleaned_text="").
         return Directive(mode=TaskMode.SESSIONS, cleaned_text="")
 
     # The retired --new / --status / --sync flags and the leading `!` are not parsed here:
@@ -171,7 +172,9 @@ def parse_directive(raw_text: str) -> Directive:
 # need the colon right after the word, so "new login page" stays a plain task. The `to` name is
 # one token, so a sentence that starts with "to" and holds a colon stays a plain task.
 _NEW_ROUTE = re.compile(r"^new:(?:\s+|$)", re.IGNORECASE)
-_SESSIONS_ROUTE = re.compile(r"^sessions\s+", re.IGNORECASE)
+# `sessions` alone or with 1 to 3 words to match and no sentence punctuation; anything longer
+# ("sessions are timing out, please look") is a task.
+_SESSIONS_ROUTE = re.compile(r"^sessions((?:\s+[^\s,.?!]+){0,3})$", re.IGNORECASE)
 _TO_ROUTE = re.compile(r"^to\s+([^\s:]+):(?:\s+|$)", re.IGNORECASE)
 _WHOLE_MESSAGE_ROUTES = {
     "sessions": RouteKind.SESSIONS,
@@ -235,7 +238,7 @@ def _parse_route_words(raw_text: str) -> Route:
     sessions_match = _SESSIONS_ROUTE.match(text)
     if sessions_match is not None:
         # `sessions <words>`: list the sessions matching any of the words.
-        return Route(kind=RouteKind.SESSIONS, text=text[sessions_match.end() :].strip())
+        return Route(kind=RouteKind.SESSIONS, text=sessions_match.group(1).strip())
     if tuple(text.lower().split()) == _DONE_DISCARD_WORDS:
         return Route(kind=RouteKind.DONE, discard=True)
 
