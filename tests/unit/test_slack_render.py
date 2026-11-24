@@ -333,7 +333,7 @@ def _render(*sessions: SessionSummary, permalinks: dict[str, str] | None = None)
         (AgentStatus.NONE, "zsh", None, None),
         (AgentStatus.NONE, "claude-code", WorkerStatus.RUNNING, "Working"),
         (AgentStatus.NONE, "claude", WorkerStatus.BLOCKED, "Waiting for you"),
-        (AgentStatus.NONE, "claude-code", None, "Working"),
+        (AgentStatus.NONE, "claude-code", None, "Idle"),
         (AgentStatus.UNKNOWN, "claude-code", WorkerStatus.BLOCKED, "Waiting for you"),
         (AgentStatus.UNKNOWN, "claude-code", WorkerStatus.FAILED, "Idle"),
         (AgentStatus.UNKNOWN, "claude-code", None, "Working"),

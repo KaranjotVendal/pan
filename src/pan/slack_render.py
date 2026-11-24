@@ -223,7 +223,9 @@ def session_group(summary: SessionSummary) -> str | None:
     # The group a session is listed under; None for a plain shell (no status and not a Claude
     # agent), unless it is a pan worker still booting. A Claude session reports no status
     # until its first turn ends (see session_control._is_ready), so it and an unknown status
-    # fall back to pan's record, else count as working.
+    # fall back to pan's record. With no record, a Claude session with no status is most
+    # often one nobody has asked anything yet, so it counts as idle; an unknown status as
+    # working.
     group = _SESSIONS_GROUP_FOR_AGENT.get(summary.agent_status)
     if group is not None:
         return group
@@ -235,6 +237,8 @@ def session_group(summary: SessionSummary) -> str | None:
         return STATUS_TITLES[StatusState.WORKING] if booting else None
     if summary.pan_status is not None:
         return _SESSIONS_GROUP_FOR_PAN_STATUS[summary.pan_status]
+    if summary.agent_status is AgentStatus.NONE:
+        return SESSIONS_IDLE_TITLE
     return STATUS_TITLES[StatusState.WORKING]
 
 
