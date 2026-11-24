@@ -139,9 +139,9 @@ start is only untied. Never use `pan stop` for done; it is the kill switch.
 
 **Read a session**: `pan read '<name>'` prints its recent lines. Summarize them in a few lines and
 post with `pan slack-post`; say so if the first line says the read is incomplete. With `--full` it
-prints the whole transcript: do not summarize it, post it as is in order, one `pan slack-post` per
-chunk under Slack's limit, labelled `(k/n)`. Exit 20: say no session has that name. Exit 21: list
-the matching names (never addresses) and ask which one.
+prints the whole transcript: do not summarize it, post it in order, cutting only what the safety
+rules keep out, one `pan slack-post` per chunk under Slack's limit, labelled `(k/n)`. Exit 20: say
+no session has that name. Exit 21: list the matching names (never addresses) and ask which one.
 
 **Relay** a one-off message into a live session the person names; ties nothing:
 
@@ -161,8 +161,9 @@ question back, a read summary, or a failure only you can explain.
 
 ## 4. Safety rules
 
-- Never post a terminal address, a file path, an Inbox thread name or link, or anything with
-  `localhost` in the thread. Those go only to the requester, and pan sends them itself.
+- Never post a terminal address, a local file path, an Inbox thread name or link, or anything with
+  `localhost` in the thread, even inside a transcript (pan cuts only local paths). Those go only to
+  the requester, and pan sends them itself.
 - Exit 28 means propose; never retry `pan send --to` with a guessed name, never fall back to the tie,
   never spawn instead.
 - Pass `--discard` only when the person's whole message was `done --discard`; "just close it" is
