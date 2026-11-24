@@ -318,6 +318,8 @@ class SessionSummary(BaseModel, frozen=True):
     inbox_thread_name: str | None = None
     # The short task label pan keeps for the session's status message (ThreadRecord.status_label).
     label: str | None = None
+    # When pan last updated the session's record: how recently it was used.
+    updated_at: datetime | None = None
 
 
 class LaunchdJobState(BaseModel, frozen=True):

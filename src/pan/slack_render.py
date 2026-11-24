@@ -6,8 +6,7 @@ from typing import Any
 
 from pan.config import (
     CLAUDE_AGENT_NAMES,
-    SESSION_LAST_ASK_MAX_LENGTH,
-    SESSIONS_COMPACT_LINE_MAX_LENGTH,
+    SESSIONS_SLACK_MAX_COUNT,
     STATUS_LABEL_MAX_LENGTH,
 )
 from pan.models import (
@@ -173,8 +172,8 @@ def private_details_text(record: ThreadRecord) -> str:
     return "\n".join(lines)
 
 
-# `@pan sessions` in Slack: one line per session, grouped by state, needs-action first. The
-# text is GFM (**bold**), turned into Slack mrkdwn at the single egress (slack_post).
+# `@pan sessions` in Slack: a few sessions, the ones the person most likely wants to send a
+# message to, sent to them alone. The text is Slack mrkdwn, posted as is (chat.postEphemeral).
 SESSIONS_IDLE_TITLE = "Idle"
 SESSIONS_GROUP_ORDER: tuple[str, ...] = (
     STATUS_TITLES[StatusState.WAITING],
@@ -183,18 +182,19 @@ SESSIONS_GROUP_ORDER: tuple[str, ...] = (
     STATUS_TITLES[StatusState.FINISHED],
     STATUS_TITLES[StatusState.STOPPED],
 )
-# Groups that need no action are listed on one line each, names only.
-SESSIONS_COMPACT_GROUPS = frozenset(
-    {
-        SESSIONS_IDLE_TITLE,
-        STATUS_TITLES[StatusState.FINISHED],
-        STATUS_TITLES[StatusState.STOPPED],
-    }
-)
+# Without words, sessions are picked in these tiers, the most recently used first within a
+# tier: finished and stopped sessions only fill the room left.
+_SESSIONS_TIER: dict[str, int] = {
+    STATUS_TITLES[StatusState.WAITING]: 0,
+    STATUS_TITLES[StatusState.WORKING]: 1,
+    SESSIONS_IDLE_TITLE: 2,
+    STATUS_TITLES[StatusState.FINISHED]: 3,
+    STATUS_TITLES[StatusState.STOPPED]: 3,
+}
 # A Herdr location's tab number ("jiracli-generate / 1"), which says nothing to a reader.
 _WHERE_TAB_NUMBER = re.compile(r" / \d+$")
-SESSIONS_FOOTER = "_Full details: run `pan sessions` on the Mac._"
 SESSIONS_EMPTY_TEXT = "No sessions running."
+SESSIONS_HEADER = "*Your sessions*"
 
 _SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
     AgentStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
@@ -253,17 +253,6 @@ def listed_sessions(
     ]
 
 
-def linked_sessions(
-    summaries: list[SessionSummary], orchestrator_name: str
-) -> list[SessionSummary]:
-    # The listed sessions shown one per line with their thread link (not the compact groups).
-    return [
-        summary
-        for summary in listed_sessions(summaries, orchestrator_name)
-        if session_group(summary) not in SESSIONS_COMPACT_GROUPS
-    ]
-
-
 def plain_mrkdwn(text: str) -> str:
     # Free text made safe to wrap in **bold** or _italic_: control characters escaped and
     # emphasis characters dropped.
@@ -278,55 +267,80 @@ def session_display_name(summary: SessionSummary) -> str:
     return summary.label or summary.inbox_thread_name or summary.name or where or summary.cwd.name
 
 
-def _compact_group_line(group: str, members: list[SessionSummary]) -> str:
-    # `**Idle (21):** a, b, c`, names only; past the length limit the rest is counted.
-    prefix = f"**{group} ({len(members)}):** "
-    names = [plain_mrkdwn(session_display_name(summary)) for summary in members]
-    shown: list[str] = []
-    for index, name in enumerate(names):
-        remaining = len(names) - index - 1
-        tail = f" and {remaining} more" if remaining else ""
-        candidate = prefix + ", ".join([*shown, name]) + tail
-        if shown and len(candidate) > SESSIONS_COMPACT_LINE_MAX_LENGTH:
-            break
-        shown.append(name)
-    hidden_count = len(names) - len(shown)
-    line = prefix + ", ".join(shown)
-    return f"{line} and {hidden_count} more" if hidden_count else line
+def match_words(match_text: str | None) -> list[str]:
+    # The words of `@pan sessions <words>`, lowercased, each once, in order.
+    words: list[str] = []
+    for word in (match_text or "").lower().split():
+        if word not in words:
+            words.append(word)
+    return words
 
 
-def _session_lines(summary: SessionSummary, permalinks: dict[str, str]) -> list[str]:
-    line = f"• **{plain_mrkdwn(session_display_name(summary))}**"
-    link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
-    if link:
-        line += f" · <{link}|thread>"
-    lines = [line]
-    if summary.last_ask:
-        lines.append(
-            f"    _{plain_mrkdwn(status_label(summary.last_ask, SESSION_LAST_ASK_MAX_LENGTH))}_"
+def _matched_word_count(summary: SessionSummary, words: list[str]) -> int:
+    fields = [
+        session_display_name(summary),
+        summary.where,
+        summary.label,
+        summary.inbox_thread_name,
+        summary.last_ask,
+    ]
+    searchable = " ".join(field for field in fields if field).lower()
+    return sum(1 for word in words if word in searchable)
+
+
+def _recency_key(summary: SessionSummary) -> float:
+    # Newest first; a session pan has no record for sorts after the ones it has.
+    return -summary.updated_at.timestamp() if summary.updated_at is not None else 0.0
+
+
+def select_sessions_for_slack(
+    summaries: list[SessionSummary],
+    orchestrator_name: str,
+    match_text: str | None = None,
+    *,
+    max_count: int = SESSIONS_SLACK_MAX_COUNT,
+) -> list[SessionSummary]:
+    # With words: the sessions matching any of them (case-insensitive, against the name,
+    # location, label, Inbox thread and last ask), most words matched first, then by state.
+    # Without: waiting for you, working, then the most recently used.
+    grouped = [
+        (summary, group)
+        for summary in listed_sessions(summaries, orchestrator_name)
+        if (group := session_group(summary)) is not None
+    ]
+    words = match_words(match_text)
+    if words:
+        matching = [
+            (summary, group, count)
+            for summary, group in grouped
+            if (count := _matched_word_count(summary, words))
+        ]
+        matching.sort(
+            key=lambda entry: (
+                -entry[2],
+                SESSIONS_GROUP_ORDER.index(entry[1]),
+                _recency_key(entry[0]),
+            )
         )
-    return lines
+        return [summary for summary, _group, _count in matching[:max_count]]
+    grouped.sort(key=lambda entry: (_SESSIONS_TIER[entry[1]], _recency_key(entry[0])))
+    return [summary for summary, _group in grouped[:max_count]]
+
+
+def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
+    line = f"• *{plain_mrkdwn(session_display_name(summary))}* · {session_group(summary)}"
+    link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
+    return f"{line} · <{link}|thread>" if link else line
 
 
 def render_sessions_for_slack(
-    summaries: list[SessionSummary], permalinks: dict[str, str], *, orchestrator_name: str
+    selected: list[SessionSummary], permalinks: dict[str, str], match_text: str | None = None
 ) -> str:
-    # `permalinks` maps a session's thread_ts to its thread's link; a session without one is
-    # listed without a link.
-    listed = listed_sessions(summaries, orchestrator_name)
-    if not listed:
-        return SESSIONS_EMPTY_TEXT
-    noun = "session" if len(listed) == 1 else "sessions"
-    lines = [f"**{len(listed)} {noun}**"]
-    for group in SESSIONS_GROUP_ORDER:
-        members = [summary for summary in listed if session_group(summary) == group]
-        if not members:
-            continue
-        if group in SESSIONS_COMPACT_GROUPS:
-            lines.append(_compact_group_line(group, members))
-            continue
-        lines.append(f"**{group}**")
-        for summary in members:
-            lines.extend(_session_lines(summary, permalinks))
-    lines.append(SESSIONS_FOOTER)
-    return "\n".join(lines)
+    # `selected` comes from select_sessions_for_slack. `permalinks` maps a session's
+    # thread_ts to its thread's link; a session without one is listed without a link.
+    words = match_words(match_text)
+    quoted_words = plain_mrkdwn(" ".join(words))
+    if not selected:
+        return f'No sessions match "{quoted_words}".' if words else SESSIONS_EMPTY_TEXT
+    header = f'*Sessions matching "{quoted_words}"*' if words else SESSIONS_HEADER
+    return "\n".join([header, *(_session_line(summary, permalinks) for summary in selected)])

@@ -331,6 +331,7 @@ def test_collect_sessions_carries_the_thread_channel_and_label(status_label: str
 
     assert summary.thread_channel == "C1"
     assert summary.label == status_label
+    assert summary.updated_at == record.updated_at
 
 
 def test_collect_sessions_leaves_the_thread_channel_and_label_blank_without_a_record() -> None:
@@ -340,3 +341,4 @@ def test_collect_sessions_leaves_the_thread_channel_and_label_blank_without_a_re
 
     assert summary.thread_channel is None
     assert summary.label is None
+    assert summary.updated_at is None

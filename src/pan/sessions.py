@@ -181,6 +181,7 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
                 last_ask=last_ask_for(record),
                 inbox_thread_name=_known_inbox_thread_name(record),
                 label=record.status_label if record is not None else None,
+                updated_at=record.updated_at if record is not None else None,
             )
         )
     logger.info(f"sessions collected count={len(summaries)}")

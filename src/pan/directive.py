@@ -171,6 +171,7 @@ def parse_directive(raw_text: str) -> Directive:
 # need the colon right after the word, so "new login page" stays a plain task. The `to` name is
 # one token, so a sentence that starts with "to" and holds a colon stays a plain task.
 _NEW_ROUTE = re.compile(r"^new:(?:\s+|$)", re.IGNORECASE)
+_SESSIONS_ROUTE = re.compile(r"^sessions\s+", re.IGNORECASE)
 _TO_ROUTE = re.compile(r"^to\s+([^\s:]+):(?:\s+|$)", re.IGNORECASE)
 _WHOLE_MESSAGE_ROUTES = {
     "sessions": RouteKind.SESSIONS,
@@ -231,6 +232,10 @@ def _parse_route_words(raw_text: str) -> Route:
     whole_message_kind = _WHOLE_MESSAGE_ROUTES.get(text.lower())
     if whole_message_kind is not None:
         return Route(kind=whole_message_kind)
+    sessions_match = _SESSIONS_ROUTE.match(text)
+    if sessions_match is not None:
+        # `sessions <words>`: list the sessions matching any of the words.
+        return Route(kind=RouteKind.SESSIONS, text=text[sessions_match.end() :].strip())
     if tuple(text.lower().split()) == _DONE_DISCARD_WORDS:
         return Route(kind=RouteKind.DONE, discard=True)
 

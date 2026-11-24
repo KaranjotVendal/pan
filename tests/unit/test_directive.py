@@ -476,7 +476,10 @@ _BANG_NOTICE = "a leading ! is retired: add reply in slack to the message instea
         ("check the logs", Route(text="check the logs")),
         ("check?", Route(text="check?")),
         ("forget it", Route(text="forget it")),
-        ("sessions please", Route(text="sessions please")),
+        ("sessions ocr", Route(kind=RouteKind.SESSIONS, text="ocr")),
+        ("<@U0TEST> Sessions  OCR review ", Route(kind=RouteKind.SESSIONS, text="OCR review")),
+        ("sessions-dashboard fix", Route(text="sessions-dashboard fix")),
+        ("build the sessions page", Route(text="build the sessions page")),
         ("please check", Route(text="please check")),
         # retired flags
         (

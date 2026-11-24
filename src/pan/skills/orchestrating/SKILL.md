@@ -130,11 +130,14 @@ it posts a one-line reply saying so. Touch no session.
 
 ### (r3) `route.kind == "sessions"`, or `directive.mode == "sessions"` — list live sessions
 
-    pan sessions --thread <thread_ts> --channel <channel>
+    pan sessions --thread <thread_ts> --channel <channel> --requester <item.slack_user> [--match '<route.text>']
 
-It posts a short list of the live sessions to the thread, grouped by state (waiting for you,
-working, idle, finished, stopped), each with its task, a link to its Slack thread and its last ask. `directive.mode == "sessions"` covers the older spellings (`--sessions`, "what's running").
-Touch no session.
+Pass `--match` only when `route.text` is not empty (`@pan sessions ocr review` gives `ocr review`).
+It sends the requester alone (an ephemeral message, never a post in the thread) up to 5 sessions to
+pick from: those matching any of the words, or, without words, the ones waiting for them, the ones
+working, then the most recently used; each with its state and a link to its Slack thread.
+`directive.mode == "sessions"` covers the older spellings (`--sessions`, "what's running"). If the
+private message fails, post nothing to the thread. Touch no session.
 
 ### (r4) `route.kind == "forget"` — untie the thread
 
