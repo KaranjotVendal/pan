@@ -12,21 +12,24 @@ from pan.confirmations import (
     EXPIRED_REPLY,
     NOT_SENT_REPLY,
     FilePendingConfirmations,
-    OpenQuestions,
     cancel_confirmation,
     candidate_label,
     confirm_session,
+    is_answer,
+    normalize_choice,
     propose_sessions,
     question_text,
-    route_with_pending,
 )
-from pan.errors import SessionBusyError, TargetBlockedError, TargetNotFoundError
+from pan.errors import (
+    SessionBusyError,
+    TargetBlockedError,
+    TargetNotFoundError,
+    UnansweredQuestionError,
+)
 from pan.models import (
     AgentStatus,
     ConfirmationCandidate,
     PendingConfirmation,
-    Route,
-    RouteKind,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -69,8 +72,12 @@ def _store(tmp_path: Path) -> FilePendingConfirmations:
 
 
 def _question(
-    *candidates: ConfirmationCandidate, asked_at: datetime = _ASKED_AT, thread_ts: str = _THREAD
+    *candidates: ConfirmationCandidate,
+    asked_at: datetime = _ASKED_AT,
+    thread_ts: str = _THREAD,
+    answered: bool = True,
 ) -> PendingConfirmation:
+    # Answered a minute after it was asked unless `answered` is False.
     return PendingConfirmation(
         thread_ts=thread_ts,
         channel="C0TEST",
@@ -79,6 +86,7 @@ def _question(
         requester="U0TEST",
         candidates=list(candidates),
         created_at=asked_at,
+        answered_at=asked_at + timedelta(minutes=1) if answered else None,
     )
 
 
@@ -154,44 +162,6 @@ def test_store_reads_a_folder_in_its_place_as_no_questions(tmp_path: Path) -> No
     assert _store(tmp_path).all_pending() == []
 
 
-@pytest.mark.parametrize(
-    "replies, expected",
-    [
-        (["yes", "yes"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
-        (["no", "2"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
-        (["no thanks", "2"], [(RouteKind.TASK, True), (RouteKind.TASK, False)]),
-        (["2", "no"], [(RouteKind.CONFIRM, False), (RouteKind.TASK, False)]),
-    ],
-    ids=["answered-once", "declined-then-number", "cancelled-then-number", "answered-then-other"],
-)
-def test_open_questions_close_once_answered_in_a_batch(
-    replies: list[str], expected: list[tuple[RouteKind, bool]]
-) -> None:
-    open_questions = OpenQuestions([_question(_PAN_CANDIDATE)])
-    now = _ASKED_AT + timedelta(minutes=1)
-
-    routed = [
-        open_questions.route(Route(text=reply), ThreadSource.SLACK, _THREAD, reply, now)
-        for reply in replies
-    ]
-
-    assert [(route.kind, cancels) for route, cancels in routed] == expected
-
-
-def test_open_questions_keep_other_threads_open() -> None:
-    open_questions = OpenQuestions(
-        [_question(_PAN_CANDIDATE), _question(_PAN_CANDIDATE, thread_ts="other")]
-    )
-    now = _ASKED_AT + timedelta(minutes=1)
-
-    open_questions.route(Route(text="yes"), ThreadSource.SLACK, _THREAD, "yes", now)
-    route, _cancels = open_questions.route(
-        Route(text="yes"), ThreadSource.SLACK, "other", "yes", now
-    )
-
-    assert route.kind is RouteKind.CONFIRM
-
-
 def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.put(_question(_DOCS_CANDIDATE, thread_ts="old", asked_at=_ASKED_AT - timedelta(hours=1)))
@@ -204,44 +174,65 @@ def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Pa
     assert store.get(ThreadSource.SLACK, _THREAD) is None
 
 
+def test_store_marks_a_question_answered_once(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.put(_question(_PAN_CANDIDATE, answered=False))
+    first_reply = _ASKED_AT + timedelta(minutes=2)
+
+    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply)
+    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply + timedelta(minutes=1))
+    store.mark_answered(ThreadSource.SLACK, "1700000000.000999", first_reply)
+
+    stored = store.get(ThreadSource.SLACK, _THREAD)
+    assert stored is not None
+    assert stored.answered_at == first_reply
+    assert store.get(ThreadSource.SLACK, "1700000000.000999") is None
+
+
 @pytest.mark.parametrize(
-    "raw_text, question, minutes_later, expected_route, expected_cancels",
+    "slack_user, minutes_after_asking, requester, expected",
     [
-        ("yes", _question(_PAN_CANDIDATE), 5, Route(kind=RouteKind.CONFIRM, choice="yes"), False),
-        (
-            "<@U0TEST> 2",
-            _question(_PAN_CANDIDATE),
-            5,
-            Route(kind=RouteKind.CONFIRM, choice="2"),
-            False,
-        ),
-        ("no", _question(_PAN_CANDIDATE), 5, Route(kind=RouteKind.CONFIRM, choice="no"), False),
-        ("no thanks", _question(_PAN_CANDIDATE), 5, Route(text="no thanks"), True),
-        ("yes", _question(_PAN_CANDIDATE), 30, Route(text="yes"), False),
-        ("yes", None, 0, Route(text="yes"), False),
-        ("no", None, 0, Route(text="no"), False),
+        ("U0TEST", 2, "U0TEST", True),
+        ("U000OTHER", 2, "U0TEST", False),
+        ("U0TEST", -1, "U0TEST", False),
+        ("U0TEST", 0, "U0TEST", False),
+        ("U0TEST", 31, "U0TEST", False),
+        ("U0TEST", 2, None, False),
     ],
     ids=[
-        "yes",
-        "number",
-        "decline",
-        "anything-else-cancels",
+        "requester-after",
+        "another-user",
+        "before-asking",
+        "same-moment",
         "expired",
-        "no-question",
-        "no-without-a-question",
+        "no-requester",
     ],
 )
-def test_route_with_pending(
-    raw_text: str,
-    question: PendingConfirmation | None,
-    minutes_later: int,
-    expected_route: Route,
-    expected_cancels: bool,
+def test_is_answer(
+    slack_user: str, minutes_after_asking: int, requester: str | None, expected: bool
 ) -> None:
-    now = _ASKED_AT + timedelta(minutes=minutes_later)
-    route = Route(text=raw_text.removeprefix("<@U0TEST> "))
+    question = _question(_PAN_CANDIDATE, answered=False).model_copy(update={"requester": requester})
+    received_at = _ASKED_AT + timedelta(minutes=minutes_after_asking)
 
-    assert route_with_pending(route, raw_text, question, now) == (expected_route, expected_cancels)
+    assert is_answer(question, slack_user, received_at) is expected
+
+
+@pytest.mark.parametrize(
+    "choice, expected",
+    [
+        ("yes", "yes"),
+        (" Y ", "yes"),
+        ("YES", "yes"),
+        ("1", "1"),
+        ("3", "3"),
+        ("4", None),
+        ("0", None),
+        ("no", None),
+        ("sure", None),
+    ],
+)
+def test_normalize_choice(choice: str, expected: str | None) -> None:
+    assert normalize_choice(choice) == expected
 
 
 @pytest.mark.parametrize(
@@ -382,17 +373,17 @@ def test_confirm_with_a_reply_that_picks_nothing_asks_again(
     assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
 
 
-def test_confirm_with_a_decline_only_cancels(tmp_path: Path) -> None:
-    _store(tmp_path).put(_question(_PAN_CANDIDATE))
+def test_confirm_before_the_requester_replied_sends_and_posts_nothing(tmp_path: Path) -> None:
+    _store(tmp_path).put(_question(_PAN_CANDIDATE, answered=False))
     terminal_host = _host(_pan_session())
     slack = RecordingSlack()
 
-    assert _confirm(tmp_path, terminal_host, slack, "no") is None
+    with pytest.raises(UnansweredQuestionError):
+        _confirm(tmp_path, terminal_host, slack, "yes")
 
     assert terminal_host.sent == []
-    assert terminal_host.runs == []
-    assert slack.texts() == [NOT_SENT_REPLY]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert slack.texts() == []
+    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
 
 
 def test_confirm_with_no_question_posts_nothing(tmp_path: Path) -> None:

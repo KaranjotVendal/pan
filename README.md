@@ -1,15 +1,15 @@
 # pan
 
 `pan` is a Slack-driven laptop coding-agent orchestrator. You `@pan` a task from Slack (or your
-phone); a thin always-on gateway authenticates you, adds a fast `:eyes:` reaction, reads the route
-words at the start of the message (pure string parsing; it decides nothing about the work), and
-appends the request to an on-disk inbox. A filesystem watcher nudges a persistent orchestrator Claude
-session, which drains the inbox, follows the route, and runs each new task as its own
+phone); a thin always-on gateway authenticates you, adds a fast `:eyes:` reaction and appends the
+raw request to an on-disk inbox (it decides nothing about the work). A filesystem watcher nudges a
+persistent orchestrator Claude session, which drains the inbox, reads what you meant, and acts
+through `pan` commands that hold the safety rules; it runs each new task as its own
 Claude session in an isolated git worktree and its own herdr-core (`hc`) terminal. Each Slack thread
 is tied to the session it started, so follow-ups in that thread go to the same session (a reply
 without `@pan` reaches pan only in a thread pan is already working in; in any thread not currently
-tied to a session or just started with `@pan`, mention `@pan`); route words
-(`new:`, `to <name>:`, `check`, `sessions`, `forget`, `done`) let you choose otherwise. When a session starts,
+tied to a session or just started with `@pan`, mention `@pan`); say so in your own words to start a
+new session, send to a named one, list, check, untie or close. When a session starts,
 the thread gets one status message that pan keeps editing as the session works; the session asks
 questions and reports progress in its Plannotator Inbox thread, whose link only you see. Slack hears
 more when you write `@pan check`, or when the request said "reply in slack" (its answer is then
@@ -170,20 +170,20 @@ runs once the actuation lands.
 | `pan service install\|uninstall\|status` | Install and load, remove, or inspect the gateway, watcher and up LaunchAgents (macOS). |
 | `pan config set-token` | Write `~/.pan/credentials.json` at mode 0600 (prompts). |
 | `pan config show` | Print the resolved config, credentials masked. |
-| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its route, its parsed directive and its thread's tie; a `yes`/1-3 reply to an open `pan propose` question becomes a `confirm` route, and any other message there is marked `cancels_confirmation`. |
+| `pan inbox drain --json` | Atomically drain the inbox, emitting each item with its cleaned text (mention, client signature and phone punctuation removed), its thread's tie and pan's open `pan propose` question in the thread. A reply from the requester after the question marks it answered, which `pan confirm --choice` needs. |
 | `pan up` | Start the orchestrator if needed, mark lost workers failed, wake it (idempotent). |
 | `pan spawn --thread … --task … --channel … [--thread-reply]` | Create worktree + hc terminal + worker; tie the thread to it; post the thread's status message and send the Inbox thread to the requester only. With `--thread-reply` (the message was a reply inside a Slack thread) the brief names the channel and thread ts and tells the session to read the whole thread first with its own Slack read-thread tool (`slack_read_thread`), only to read. |
 | `pan reopen --thread … --task … [--reply-in-slack]` | Reopen a finished or lost worker in its worktree, continuing its conversation; the thread's status message says Working again. `--reply-in-slack` switches the thread to posting answers in Slack. |
 | `pan threads get --thread …` | Print a thread's `ThreadRecord` as JSON. |
 | `pan slack-post --thread … --channel … --text …` | Post to a thread through the single Slack egress. |
 | `pan status --thread …` | Report a worker's live status (from its hc terminal). |
-| `pan sessions [--json] [--thread … --channel … --requester … [--match …]]` | List every live hc terminal with the last thing each was asked, marking pan-owned ones and status drift; with `--thread`, `--channel` and `--requester`, send the requester alone up to 5 sessions to pick from (those matching `--match`, else waiting for them, working, idle, then finished or stopped, the most recently used first within each). Exit 32: the private message failed, and nothing was posted. |
+| `pan sessions [--json] [--show <address,…> --thread … --channel … --requester …]` | List every live hc terminal with the last thing each was asked, marking pan-owned ones and status drift. With `--show` and the three thread options, send the requester alone the sessions at those addresses (the orchestrator's pick, in its order, at most 5), each with its state and a link to its thread. Exit 32: the private message failed, and nothing was posted. |
 | `pan check --thread … --channel …` | Bring the thread's status message up to date, post the tied session's latest answer as its own message (its transcript's last answer, or its screen lines; nothing when there is neither), and send its Inbox thread and terminal to the requester only. |
-| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post the thread's status message (Working) and send the Inbox thread to the requester only. `--to` must match exactly (address, name, or Herdr label or space); otherwise nothing is sent or posted and it exits 28. Without `--to`, send a follow-up to the thread's tied session. `--reply-in-slack` switches the thread to posting answers in Slack (on a follow-up it stays on for the thread; leaving it off never turns it off). A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
-| `pan propose --thread … --channel … --to … --task … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
-| `pan confirm --thread … --channel … --choice <yes\|n>` / `--cancel` | Act on the reply to that question: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". |
+| `pan send --thread … --channel … [--to <name>] --task …` | Send a task to a live session (pan's own or one of yours) and tie the thread to it; post the thread's status message (Working) and send the Inbox thread to the requester only. `--to` must match exactly (address, name, or Herdr label or space) and appear, as a whole word or phrase in any letter case, in the person's own message passed as `--request-text`; otherwise nothing is sent or posted and it exits 28. Without `--to`, send a follow-up to the thread's tied session. `--reply-in-slack` switches the thread to posting answers in Slack (on a follow-up it stays on for the thread; leaving it off never turns it off). A busy session (or one whose state pan cannot read, except a brand-new Claude session that has not answered yet) is refused with "<name> is busy; try again, or @pan check"; nothing is typed. |
+| `pan propose --thread … --channel … --to … --task … --requester … --candidate <address> …` | After `pan send` exits 28: ask in the thread whether to send the task to the proposed live session ("Reply yes") or which of up to three ("Reply 1, 2 or 3"), storing the question; with no candidate, say no session matches. Types nothing. |
+| `pan confirm --thread … --channel … --choice <yes\|1-3>` / `--cancel` | Act on the requester's reply to that question, as the orchestrator read it: send the stored task to the chosen session (still live, same name) and tie the thread, or drop the question and post "Not sent.". `--choice` exits 34, sending and posting nothing, until the drain has seen the requester reply in the thread. |
 | `pan forget --thread … --channel …` | Untie the thread from its session (never stops it); say so in the thread. |
-| `pan done --thread … --channel … [--discard]` | Close the thread's session: remove its terminal, its worktree and its branch, mark it done and untie the thread. Keeps everything (exit 29) while the worktree has uncommitted files or the branch unpushed commits, and refuses while the session is working (exit 26) or waiting on a prompt (exit 23), unless `--discard`. Exit 30: a git cleanup failed (retry with `done`); exit 31: a folder pan never removes. A session pan did not start is only untied. See [Closing a session](#closing-a-session). |
+| `pan done --thread … --channel … [--discard --request-text …]` | Close the thread's session: remove its terminal, its worktree and its branch, mark it done and untie the thread. Keeps everything (exit 29) while the worktree has uncommitted files or the branch unpushed commits, and refuses while the session is working (exit 26) or waiting on a prompt (exit 23), unless `--discard`. `--discard` needs the person's own message as `--request-text`, holding `--discard` as they typed it (a phone's `—discard` counts); otherwise nothing is touched or posted and it exits 33. Exit 30: a git cleanup failed (retry with `done`); exit 31: a folder pan never removes. A session pan did not start is only untied. See [Closing a session](#closing-a-session). |
 | `pan relay <target> <message>` | Send a message into a live terminal (address, name, or Herdr app label). |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal, mark the thread FAILED and edit its status message to Stopped. Refuses for a session pan did not start: it only unties the thread. |
@@ -212,26 +212,37 @@ pan keeps a thread readable for everyone in the channel:
 - **Refusals and questions stay one short line**: busy, waiting on a prompt, not found, "Send this
   to ...? Reply yes.".
 
+- **No local paths in public posts.** Every message and status edit pan posts in a thread has
+  paths under `/Users`, `/home` or `~` cut to their last part (`.../pan-7`); links and Slack
+  entities are left alone. The private details sent only to you are not cut.
+
 These use `chat:write` only (posting, editing and ephemeral messages); no new scope is needed.
 
-## Route words and flags
+Exit codes of the `pan` commands: 10 unauthorized sender, 11 config missing, 12 credentials, 13
+inbox, 14 thread not found, 15 spawn, 16 terminal host, 17 Slack post, 18 gated op denied, 20
+target not found, 21 target ambiguous, 22 terminal gone, 23 waiting on a prompt, 24 terminal name
+taken, 25 not a pan session, 26 busy, 27 service, 28 no exact match (propose instead), 29 unsaved
+work, 30 git cleanup failed, 31 unsafe worktree, 32 private message failed, 33 `--discard` not typed
+by the person, 34 open question not answered by the requester.
 
-The text after `@pan` is parsed deterministically, never by model judgment. A route word must be the
-first word after the mention, spelled exactly, in any letter case; anything else is task text.
+## What to say in Slack
 
-| Say | What pan does |
+Mention `@pan` and say what you want in your own words. The orchestrator Claude session reads each
+message for its meaning and picks the action; the `pan` commands it runs do the work and keep the
+safety rules, whatever it decides. When it is unsure, it asks you in the thread.
+
+| Say, for example | What pan does |
 | --- | --- |
 | `<task>` | In a new or untied thread, start a new session in a new worktree. In a tied thread, send it to the tied session. |
-| `new: <task>` | Start a new session even in a tied thread; the tie moves to it, the old session keeps running. The colon is required ("new login page" is a plain task). |
-| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. `<name>` (one word) that exactly matches a session's address, terminal name, or Herdr label or space sends at once. Otherwise pan sends nothing: it proposes the session you most likely meant ("Send this to stream-pan (work / 1, folder pan)? Reply yes.") or up to three ("Which session? Reply 1, 2 or 3:"), and sends only when you reply `yes` or a number in the thread within 30 minutes; `no` (or `n`, `cancel`, `stop`) declines with "Not sent." and nothing more; any other reply cancels ("Not sent.") and is then handled as a normal message. With no likely session it says how to start new work with `new:`; pan never starts a session from `to`. A busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
-| `check` | Post the tied session's latest answer here. The whole message must be just this word. |
-| `sessions [words]` | Show you alone up to 5 sessions to pick from, each with its state and a link to its thread: those matching up to 3 words (a word matches the start of a word in a session's name, folder, task, Inbox thread or last ask), or, without words, waiting for you, working, idle, then finished or stopped, the most recently used first within each. A longer message starting with `sessions` is a task. Also `--sessions`. |
+| `start a new session: <task>` | Start a new session even in a tied thread; the tie moves to it, the old session keeps running. |
+| `to <name>: <task>` | Send the task to a live session, pan's own or one of your desk sessions, and tie the thread to it. It is sent at once only when `<name>` exactly matches a session's address, terminal name, or Herdr label or space, and you typed it. Otherwise pan sends nothing: it proposes the session you most likely meant ("Send this to stream-pan (work / 1, folder pan)? Reply yes.") or up to three ("Which session? Reply 1, 2 or 3:"), and sends only when you, the person who asked, answer in the thread within 30 minutes; anyone else's reply never sends. With no likely session it says how to start new work. A busy session gets "<name> is busy; try again, or @pan check" and nothing is typed. Not available to messages from X. |
+| `check`, `any news?` | Post the tied session's latest answer here. |
+| `what's running`, `sessions ocr` | Show you alone up to 5 sessions, each with its state and a link to its thread: the ones you most likely mean, or all of them, waiting on you and working first. |
 | `forget` | Untie the thread; the session keeps running. |
-| `done` / `done --discard` | Close the thread's session and remove its worktree and branch; see [Closing a session](#closing-a-session). The whole message must be just this (`--discard` may be typed as a phone's `—discard`). |
-| `reply in slack` (anywhere) | Also post the session's answers here at every turn end. The orchestrator also turns this on when the message plainly asks for the result in the thread ("share it here", "post it here", "send the link here", "reply here"); this is its one judgment about the reply mode, and it never changes the route. |
-| `--stream <name>` | Name a new session's terminal. |
-| `relay <target> <message>` | Send a one-off message into any live session; ties nothing. |
-| `read <target> [--full]` | Read a live session's recent output (or all of it); ties nothing. |
+| `done` / `done --discard` | Close the thread's session and remove its worktree and branch; see [Closing a session](#closing-a-session). Unsaved work is thrown away only when you type `--discard` yourself. |
+| `reply in slack`, `post it here` | Also post the session's answers here at every turn end. |
+| `read <name>` | Summarize what a live session is doing; ties nothing. |
+| `help [command]` | The CLI help, answered at once by the gateway. |
 
 ### Closing a session
 
@@ -269,26 +280,22 @@ marks the thread failed and leaves the worktree alone.
 
 ### Your own sessions
 
-`to <name>:` reaches any live session, including desk sessions pan did not start. pan types the task
+A named session can be any live session, including desk sessions pan did not start. pan types the task
 only when the session is idle (busy, or a state pan cannot read, is refused; waiting on a prompt is
 refused too), with one line on top saying it came from Slack via pan and naming the Plannotator Inbox
 thread to use. When pan knows the session's thread (pan found it earlier) the line names it;
 otherwise it says to keep using the session's existing thread for this work, or to start one named
 `<name>: <short task>`.
 
-The proposal is the one place the orchestrator Claude judges a target. It only proposes: `pan
-propose` keeps only live terminal addresses, the question is stored per thread in
-`~/.pan/confirmations.json` (next to the thread map), and on your `yes` or number `pan confirm`
-checks the session is still the same live terminal before typing.
+The orchestrator only proposes a session it is not sure of: `pan propose` keeps only live terminal
+addresses, the question is stored per thread in `~/.pan/confirmations.json` (next to the thread
+map), `pan inbox drain` marks it answered when you reply in the thread, and `pan confirm` sends only
+after that mark and checks the session is still the same live terminal before typing.
 
 Follow-ups in the thread go to the same session with the same checks. pan never stops, removes or reopens a desk session: `pan stop`
-only unties it, and when it has ended pan says so and suggests `new:` or `to <name>:`. Desk sessions
+only unties it, and when it has ended pan says so and suggests starting new work or naming another session. Desk sessions
 have no pan hooks, so `check` looks their Inbox thread up by name (`plannotator inbox call
 read_thread`, read only); when it is not found, only the name is shown.
-
-`--new`, `--status`, `--sync` and a leading `!` are retired: pan replies saying what replaced them
-(`new:`, `check` or `sessions`, and `reply in slack`). `--agent <x>` is parsed but reserved for a
-later version.
 
 ## First task
 
@@ -304,8 +311,8 @@ that Inbox thread; add "reply in slack" to the message to also get its answer in
 follow-up reply in the same thread goes to the same worker, with or without `@pan`, because pan is
 already working in that thread; `@pan check` posts its latest answer. A reply without `@pan` in any
 thread not currently tied to a session or just started with `@pan` is ignored: a thread pan never
-worked in, or one pan untied, by `@pan done`, `forget`, moving its session to another thread with
-`to <name>:`, or a failed start.
+worked in, or one pan untied, by `@pan done`, `forget`, moving its session to another thread, or a
+failed start.
 When you start a session with a reply inside an existing thread, its brief tells it to read that
 whole thread first with its own Slack read-thread tool, so it sees the earlier messages; pan does
 not copy the thread anywhere.

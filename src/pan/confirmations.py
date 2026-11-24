@@ -7,15 +7,12 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pan.config import CONFIRMATION_MAX_CANDIDATES, CONFIRMATION_TIMEOUT
-from pan.directive import CONFIRM_NO, CONFIRM_YES, parse_confirm_reply
-from pan.errors import NoExactMatchError, TargetNotFoundError
+from pan.errors import NoExactMatchError, TargetNotFoundError, UnansweredQuestionError
 from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import (
     ConfirmationCandidate,
     PendingConfirmation,
-    Route,
-    RouteKind,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -36,7 +33,10 @@ logger = initialise_logger(__name__)
 # How to start new work instead, offered when a `to` selector matches no session at all.
 NEW_WORK_HINT = "@pan new: <your text>"
 NOT_SENT_REPLY = "Not sent."
-EXPIRED_REPLY = "Not sent: that question expired. Send the `to <name>:` message again."
+EXPIRED_REPLY = "Not sent: that question expired. Send the message again."
+# `pan confirm --choice`: `yes` (or `y`) picks the only proposed session, a number picks one.
+CONFIRM_YES = "yes"
+_YES_WORDS = frozenset({"yes", "y"})
 
 
 def confirmations_path(threads_path: Path) -> Path:
@@ -100,6 +100,17 @@ class FilePendingConfirmations:
         self._write_all(pending_by_key)
         logger.info(f"confirmation stored thread={pending.thread_ts}")
 
+    def mark_answered(self, source: ThreadSource, thread_ts: str, answered_at: datetime) -> None:
+        # The requester replied in the thread after the question; the first reply is kept.
+        pending_by_key = self._read_all()
+        key = _key(source, thread_ts)
+        stored = pending_by_key.get(key)
+        if stored is None or stored.answered_at is not None:
+            return
+        pending_by_key[key] = stored.model_copy(update={"answered_at": answered_at})
+        self._write_all(pending_by_key)
+        logger.info(f"confirmation answered thread={thread_ts}")
+
     def clear(self, source: ThreadSource, thread_ts: str) -> None:
         pending_by_key = self._read_all()
         if pending_by_key.pop(_key(source, thread_ts), None) is not None:
@@ -114,39 +125,26 @@ def live_pending(pending: PendingConfirmation | None, now: datetime) -> PendingC
     return pending
 
 
-class OpenQuestions:
-    # The questions open when `pan inbox drain` ran, read once before the inbox is drained.
-    # Once an item in the batch answers or cancels a thread's question, later items in that
-    # thread see none, as they will once `pan confirm` has run.
-    def __init__(self, questions: list[PendingConfirmation]) -> None:
-        self._by_thread = {
-            (question.source, question.thread_ts): question for question in questions
-        }
-
-    def route(
-        self, route: Route, source: ThreadSource, thread_ts: str, raw_text: str, now: datetime
-    ) -> tuple[Route, bool]:
-        question = self._by_thread.get((source, thread_ts))
-        routed, cancels_confirmation = route_with_pending(route, raw_text, question, now)
-        if routed.kind is RouteKind.CONFIRM or cancels_confirmation:
-            self._by_thread.pop((source, thread_ts), None)
-        return routed, cancels_confirmation
+def is_answer(pending: PendingConfirmation, slack_user: str, received_at: datetime) -> bool:
+    # A message answers the question when the requester sent it after the question was asked
+    # and before it expired. A question with no requester is never answered.
+    return (
+        pending.requester is not None
+        and slack_user == pending.requester
+        and pending.created_at < received_at
+        and live_pending(pending, received_at) is not None
+    )
 
 
-def route_with_pending(
-    route: Route, raw_text: str, pending: PendingConfirmation | None, now: datetime
-) -> tuple[Route, bool]:
-    # With a live question open in the thread, a `yes`/`y`/1-3 reply becomes a CONFIRM route,
-    # and so does a decline (`no`, `n`, `cancel`, `stop`; choice `no`), which only cancels;
-    # any other message keeps its route and cancels the question (the bool). With no live
-    # question (none, or expired) nothing changes, so a plain `yes` in a tied thread still
-    # goes to the tied session.
-    if live_pending(pending, now) is None:
-        return route, False
-    choice = parse_confirm_reply(raw_text)
-    if choice is None:
-        return route, True
-    return Route(kind=RouteKind.CONFIRM, choice=choice), False
+def normalize_choice(choice: str) -> str | None:
+    # `yes` for yes or y, the digit for a number from 1 to CONFIRMATION_MAX_CANDIDATES, any
+    # case and surrounding spaces; None for anything else.
+    cleaned = choice.strip().lower()
+    if cleaned in _YES_WORDS:
+        return CONFIRM_YES
+    if cleaned.isdigit() and 1 <= int(cleaned) <= CONFIRMATION_MAX_CANDIDATES:
+        return cleaned
+    return None
 
 
 def candidate_label(terminal: Terminal) -> str:
@@ -233,7 +231,7 @@ def propose_sessions(
     slack: SlackAdapter,
     clock: Clock,
 ) -> PendingConfirmation | None:
-    # The orchestrator's guess for a `to <selector>:` with no exact match: store the task and
+    # The orchestrator's guess for a named session with no exact match: store the task and
     # the proposed sessions as the thread's open question and ask the person to confirm.
     # Nothing is typed into any session here. Only live terminals count; with none, pan says
     # no session matches, stores nothing and clears any earlier question in the thread.
@@ -297,18 +295,14 @@ def confirm_session(
     slack: SlackAdapter,
     clock: Clock,
 ) -> ThreadRecord | None:
-    # The person's `yes` or number for the thread's open question: send the stored task to
-    # the chosen session through the normal `to` send path (the thread is tied to it), then
-    # clear the question. A reply that picks nothing (`yes` to several, a number out of
-    # range) asks again. A busy session or one waiting on a prompt is refused as usual, but
+    # The person's `yes` or number for the thread's open question, as the orchestrator read
+    # their reply: send the stored task to the chosen session through the normal send path
+    # (the thread is tied to it), then clear the question. Refused with nothing posted until
+    # the drain has seen the requester reply (answered_at). A choice that picks nothing (`yes`
+    # to several, a number out of range) asks again. A busy session or one waiting on a prompt is refused as usual, but
     # the question stays open and the reply says to answer again later. A chosen session no
     # longer running clears the question, gets a reply and TargetNotFoundError. An expired
     # question is cleared with a reply; with no question at all nothing is posted.
-    if choice == CONFIRM_NO:
-        cancel_confirmation(
-            thread_ts=thread_ts, channel=channel, confirmations=confirmations, slack=slack
-        )
-        return None
     stored = confirmations.get(ThreadSource.SLACK, thread_ts)
     if stored is None:
         logger.info(f"confirm with no open question thread={thread_ts}")
@@ -318,6 +312,11 @@ def confirm_session(
         confirmations.clear(ThreadSource.SLACK, thread_ts)
         slack_post(slack, channel, thread_ts, EXPIRED_REPLY)
         return None
+    if pending.answered_at is None:
+        logger.info(f"confirm refused, the requester has not replied thread={thread_ts}")
+        raise UnansweredQuestionError(
+            f"the requester has not replied to the question in thread {thread_ts}"
+        )
     chosen_index = _chosen_index(choice, len(pending.candidates))
     if chosen_index is None:
         slack_post(slack, channel, thread_ts, _reask_text(pending.candidates))
@@ -356,7 +355,7 @@ def confirm_session(
 def cancel_confirmation(
     *, thread_ts: str, channel: str, confirmations: PendingConfirmations, slack: SlackAdapter
 ) -> bool:
-    # Any other reply while a question is open: drop it and say nothing was sent. True when
+    # The person declined or moved on: drop the question and say nothing was sent. True when
     # there was one.
     if confirmations.get(ThreadSource.SLACK, thread_ts) is None:
         return False

@@ -55,8 +55,9 @@ class GatedOpDeniedError(PanError): ...
 class TargetNotFoundError(PanError): ...
 
 
-# `pan send --to <selector>` found no exact match (or several sessions share the label), so
-# nothing was sent and nothing was posted: the orchestrator proposes a session with
+# `pan send --to <selector>` found no exact match (or several sessions share the label), or
+# the selector is not in the person's own message (--request-text), so nothing was sent and
+# nothing was posted: the orchestrator proposes a session with
 # `pan propose` and the person confirms it in the thread.
 class NoExactMatchError(PanError): ...
 
@@ -89,6 +90,16 @@ class UnsafeWorktreeError(PanError): ...
 # `pan sessions` could not send the list to the requester privately (an ephemeral message),
 # so nothing was posted: the orchestrator says so in the thread, without the list.
 class PrivateMessageError(PanError): ...
+
+
+# `pan done --discard` was asked for, but the person's own message (--request-text) does not
+# hold --discard: only the person may throw away unsaved work. Nothing was touched or posted.
+class DiscardNotRequestedError(PanError): ...
+
+
+# `pan confirm --choice` with no reply from the requester in the thread since pan asked
+# (`pan inbox drain` marks the question answered). Nothing was sent or posted.
+class UnansweredQuestionError(PanError): ...
 
 
 # Installing, loading, unloading or reading pan's launchd agents failed (`pan service`).

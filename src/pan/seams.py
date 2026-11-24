@@ -163,6 +163,11 @@ class PendingConfirmations(Protocol):
 
     def put(self, pending: PendingConfirmation) -> None: ...
 
+    # Sets the question's answered_at once; a no-op when there is no question.
+    def mark_answered(
+        self, source: ThreadSource, thread_ts: str, answered_at: datetime
+    ) -> None: ...
+
     def clear(self, source: ThreadSource, thread_ts: str) -> None: ...
 
 

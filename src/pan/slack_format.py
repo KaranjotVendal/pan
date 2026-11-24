@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import Any
 
 from pan.config import (
     CODE_FENCE,
@@ -189,3 +190,56 @@ def split_for_slack(text: str, max_length: int = SLACK_MESSAGE_PART_MAX_LENGTH) 
     if current_lines:
         parts.append("\n".join(current_lines))
     return parts
+
+
+# A local path in a public post: one under /Users, /home or ~. It must start a word: a `/`,
+# `:`, `.`, `~`, `-` or word character before it means it is part of a URL (`https://x/home/a`,
+# `file:///Users/a`) or a longer path, which is left alone. Slack entities (`<url|label>`,
+# mentions, dates) are skipped whole.
+_LOCAL_PATH = re.compile(r"(?<![\w/:.~-])(?:/Users/|/home/|~/)[^\s<>|`'\"()\[\]{}&]*")
+_SLACK_ENTITY_SPAN = re.compile(r"<[^<>\n]*>")
+_PATH_TRAILING_PUNCTUATION = ".,;:!?"
+REDACTED_PATH_PREFIX = ".../"
+# The block keys whose string values are shown to readers.
+_BLOCK_TEXT_KEY = "text"
+
+
+def _shortened_path(match: re.Match[str]) -> str:
+    path = match.group(0)
+    trimmed = path.rstrip(_PATH_TRAILING_PUNCTUATION)
+    trailing = path[len(trimmed) :]
+    last_part = trimmed.rstrip("/").rsplit("/", 1)[-1]
+    if last_part in ("", "~"):
+        return f"...{trailing}"
+    return f"{REDACTED_PATH_PREFIX}{last_part}{trailing}"
+
+
+def redact_paths(text: str) -> str:
+    # Each local path cut to its last part (`/Users/me/dev/pan` -> `.../pan`), outside Slack
+    # entities only.
+    pieces: list[str] = []
+    position = 0
+    for entity in _SLACK_ENTITY_SPAN.finditer(text):
+        pieces.append(_LOCAL_PATH.sub(_shortened_path, text[position : entity.start()]))
+        pieces.append(entity.group(0))
+        position = entity.end()
+    pieces.append(_LOCAL_PATH.sub(_shortened_path, text[position:]))
+    return "".join(pieces)
+
+
+def redact_block_paths(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # redact_paths on every `text` string in the blocks, at any depth; a copy is returned.
+    return [_redact_block_value(block) for block in blocks]
+
+
+def _redact_block_value(value: Any, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {
+            entry_key: _redact_block_value(entry_value, entry_key)
+            for entry_key, entry_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_block_value(entry) for entry in value]
+    if isinstance(value, str) and key == _BLOCK_TEXT_KEY:
+        return redact_paths(value)
+    return value

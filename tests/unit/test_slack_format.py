@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.slack_format import split_for_slack, to_slack_mrkdwn
+from pan.slack_format import redact_paths, split_for_slack, to_slack_mrkdwn
 
 
 @pytest.mark.parametrize(
@@ -164,3 +164,37 @@ def test_split_for_slack_keeps_every_line_in_order() -> None:
 )
 def test_an_answer_converts_to_slack_mrkdwn(answer: str, expected: str) -> None:
     assert to_slack_mrkdwn(answer) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("see /Users/someone/dev/pan-worktrees/pan-7", "see .../pan-7"),
+        ("in /home/someone/repo/", "in .../repo"),
+        ("at ~/dev/pan/src/app.py, line 3", "at .../app.py, line 3"),
+        ("(/Users/someone/a/b)", "(.../b)"),
+        ("`/Users/someone/a/b`", "`.../b`"),
+        ("https://example.com/home/someone/page", "https://example.com/home/someone/page"),
+        ("file:///Users/someone/a.txt", "file:///Users/someone/a.txt"),
+        (
+            "<https://example.com/Users/a|/Users/someone/a/b>",
+            "<https://example.com/Users/a|/Users/someone/a/b>",
+        ),
+        ("<@U000TEST> moved src/home/x", "<@U000TEST> moved src/home/x"),
+        ("nothing to cut", "nothing to cut"),
+    ],
+    ids=[
+        "users",
+        "home-trailing-slash",
+        "tilde-with-comma",
+        "in-parentheses",
+        "in-backticks",
+        "url-untouched",
+        "file-url-untouched",
+        "slack-link-untouched",
+        "relative-path-untouched",
+        "plain",
+    ],
+)
+def test_redact_paths(text: str, expected: str) -> None:
+    assert redact_paths(text) == expected

@@ -224,7 +224,7 @@ def send_to_session(
     clock: Clock,
     retry_hint: str | None = None,
 ) -> ThreadRecord:
-    # `to <selector>: <task>`: send the task to the live session the selector names exactly
+    # `pan send --to <selector>`: send the task to the live session the selector names exactly
     # (address, name, or Herdr label or space; see resolve_target), pan's own or a desk
     # session, and tie the thread to it (the session's previous thread is untied). The task
     # goes under the "from Slack" line naming its Inbox thread. With no exact match, or a label
@@ -346,8 +346,8 @@ def follow_up_to_session(
     clock: Clock,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
-    # A message with no route words in a tied thread goes to the tied session, with the same
-    # busy and blocked refusals as `to <name>:`. A desk session gets the "from Slack" line;
+    # A follow-up in a tied thread goes to the tied session, with the same busy and blocked
+    # refusals as a send to a named session. A desk session gets the "from Slack" line;
     # pan's own sessions already know their Inbox thread from their brief. When the session
     # has ended: for pan's own, nothing is posted and TerminalGoneError tells the caller to
     # reopen it; a desk session is never reopened, so pan says it ended.

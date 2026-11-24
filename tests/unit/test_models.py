@@ -4,17 +4,13 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from pan.models import (
     Agent,
     Autonomy,
-    Directive,
     InboxItem,
     PanConfig,
-    RouteKind,
     SlackConfig,
-    TaskMode,
     ThreadRecord,
     UserPolicy,
     WorkerStatus,
@@ -78,15 +74,6 @@ def test_inbox_item_parses_typed_fields() -> None:
 
     assert item.is_thread_reply is True
     assert isinstance(item.received_at, datetime)
-
-
-def test_directive_defaults() -> None:
-    directive = Directive(cleaned_text="do the work")
-
-    assert directive.mode is TaskMode.DELEGATE
-    assert directive.target_stream is None
-    assert directive.agent is None
-    assert directive.cleaned_text == "do the work"
 
 
 def test_thread_record_defaults_to_spawning() -> None:
@@ -157,10 +144,6 @@ def test_herdr_era_record_loads_as_lost(legacy_status: str, expected_status: Wor
 @pytest.mark.parametrize(
     "enum_member, value",
     [
-        (TaskMode.DELEGATE, "delegate"),
-        (TaskMode.SESSIONS, "sessions"),
-        (RouteKind.NEW, "new"),
-        (RouteKind.TO, "to"),
         (WorkerStatus.SPAWNING, "spawning"),
         (WorkerStatus.RUNNING, "running"),
         (WorkerStatus.BLOCKED, "blocked"),
@@ -185,9 +168,3 @@ def test_user_policy_defaults_are_permissive_wildcards() -> None:
 
 def test_slack_config_defaults_socket_mode_on() -> None:
     assert SlackConfig().socket_mode is True
-
-
-def test_directive_is_frozen() -> None:
-    directive = Directive(cleaned_text="x")
-    with pytest.raises(ValidationError):
-        directive.cleaned_text = "y"  # type: ignore[misc]

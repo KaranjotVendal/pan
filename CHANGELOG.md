@@ -7,6 +7,46 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Changed
+
+- The orchestrator decides what a message means; code keeps only the actions and the safety
+  rules. The gateway no longer parses route words: it writes the raw message to the inbox (the
+  `@pan help` fast path and the untagged-reply rule are unchanged). `pan inbox drain --json` now
+  gives each item as `item`, `text` (the message with the mention, a trailing client signature
+  and phone punctuation cleaned; `clean_message`, formerly `_clean_message`), `tie` and
+  `open_question` (pan's open `pan propose` question in the thread, with
+  `answered_by_requester`). The `route`, `directive` and `cancels_confirmation` fields are gone;
+  an inbox item an older gateway wrote with a `route` still loads.
+- `pan send --to` needs `--request-text`, the person's own message, and exits 28 (nothing sent or
+  posted) unless the name appears in it as a whole word or phrase, any letter case, as well as
+  matching exactly one live session as before.
+- `pan done --discard` needs `--request-text` holding `--discard` as the person typed it (a
+  phone's `—discard` counts); otherwise it exits 33 (`DiscardNotRequestedError`) and touches or
+  posts nothing.
+- Confirmations: the orchestrator reads the reply to a "Send this to ...?" question.
+  `pan inbox drain` marks the question answered (`PendingConfirmation.answered_at`) when the
+  requester replies in its thread after it was asked; `pan confirm --choice` (`yes`, `y` or 1-3)
+  exits 34 (`UnansweredQuestionError`), sending and posting nothing, until then. Expiry, range
+  and still-live checks are unchanged; a decline is `--cancel`. `pan propose` requires
+  `--requester`.
+- `pan sessions --match` is replaced by `--show <address,...>` with `--thread`, `--channel` and
+  `--requester`: the orchestrator picks the sessions and their order, pan sends at most 5 of them
+  to the requester alone.
+- Public posts and edits (`post_message`, `post_blocks`, `update_message`, block texts included)
+  cut local paths under `/Users`, `/home` and `~` to `.../<last part>` (`redact_paths`); Slack
+  entities and URLs are left alone. Ephemeral messages to the requester are not cut.
+- The orchestrating skill is rewritten (about 140 lines): what each inbox item gives, the
+  actions with their exit codes, and the safety rules. The Slack help footer describes requests
+  in plain words.
+
+### Removed
+
+- `parse_directive`, `parse_route`, `route_for_source`, `parse_confirm_reply`, the retired-flag
+  notices, `TaskMode`, `RouteKind`, `Route`, `Directive`, `InboxItem.route`, `OpenQuestions`,
+  `route_with_pending`, `select_sessions_for_slack`, `match_words` and
+  `SESSIONS_MATCH_MIN_WORD_LENGTH`. X-sourced threads are to be refused by `send` and `propose`
+  once the X front door lands (TODO, MOB-87).
+
 ### Fixed
 
 - The gateway forwarded every human thread reply without an `@pan` mention, in any channel the
