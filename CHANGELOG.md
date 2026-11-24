@@ -235,6 +235,17 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- `check` picks the status message's state from the live terminal (`check_state`): hc's `done` and
+  `idle` are Finished (a finished turn), `working` is Working, `blocked` is Waiting for you, an
+  agent error is Stopped, and no status or an unknown one shows what pan recorded, never Closed or
+  Stopped while the terminal is live. A terminal that is gone is Stopped, or Closed when pan
+  recorded it closed by `@pan done`. Before, a live idle session whose hc status was `done` showed
+  Closed.
+- An answer is never posted twice. The Stop hook and `check` post it through `post_answer`, which
+  stores a SHA-256 digest of it on the record (`last_answer_digest`, None on older records,
+  `ThreadMap.record_posted_answer`) and skips an answer equal to the last one posted. In the
+  reply-in-Slack mode `check` no longer reposts the answer the Stop hook already posted; on demand
+  it posts it once. Screen text (no transcript) is not deduplicated.
 - Slack output is redesigned so a shared thread is easy to read. Each thread gets one status
   message (Block Kit: the state in bold with the task label under it, cut to
   `STATUS_LABEL_MAX_LENGTH` (80), and a grey context line with the session name, the elapsed time

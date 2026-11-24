@@ -4,14 +4,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from terminal_host_fakes import make_terminal
 
-from pan.models import StatusState, ThreadRecord, WorkerStatus
+from pan.models import AgentStatus, StatusState, TerminalState, ThreadRecord, WorkerStatus
 from pan.slack_render import (
+    check_state,
     elapsed_text,
     escape_mrkdwn,
     private_details_text,
     slack_time,
-    state_for_worker_status,
     status_blocks,
     status_label,
     status_text,
@@ -87,18 +88,55 @@ def test_escape_mrkdwn(text: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "status, expected_state",
+    "terminal_state, agent_status, recorded, expected_state",
     [
-        (WorkerStatus.SPAWNING, StatusState.WORKING),
-        (WorkerStatus.RUNNING, StatusState.WORKING),
-        (WorkerStatus.BLOCKED, StatusState.WAITING),
-        (WorkerStatus.IDLE, StatusState.FINISHED),
-        (WorkerStatus.DONE, StatusState.CLOSED),
-        (WorkerStatus.FAILED, StatusState.STOPPED),
+        (TerminalState.LIVE, AgentStatus.WORKING, WorkerStatus.IDLE, StatusState.WORKING),
+        (TerminalState.LIVE, AgentStatus.BLOCKED, WorkerStatus.RUNNING, StatusState.WAITING),
+        (TerminalState.LIVE, AgentStatus.IDLE, WorkerStatus.RUNNING, StatusState.FINISHED),
+        (TerminalState.LIVE, AgentStatus.DONE, WorkerStatus.IDLE, StatusState.FINISHED),
+        (TerminalState.LIVE, AgentStatus.DONE, WorkerStatus.DONE, StatusState.FINISHED),
+        (TerminalState.LIVE, AgentStatus.ERROR, WorkerStatus.RUNNING, StatusState.STOPPED),
+        (TerminalState.LIVE, AgentStatus.UNKNOWN, WorkerStatus.RUNNING, StatusState.WORKING),
+        (TerminalState.LIVE, AgentStatus.UNKNOWN, WorkerStatus.IDLE, StatusState.FINISHED),
+        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.SPAWNING, StatusState.WORKING),
+        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.FAILED, StatusState.FINISHED),
+        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.BLOCKED, StatusState.WAITING),
+        (TerminalState.FINISHED, AgentStatus.DONE, WorkerStatus.IDLE, StatusState.STOPPED),
+        (None, None, WorkerStatus.IDLE, StatusState.STOPPED),
+        (None, None, WorkerStatus.FAILED, StatusState.STOPPED),
+        (None, None, WorkerStatus.DONE, StatusState.CLOSED),
+    ],
+    ids=[
+        "working",
+        "blocked-on-a-prompt",
+        "idle",
+        "hc-done-is-a-finished-turn",
+        "hc-done-never-closed-while-live",
+        "agent-error",
+        "unknown-while-running",
+        "unknown-while-idle",
+        "no-status-while-starting",
+        "no-status-never-stopped-while-live",
+        "no-status-blocked-record",
+        "terminal-finished",
+        "terminal-gone",
+        "terminal-gone-failed",
+        "terminal-gone-after-pan-done",
     ],
 )
-def test_state_for_worker_status(status: WorkerStatus, expected_state: StatusState) -> None:
-    assert state_for_worker_status(status) is expected_state
+def test_check_state(
+    terminal_state: TerminalState | None,
+    agent_status: AgentStatus | None,
+    recorded: WorkerStatus,
+    expected_state: StatusState,
+) -> None:
+    terminal = (
+        make_terminal("t7", name="pan-login", state=terminal_state, agent_status=agent_status)
+        if terminal_state is not None and agent_status is not None
+        else None
+    )
+
+    assert check_state(terminal, recorded) is expected_state
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+
 from pan.errors import SlackPostError
+from pan.gateway.slack_post import slack_post_parts
 from pan.logging import initialise_logger
 from pan.models import ReplyMode, StatusState, ThreadRecord
 from pan.seams import Clock, SlackAdapter, ThreadMap
@@ -53,6 +56,25 @@ def publish_status(
     )
     logger.info(f"status posted thread={record.thread_ts} state={state}")
     return record.model_copy(update={"status_message_ts": message_ts})
+
+
+def answer_digest(answer: str) -> str:
+    return hashlib.sha256(answer.encode()).hexdigest()
+
+
+def post_answer(
+    *, slack: SlackAdapter, thread_map: ThreadMap, record: ThreadRecord, answer: str
+) -> bool:
+    # Post the session's answer alone (split into parts when long), unless it is the answer
+    # pan last posted to this thread (the Stop hook already posted it, and `check` asks
+    # again). Stores its digest. True when posted. A Slack failure raises SlackPostError.
+    digest = answer_digest(answer)
+    if digest == record.last_answer_digest:
+        logger.info(f"answer already posted, not posting again thread={record.thread_ts}")
+        return False
+    slack_post_parts(slack, record.channel, record.thread_ts, answer)
+    thread_map.record_posted_answer(record.thread_ts, digest, session_name=record.terminal_name)
+    return True
 
 
 def send_private_details(*, slack: SlackAdapter, record: ThreadRecord) -> None:

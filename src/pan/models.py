@@ -190,6 +190,9 @@ class ThreadRecord(BaseModel):
     status_message_ts: str | None = None
     status_label: str | None = None
     task_started_at: datetime | None = None
+    # A digest of the last answer pan posted to the thread (Stop hook or `check`), so the same
+    # answer is never posted twice. None until one is posted.
+    last_answer_digest: str | None = None
 
     @model_validator(mode="before")
     @classmethod

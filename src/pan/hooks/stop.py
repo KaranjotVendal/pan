@@ -8,11 +8,10 @@ from pydantic import BaseModel
 
 from pan.adapters.clock import SystemClock
 from pan.errors import ThreadNotFoundError
-from pan.gateway.slack_post import slack_post_parts
 from pan.logging import initialise_logger
 from pan.models import ReplyMode, StatusState, WorkerStatus
 from pan.seams import Clock, SlackAdapter, ThreadMap
-from pan.status_message import publish_status
+from pan.status_message import post_answer, publish_status
 from pan.transcript import last_assistant_text
 
 logger = initialise_logger(__name__)
@@ -61,7 +60,7 @@ def stop_hook(
             else None
         )
         if answer:
-            slack_post_parts(slack, channel, thread_ts, answer)
+            post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
         else:
             logger.info(f"stop hook found no answer to post thread={thread_ts}")
     logger.info(f"stop hook thread={thread_ts} status=idle reply_mode={record.reply_mode}")

@@ -198,6 +198,16 @@ class FileThreadMap:
         self._write_all(records)
         logger.info(f"threadmap status message recorded thread={thread_ts}")
 
+    def record_posted_answer(
+        self, thread_ts: str, answer_digest: str, *, session_name: str | None = None
+    ) -> None:
+        records = self._read_all()
+        record = self._require(records, thread_ts, session_name)
+        record.last_answer_digest = answer_digest
+        record.updated_at = self._clock.now()
+        self._write_all(records)
+        logger.info(f"threadmap posted answer recorded thread={thread_ts}")
+
     def record_task(
         self, thread_ts: str, label: str, started_at: datetime, *, session_name: str | None = None
     ) -> None:

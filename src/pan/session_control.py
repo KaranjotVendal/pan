@@ -50,9 +50,8 @@ from pan.sessions import (
     inbox_thread_known,
     joins_by_address,
     joins_terminal,
-    worker_status_for,
 )
-from pan.slack_render import state_for_worker_status, status_label
+from pan.slack_render import check_state, status_label
 from pan.spawn import (
     RELAYED_FOLLOW_UP_SENTENCE,
     desk_session_ended_reply,
@@ -60,7 +59,7 @@ from pan.spawn import (
     slack_reply_sentence,
     upgraded_reply_mode,
 )
-from pan.status_message import publish_status, send_private_details
+from pan.status_message import post_answer, publish_status, send_private_details
 from pan.transcript import last_assistant_text
 
 logger = initialise_logger(__name__)
@@ -463,20 +462,15 @@ def clean_screen_text(screen: str, max_lines: int = CHECK_SCREEN_MAX_LINES) -> s
     return "\n".join(tail)
 
 
-def latest_answer(
+def screen_answer(
     record: ThreadRecord,
     terminal: Terminal | None,
     terminal_host: TerminalHost,
     *,
     screen_lines: int,
 ) -> str | None:
-    # The tied session's latest answer, as is: the last assistant text from its transcript,
-    # or, without one (a desk session has no hooks), its recent screen lines labelled as such.
-    # None when there is neither. Nothing about the session is added: that is in the status
-    # message and the requester's private details.
-    answer = last_assistant_text(record.transcript_path) if record.transcript_path else None
-    if answer is not None:
-        return answer
+    # For a session with no transcript (a desk session has no hooks): its recent screen lines,
+    # cleaned and labelled as such. None when there is no live terminal or nothing to show.
     if terminal is None:
         return None
     try:
@@ -518,13 +512,19 @@ def check_thread(
         return
     record = _with_inbox_link(record, inbox_directory, thread_map)
     terminal = _live_terminal(terminal_host, record)
-    state = state_for_worker_status(worker_status_for(terminal, record.status))
+    state = check_state(terminal, record.status)
     record = publish_status(
         slack=slack, thread_map=thread_map, record=record, state=state, clock=clock
     )
-    answer = latest_answer(record, terminal, terminal_host, screen_lines=screen_lines)
+    # The last answer in the transcript, posted alone unless pan already posted that same
+    # answer (the Stop hook, in the reply-in-Slack mode); without a transcript, screen text.
+    answer = last_assistant_text(record.transcript_path) if record.transcript_path else None
     if answer is not None:
-        slack_post_parts(slack, channel, thread_ts, answer)
+        post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
+    else:
+        screen = screen_answer(record, terminal, terminal_host, screen_lines=screen_lines)
+        if screen is not None:
+            slack_post_parts(slack, channel, thread_ts, screen)
     send_private_details(slack=slack, record=record)
     logger.info(f"check thread={thread_ts} session={record.terminal_name}")
 

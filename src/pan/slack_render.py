@@ -4,7 +4,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pan.config import STATUS_LABEL_MAX_LENGTH
-from pan.models import StatusState, ThreadRecord, WorkerStatus
+from pan.models import (
+    AgentStatus,
+    StatusState,
+    Terminal,
+    TerminalState,
+    ThreadRecord,
+    WorkerStatus,
+)
 from pan.sessions import inbox_thread_known
 
 # What pan's status message in a thread looks like. Everything here is pure: the blocks and
@@ -19,22 +26,37 @@ STATUS_TITLES: dict[StatusState, str] = {
     StatusState.STOPPED: "Stopped",
 }
 
-# The status message's state for the status a session's terminal implies (`check`).
-_STATE_FOR_WORKER_STATUS: dict[WorkerStatus, StatusState] = {
+# The state `check` shows for a live terminal, from the agent status hc reports. hc's `done`
+# means the turn finished, not that the session was closed: Closed comes only from `@pan done`.
+_STATE_FOR_LIVE_AGENT: dict[AgentStatus, StatusState] = {
+    AgentStatus.WORKING: StatusState.WORKING,
+    AgentStatus.BLOCKED: StatusState.WAITING,
+    AgentStatus.IDLE: StatusState.FINISHED,
+    AgentStatus.DONE: StatusState.FINISHED,
+    AgentStatus.ERROR: StatusState.STOPPED,
+}
+# A live terminal reporting no status or an unknown one (a fresh Claude session before its
+# first turn, say) shows what pan recorded; the terminal is live, so never Closed or Stopped.
+_STATE_FOR_LIVE_RECORD: dict[WorkerStatus, StatusState] = {
     WorkerStatus.SPAWNING: StatusState.WORKING,
     WorkerStatus.RUNNING: StatusState.WORKING,
     WorkerStatus.BLOCKED: StatusState.WAITING,
     WorkerStatus.IDLE: StatusState.FINISHED,
-    WorkerStatus.DONE: StatusState.CLOSED,
-    WorkerStatus.FAILED: StatusState.STOPPED,
+    WorkerStatus.DONE: StatusState.FINISHED,
+    WorkerStatus.FAILED: StatusState.FINISHED,
 }
 
 _SECONDS_PER_MINUTE = 60
 _MINUTES_PER_HOUR = 60
 
 
-def state_for_worker_status(status: WorkerStatus) -> StatusState:
-    return _STATE_FOR_WORKER_STATUS[status]
+def check_state(terminal: Terminal | None, recorded: WorkerStatus) -> StatusState:
+    # The status message's state on `check`. A terminal that is gone (or finished) is Stopped,
+    # unless pan recorded the session as closed by `@pan done` (DONE is only set there).
+    if terminal is None or terminal.state is TerminalState.FINISHED:
+        return StatusState.CLOSED if recorded is WorkerStatus.DONE else StatusState.STOPPED
+    live_state = _STATE_FOR_LIVE_AGENT.get(terminal.agent_status)
+    return live_state if live_state is not None else _STATE_FOR_LIVE_RECORD[recorded]
 
 
 def status_label(task: str, max_length: int = STATUS_LABEL_MAX_LENGTH) -> str:

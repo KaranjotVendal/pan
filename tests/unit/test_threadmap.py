@@ -244,6 +244,7 @@ def test_a_record_written_before_session_control_loads_with_defaults(tmp_path: P
         "status_message_ts",
         "status_label",
         "task_started_at",
+        "last_answer_digest",
     }
     older_payload = {
         key: value
@@ -267,6 +268,7 @@ def test_a_record_written_before_session_control_loads_with_defaults(tmp_path: P
     assert loaded.status_message_ts is None
     assert loaded.status_label is None
     assert loaded.task_started_at is None
+    assert loaded.last_answer_digest is None
 
 
 def test_tie_moves_a_session_from_its_old_thread(tmp_path: Path) -> None:

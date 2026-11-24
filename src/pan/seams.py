@@ -98,6 +98,11 @@ class ThreadMap(Protocol):
         self, thread_ts: str, message_ts: str, *, session_name: str | None = None
     ) -> None: ...
 
+    # The digest of the answer pan just posted to the thread (see last_answer_digest).
+    def record_posted_answer(
+        self, thread_ts: str, answer_digest: str, *, session_name: str | None = None
+    ) -> None: ...
+
     # The task the status message shows: its short label and when it started.
     def record_task(
         self, thread_ts: str, label: str, started_at: datetime, *, session_name: str | None = None

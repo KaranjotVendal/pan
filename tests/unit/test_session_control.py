@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from pan.errors import (
     UnsafeWorktreeError,
     UnsavedWorkError,
 )
+from pan.hooks.stop import stop_hook
 from pan.interface import INCOMPLETE_READ_NOTICE
 from pan.models import (
     AgentStatus,
@@ -46,6 +48,7 @@ from pan.session_control import (
 )
 from pan.slack_format import to_slack_mrkdwn
 from pan.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
+from pan.status_message import answer_digest
 from pan.threadmap import FileThreadMap
 
 _FIXED_NOW = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
@@ -1654,3 +1657,58 @@ def test_done_retry_after_a_failed_branch_delete_reports_only_the_branch(
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
+
+
+@pytest.mark.parametrize(
+    "reply_mode, expected_posts_after_check",
+    [
+        (ReplyMode.SLACK, ["Fixed the login page."]),
+        (ReplyMode.ON_DEMAND, ["Fixed the login page."]),
+    ],
+    ids=["reply-in-slack-stop-hook-posted-it", "on-demand-check-posts-it"],
+)
+def test_check_never_reposts_the_answer_already_posted(
+    tmp_path: Path, reply_mode: ReplyMode, expected_posts_after_check: list[str]
+) -> None:
+    # In the reply-in-Slack mode the Stop hook posts the answer, so check only updates the
+    # status; on demand nothing was posted, so check posts it. Either way it appears once.
+    transcript = _transcript_answering(tmp_path, "Fixed the login page.")
+    thread_map = _thread_map(tmp_path, _record(reply_mode=reply_mode))
+    terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=AgentStatus.DONE))
+    slack = RecordingSlack()
+    stop_payload = json.dumps(
+        {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
+    )
+
+    stop_hook(
+        _OLD_THREAD,
+        "C0TEST",
+        thread_map,
+        slack,
+        stdin=io.StringIO(stop_payload),
+        session_name="pan-7",
+        clock=FixedClock(),
+    )
+    thread_map.record_session(_OLD_THREAD, "s1", transcript, session_name="pan-7")
+    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, slack)
+
+    assert slack.texts() == expected_posts_after_check
+    # hc's `done` on a live terminal is a finished turn, never Closed.
+    assert set(slack.status_texts()) == {"Finished"}
+
+
+def test_check_posts_a_newer_answer_than_the_one_already_posted(tmp_path: Path) -> None:
+    record = _record(
+        transcript_path=_transcript_answering(tmp_path, "Second answer."),
+        last_answer_digest=answer_digest("First answer."),
+    )
+    thread_map = _thread_map(tmp_path, record)
+    slack = RecordingSlack()
+
+    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+
+    assert slack.texts() == ["Second answer."]
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.last_answer_digest == answer_digest("Second answer.")

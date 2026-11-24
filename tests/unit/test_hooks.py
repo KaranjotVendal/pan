@@ -29,6 +29,7 @@ class FakeThreadMap:
         self.sessions: list[tuple[str, str, Path | None]] = []
         self.inbox_threads: list[tuple[str, str, str | None]] = []
         self.status_messages: list[tuple[str, str]] = []
+        self.posted_answers: list[str] = []
         # The session name each update named, so a test can see which record was picked.
         self.updated_session_names: list[str | None] = []
         if seed_thread is not None:
@@ -92,6 +93,14 @@ class FakeThreadMap:
         self.status_messages.append((thread_ts, message_ts))
         record = self.records[thread_ts]
         self.records[thread_ts] = record.model_copy(update={"status_message_ts": message_ts})
+
+    # The answer digest each post recorded, in order.
+    def record_posted_answer(
+        self, thread_ts: str, answer_digest: str, *, session_name: str | None = None
+    ) -> None:
+        self.posted_answers.append(answer_digest)
+        record = self.records[thread_ts]
+        self.records[thread_ts] = record.model_copy(update={"last_answer_digest": answer_digest})
 
 
 class FakeSlack(RecordingSlack):
@@ -763,3 +772,22 @@ def test_inbox_link_hook_skips_tools_other_than_the_inbox_and_repl(tool_name: st
     inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(json.dumps(payload)))
 
     assert thread_map.inbox_threads == []
+
+
+def test_stop_hook_never_posts_the_same_answer_twice(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "same"}]}}
+        )
+    )
+    thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
+    payload = json.dumps(
+        {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
+    )
+
+    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+
+    assert slack.posts == [("C1", _THREAD, "same")]
+    assert len(thread_map.posted_answers) == 1

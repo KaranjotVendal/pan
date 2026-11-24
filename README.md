@@ -201,7 +201,8 @@ pan keeps a thread readable for everyone in the channel:
   the message was deleted or cannot be edited, pan posts a new one.
 - **The answer as its own message**, converted from Markdown to Slack's format (links, bold,
   headings as bold lines, bullets, code blocks, strikethrough), with no session name, Inbox link or
-  "has finished" line around it. Long answers are split into numbered parts.
+  "has finished" line around it. Long answers are split into numbered parts. The same answer is
+  never posted twice: `@pan check` after a reply-in-Slack turn only updates the status.
 - **Private details only to you.** The session's Plannotator Inbox thread (its link is on your
   machine, so it means nothing to colleagues), its name and the terminal address arrive as a
   message only the requester can see, when the session starts and on `@pan check`. pan never puts
