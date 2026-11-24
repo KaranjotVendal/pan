@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
 from typing import Any
 
+from pydantic import ValidationError
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from pan.config import CODE_FENCE
 from pan.directive import parse_route
 from pan.errors import SlackPostError, UnauthorizedSenderError
-from pan.gateway.auth import auth_check
+from pan.gateway.auth import auth_check, is_authorized
 from pan.gateway.slack_post import slack_post
 from pan.help import parse_help_request, render_cli_help
 from pan.logging import initialise_logger
 from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadSource
-from pan.seams import Clock, InboxStore
+from pan.seams import Clock, InboxStore, ThreadMap
 
 logger = initialise_logger(__name__)
 
 _EYES = "eyes"
+# Message subtypes that are still a person's reply: one with an attachment, and one also sent
+# to the channel. Every other subtype (edits, deletes, joins, ...) is not a new message.
+_FORWARDED_SUBTYPES = frozenset({"file_share", "thread_broadcast"})
+# How many threads the gateway remembers accepting an @pan mention in (oldest dropped first).
+_MENTIONED_THREADS_LIMIT = 500
 
 
 class BoltSlackAdapter:
@@ -29,8 +37,20 @@ class BoltSlackAdapter:
         clock: Clock,
         *,
         web_client: WebClient | None = None,
+        thread_map: ThreadMap | None = None,
     ) -> None:
         self._config = config
+        # Only the gateway's message handler reads the thread map, to tell a follow-up in a
+        # thread pan is already working in from an unrelated reply. An adapter built
+        # without one (the posting-only commands) forwards no untagged reply.
+        self._thread_map = thread_map
+        # Threads (channel, thread_ts) this gateway accepted an @pan mention in. A follow-up
+        # sent right after the mention, before the orchestrator ties the thread (tens of
+        # seconds), is forwarded through this set. In memory only: after a restart the set
+        # is empty and the tie alone decides. Bolt runs handlers on worker threads, so a lock
+        # guards it.
+        self._mentioned_threads: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._mentioned_threads_lock = threading.Lock()
         self._inbox = inbox_store
         self._clock = clock
         self._app_token = credentials.app_token
@@ -159,21 +179,74 @@ class BoltSlackAdapter:
         )
         self._inbox.append(item)
         logger.info(f"gateway appended event id={event_id} channel={channel}")
+        if event.get("type") == "app_mention":
+            self._remember_mentioned_thread(channel, thread_ts)
+
+    def _remember_mentioned_thread(self, channel: str, thread_ts: str) -> None:
+        with self._mentioned_threads_lock:
+            self._mentioned_threads[(channel, thread_ts)] = None
+            self._mentioned_threads.move_to_end((channel, thread_ts))
+            while len(self._mentioned_threads) > _MENTIONED_THREADS_LIMIT:
+                self._mentioned_threads.popitem(last=False)
+
+    def _was_mentioned_in(self, channel: str, thread_ts: str) -> bool:
+        with self._mentioned_threads_lock:
+            return (channel, thread_ts) in self._mentioned_threads
 
     def _should_forward_message(self, event: dict[str, Any], bot_user_id: str | None) -> bool:
-        # The gateway stays dumb but must not double-append: a message event is
-        # forwarded only when it is a human thread reply that does NOT mention the
-        # bot. A bot's own post (bot_id) or an edit/system message (subtype) is
-        # ignored; a top-level (non-thread) message is ignored; and a message that
-        # mentions the bot is left to the app_mention handler — Slack delivers an
-        # in-thread mention as BOTH an app_mention and a message with distinct event
-        # ids, so forwarding both would append the same request twice.
+        # The gateway stays dumb but must not double-append, and must not pick up
+        # unrelated chatter: a message event is forwarded only when it is an allowed
+        # person's thread reply that does NOT mention the bot, in a thread pan is working
+        # in — tied in the thread map, or one this gateway just accepted an @pan mention in
+        # and the orchestrator has not tied yet. A bot's own post (bot_id) and an
+        # edit/system message (any subtype but file_share and thread_broadcast) are ignored;
+        # a top-level (non-thread) message is ignored; a sender the allowlist refuses is
+        # ignored; a reply in any other thread (unknown, or untied by done, forget, a move
+        # with `to <name>:` or a failed start) is ignored, so starting work there still
+        # needs an @pan mention; and a message that mentions the bot is left to the
+        # app_mention handler — Slack delivers an in-thread mention as BOTH an app_mention
+        # and a message with distinct event ids, so forwarding both would append the same
+        # request twice. The cheap checks run first; the thread map is read last.
         mentions_bot = bot_user_id is not None and f"<@{bot_user_id}>" in event.get("text", "")
+        subtype = event.get("subtype")
+        thread_ts = event.get("thread_ts")
+        channel = event.get("channel", "")
+        if (
+            event.get("bot_id") is not None
+            or (subtype is not None and subtype not in _FORWARDED_SUBTYPES)
+            or thread_ts is None
+            or mentions_bot
+            or not is_authorized(event.get("user", ""), channel, self._config.users)
+        ):
+            return False
+        if self._was_mentioned_in(channel, thread_ts) or self._is_tied_thread(channel, thread_ts):
+            return True
+        logger.debug(
+            f"gateway ignored untagged reply in untied thread={thread_ts} channel={channel}"
+        )
+        return False
+
+    def _is_tied_thread(self, channel: str, thread_ts: str) -> bool:
+        # A thread lookup returns the thread's tied record when it has one, so the thread is
+        # tied exactly when that record is, for this Slack channel.
+        if self._thread_map is None:
+            return False
+        try:
+            record = self._thread_map.get(thread_ts)
+        except (OSError, ValueError, ValidationError) as e:
+            # An unreadable thread map must not take the gateway down, and a reply we cannot
+            # place is safer dropped than forwarded: forwarding could start a session in a
+            # stranger's thread, while a dropped follow-up can be resent with @pan.
+            logger.warning(
+                f"gateway could not read the thread map thread={thread_ts} "
+                f"channel={channel}: {type(e).__name__}"
+            )
+            return False
         return (
-            event.get("bot_id") is None
-            and event.get("subtype") is None
-            and event.get("thread_ts") is not None
-            and not mentions_bot
+            record is not None
+            and record.tied
+            and record.channel == channel
+            and record.source == ThreadSource.SLACK
         )
 
     def start(self) -> None:  # pragma: no cover - live Socket Mode run, not unit-tested

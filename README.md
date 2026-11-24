@@ -6,7 +6,9 @@ words at the start of the message (pure string parsing; it decides nothing about
 appends the request to an on-disk inbox. A filesystem watcher nudges a persistent orchestrator Claude
 session, which drains the inbox, follows the route, and runs each new task as its own
 Claude session in an isolated git worktree and its own herdr-core (`hc`) terminal. Each Slack thread
-is tied to the session it started, so follow-ups in that thread go to the same session; route words
+is tied to the session it started, so follow-ups in that thread go to the same session (a reply
+without `@pan` reaches pan only in a thread pan is already working in; in any thread not currently
+tied to a session or just started with `@pan`, mention `@pan`); route words
 (`new:`, `to <name>:`, `check`, `sessions`, `forget`, `done`) let you choose otherwise. When a session starts,
 the thread gets one status message that pan keeps editing as the session works; the session asks
 questions and reports progress in its Plannotator Inbox thread, whose link only you see. Slack hears
@@ -299,7 +301,11 @@ From Slack (or your phone), in a channel where the app is present:
 You should see the `:eyes:` ack within about a second, then a status message saying *Working*, and
 a message only you can see naming the session's Plannotator Inbox thread. The worker runs in its own git worktree and hc terminal and reports in
 that Inbox thread; add "reply in slack" to the message to also get its answer in the Slack thread. A
-follow-up reply in the same thread goes to the same worker; `@pan check` posts its latest answer.
+follow-up reply in the same thread goes to the same worker, with or without `@pan`, because pan is
+already working in that thread; `@pan check` posts its latest answer. A reply without `@pan` in any
+thread not currently tied to a session or just started with `@pan` is ignored: a thread pan never
+worked in, or one pan untied, by `@pan done`, `forget`, moving its session to another thread with
+`to <name>:`, or a failed start.
 When you start a session with a reply inside an existing thread, its brief tells it to read that
 whole thread first with its own Slack read-thread tool, so it sees the earlier messages; pan does
 not copy the thread anywhere.
