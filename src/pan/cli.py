@@ -165,8 +165,13 @@ def gateway() -> None:
     """Run the always-on Bolt Socket Mode gateway (blocking; launchd-supervised)."""
     config = _config()
     credentials = load_credentials(config.paths.credentials)
+    clock = SystemClock()
     adapter = BoltSlackAdapter(
-        credentials, config, FileInboxStore(config.paths.inbox), SystemClock()
+        credentials,
+        config,
+        FileInboxStore(config.paths.inbox),
+        clock,
+        thread_map=FileThreadMap(config.paths.threads, clock),
     )
     adapter.start()
 

@@ -13,7 +13,7 @@ from pan.gateway.slack_post import slack_post
 from pan.help import parse_help_request, render_cli_help
 from pan.logging import initialise_logger
 from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadSource
-from pan.seams import Clock, InboxStore
+from pan.seams import Clock, InboxStore, ThreadMap
 
 logger = initialise_logger(__name__)
 
@@ -29,8 +29,13 @@ class BoltSlackAdapter:
         clock: Clock,
         *,
         web_client: WebClient | None = None,
+        thread_map: ThreadMap | None = None,
     ) -> None:
         self._config = config
+        # Only the gateway's message handler reads the thread map, to tell a follow-up in a
+        # thread pan is already working in from an unrelated reply. An adapter built
+        # without one (the posting-only commands) forwards no untagged reply.
+        self._thread_map = thread_map
         self._inbox = inbox_store
         self._clock = clock
         self._app_token = credentials.app_token
@@ -161,20 +166,40 @@ class BoltSlackAdapter:
         logger.info(f"gateway appended event id={event_id} channel={channel}")
 
     def _should_forward_message(self, event: dict[str, Any], bot_user_id: str | None) -> bool:
-        # The gateway stays dumb but must not double-append: a message event is
-        # forwarded only when it is a human thread reply that does NOT mention the
-        # bot. A bot's own post (bot_id) or an edit/system message (subtype) is
-        # ignored; a top-level (non-thread) message is ignored; and a message that
-        # mentions the bot is left to the app_mention handler — Slack delivers an
-        # in-thread mention as BOTH an app_mention and a message with distinct event
-        # ids, so forwarding both would append the same request twice.
+        # The gateway stays dumb but must not double-append, and must not pick up
+        # unrelated chatter: a message event is forwarded only when it is a human thread
+        # reply that does NOT mention the bot, in a thread pan is already working in (the
+        # thread is tied in the thread map). A bot's own post (bot_id) or an edit/system
+        # message (subtype) is ignored; a top-level (non-thread) message is ignored; a reply
+        # in a thread pan is not working in (unknown, or untied after done/forget) is
+        # ignored, so starting work there still needs an @pan mention; and a message that
+        # mentions the bot is left to the app_mention handler — Slack delivers an in-thread
+        # mention as BOTH an app_mention and a message with distinct event ids, so
+        # forwarding both would append the same request twice.
         mentions_bot = bot_user_id is not None and f"<@{bot_user_id}>" in event.get("text", "")
-        return (
-            event.get("bot_id") is None
-            and event.get("subtype") is None
-            and event.get("thread_ts") is not None
-            and not mentions_bot
-        )
+        thread_ts = event.get("thread_ts")
+        if (
+            event.get("bot_id") is not None
+            or event.get("subtype") is not None
+            or thread_ts is None
+            or mentions_bot
+        ):
+            return False
+        if not self._is_tied_thread(thread_ts):
+            logger.debug(
+                f"gateway ignored untagged reply in untied thread={thread_ts} "
+                f"channel={event.get('channel')}"
+            )
+            return False
+        return True
+
+    def _is_tied_thread(self, thread_ts: str) -> bool:
+        # A thread lookup returns the thread's tied record when it has one, so the thread is
+        # tied exactly when that record is.
+        if self._thread_map is None:
+            return False
+        record = self._thread_map.get(thread_ts)
+        return record is not None and record.tied
 
     def start(self) -> None:  # pragma: no cover - live Socket Mode run, not unit-tested
         from slack_bolt import App

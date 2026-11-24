@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 
@@ -12,7 +13,16 @@ from slack_sdk.errors import SlackApiError
 
 from pan.errors import SlackPostError
 from pan.gateway.app import BoltSlackAdapter
-from pan.models import InboxItem, PanConfig, Route, RouteKind, SlackCredentials, ThreadSource
+from pan.models import (
+    InboxItem,
+    PanConfig,
+    Route,
+    RouteKind,
+    SlackCredentials,
+    ThreadRecord,
+    ThreadSource,
+)
+from pan.threadmap import FileThreadMap
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 
@@ -199,27 +209,102 @@ def test_post_message_delegates_to_client() -> None:
     assert timeline == [("post", ("C1", "1718000000.000200", "hello thread"))]
 
 
+_TEST_CHANNEL = "C000TEST"
+_TEST_THREAD_TS = "1700000000.000100"
+
+
+def _thread_record(terminal_name: str) -> ThreadRecord:
+    return ThreadRecord(
+        thread_ts=_TEST_THREAD_TS,
+        terminal_name=terminal_name,
+        channel=_TEST_CHANNEL,
+        worktree_path=Path("/tmp/wt") / terminal_name,
+        created_at=_FIXED_NOW,
+        updated_at=_FIXED_NOW,
+    )
+
+
+def _thread_map(tmp_path: Path, thread_state: str) -> FileThreadMap:
+    # unknown: no record; tied: one tied record; untied: the record survives `done`/`forget`
+    # untied; retied: an untied record plus the thread's newer tied session.
+    thread_map = FileThreadMap(tmp_path / "threads.json", FakeClock())
+    if thread_state in ("tied", "untied", "retied"):
+        thread_map.tie(_thread_record("pan-first"))
+    if thread_state == "untied":
+        thread_map.untie(_TEST_THREAD_TS)
+    if thread_state == "retied":
+        thread_map.tie(_thread_record("pan-second"))
+    return thread_map
+
+
+def _reply(**fields: str) -> dict[str, Any]:
+    return {"channel": _TEST_CHANNEL, "thread_ts": _TEST_THREAD_TS, "text": "a reply"} | fields
+
+
 @pytest.mark.parametrize(
-    "event, expected",
+    "event, thread_state, expected",
     [
-        ({"thread_ts": "1.2", "text": "just a reply"}, True),
-        ({"thread_ts": "1.2", "text": "hey <@Bbot> look", "user": "U1"}, False),
-        ({"thread_ts": "1.2", "bot_id": "Bbot", "text": "x"}, False),
-        ({"thread_ts": "1.2", "subtype": "message_changed", "text": "x"}, False),
-        ({"text": "top-level, no thread"}, False),
+        (_reply(), "tied", True),
+        (_reply(), "retied", True),
+        (_reply(), "unknown", False),
+        (_reply(), "untied", False),
+        (_reply(text="hey <@Bbot> look", user="U1"), "tied", False),
+        (_reply(bot_id="Bbot"), "tied", False),
+        (_reply(subtype="message_changed"), "tied", False),
+        ({"channel": _TEST_CHANNEL, "text": "top-level, no thread"}, "tied", False),
     ],
     ids=[
-        "human-thread-reply",
+        "untagged-reply-in-tied-thread",
+        "untagged-reply-in-thread-retied-to-a-newer-session",
+        "untagged-reply-in-unknown-thread",
+        "untagged-reply-in-untied-thread",
         "mention-left-to-app-mention",
         "bot-own-message",
         "edited-message-subtype",
         "non-thread-message",
     ],
 )
-def test_should_forward_message(event: dict[str, Any], expected: bool) -> None:
-    adapter, _client, _inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+def test_should_forward_message(
+    tmp_path: Path, event: dict[str, Any], thread_state: str, expected: bool
+) -> None:
+    timeline: list[tuple[str, Any]] = []
+    adapter = BoltSlackAdapter(
+        _credentials(),
+        _config({"U1": {"channels": ["*"]}}),
+        FakeInbox(timeline),
+        FakeClock(),
+        web_client=FakeWebClient(timeline),
+        thread_map=_thread_map(tmp_path, thread_state),
+    )
 
     assert adapter._should_forward_message(event, "Bbot") is expected
+
+
+def test_adapter_without_a_thread_map_forwards_no_untagged_reply() -> None:
+    adapter, _client, _inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+
+    assert adapter._should_forward_message(_reply(), "Bbot") is False
+
+
+def test_ignored_untagged_reply_logs_thread_and_channel_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, app_logger_capture: None
+) -> None:
+    timeline: list[tuple[str, Any]] = []
+    adapter = BoltSlackAdapter(
+        _credentials(),
+        _config({"U1": {"channels": ["*"]}}),
+        FakeInbox(timeline),
+        FakeClock(),
+        web_client=FakeWebClient(timeline),
+        thread_map=_thread_map(tmp_path, "unknown"),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="pan.gateway.app"):
+        adapter._should_forward_message(_reply(text="secret words"), "Bbot")
+
+    assert f"thread={_TEST_THREAD_TS}" in caplog.text
+    assert f"channel={_TEST_CHANNEL}" in caplog.text
+    assert "secret words" not in caplog.text
 
 
 @pytest.mark.parametrize(

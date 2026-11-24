@@ -314,7 +314,8 @@ the user to re-target by a precise address or name. Do not spawn or relay — a 
 ### (b) Tied thread, no route words — `route.kind == "task"`, `directive.mode == "delegate"`, `tie` is not null
 
 The thread's work belongs to `tie.session`. Send the follow-up there; never spawn a second session
-for it.
+for it. Only here can an item lack an `@pan` mention: the gateway forwards a reply without one only
+in a thread pan is already working in (a tied thread), and ignores it in any other thread.
 
 - `tie.status` is `spawning`, `running`, `idle` or `blocked`: send `cleaned_text` to the tied
   session through pan (never shell hc yourself, and never use `pan relay` for this):

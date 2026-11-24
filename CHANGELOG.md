@@ -9,6 +9,11 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Fixed
 
+- The gateway forwarded every human thread reply without an `@pan` mention, in any channel the
+  bot is in, so a reply in an unrelated thread started a new session there. A reply without a
+  mention is now forwarded only in a thread pan is already working in (tied in the thread map);
+  anywhere else it is ignored and starting work still needs `@pan`. The gateway command injects
+  the thread map into `BoltSlackAdapter` (`thread_map=`).
 - Follow-ups typed into a session come from the pan-orchestrator terminal, and a worker took them
   for another agent and answered with `hc send`. The worker brief and the "from Slack" line typed
   into a desk session now end with one sentence (`RELAYED_FOLLOW_UP_SENTENCE`): messages from
