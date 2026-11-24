@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import asks_to_discard, clean_message, names_selector, wants_slack_reply
+from pan.directive import (
+    asks_to_discard,
+    clean_message,
+    is_decline,
+    names_number,
+    names_selector,
+    wants_slack_reply,
+)
 
 
 @pytest.mark.parametrize(
@@ -96,17 +103,23 @@ def test_names_selector(request_text: str, selector: str, expected: bool) -> Non
     "request_text, expected",
     [
         ("<@U000BOT> done --discard", True),
-        ("<@U000BOT> done —discard", True),
-        ("<@U000BOT> please close it, --discard.", True),
+        ("<@U000BOT> Done   --DISCARD", True),
+        ("<@U000BOT> done \u2014discard", True),
+        ("<@U000BOT> done --discard\n*Sent using* <@U000TEST|Claude>", True),
+        ("<@U000BOT> please close it, --discard.", False),
+        ("<@U000BOT> close pan-7 --discard", False),
         ("<@U000BOT> done", False),
         ("<@U000BOT> just close it and throw it away", False),
         ("<@U000BOT> done discard", False),
         ("<@U000BOT> done --discarded", False),
     ],
     ids=[
-        "flag",
+        "exact",
+        "case-and-spaces",
         "phone-dash",
+        "with-signature",
         "flag-in-sentence",
+        "flag-after-other-words",
         "plain-done",
         "by-meaning",
         "no-dashes",
@@ -115,3 +128,46 @@ def test_names_selector(request_text: str, selector: str, expected: bool) -> Non
 )
 def test_asks_to_discard(request_text: str, expected: bool) -> None:
     assert asks_to_discard(request_text) is expected
+
+
+@pytest.mark.parametrize(
+    "answer_text, expected",
+    [
+        ("no", True),
+        ("No.", True),
+        ("n", True),
+        ("nope", True),
+        ("nah, leave it", True),
+        ("<@U000BOT> cancel", True),
+        ("stop", True),
+        ("none", True),
+        ("none of those", True),
+        ("hmm, none of them", True),
+        ("neither", True),
+        ("not those", True),
+        ("please don't send it", True),
+        ("yes", False),
+        ("1", False),
+        ("the second one", False),
+        ("nice, go with 2", False),
+        ("now please", False),
+    ],
+)
+def test_is_decline(answer_text: str, expected: bool) -> None:
+    assert is_decline(answer_text) is expected
+
+
+@pytest.mark.parametrize(
+    "answer_text, number, expected",
+    [
+        ("2", "2", True),
+        ("<@U000BOT> 2 please", "2", True),
+        ("option 3.", "3", True),
+        ("2nd", "2", False),
+        ("12", "2", False),
+        ("the second one", "2", False),
+        ("1", "2", False),
+    ],
+)
+def test_names_number(answer_text: str, number: str, expected: bool) -> None:
+    assert names_number(answer_text, number) is expected

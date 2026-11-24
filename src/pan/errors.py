@@ -56,7 +56,7 @@ class TargetNotFoundError(PanError): ...
 
 
 # `pan send --to <selector>` found no exact match (or several sessions share the label), or
-# the selector is not in the person's own message (--request-text), so nothing was sent and
+# the selector is not in the person's message pan recorded for --item, so nothing was sent and
 # nothing was posted: the orchestrator proposes a session with
 # `pan propose` and the person confirms it in the thread.
 class NoExactMatchError(PanError): ...
@@ -92,14 +92,21 @@ class UnsafeWorktreeError(PanError): ...
 class PrivateMessageError(PanError): ...
 
 
-# `pan done --discard` was asked for, but the person's own message (--request-text) does not
-# hold --discard: only the person may throw away unsaved work. Nothing was touched or posted.
+# `pan done --discard` was asked for, but the person's message pan recorded for --item is not
+# `done --discard` (or there is no such item in the thread): only the person may throw away unsaved work. Nothing was touched or posted.
 class DiscardNotRequestedError(PanError): ...
 
 
-# `pan confirm --choice` with no reply from the requester in the thread since pan asked
-# (`pan inbox drain` marks the question answered). Nothing was sent or posted.
+# `pan confirm --choice` with no reply from the requester in the thread since pan last asked
+# (`pan inbox drain` marks the question answered), or a reply that declines or does not hold
+# the chosen number. Nothing was sent or posted.
 class UnansweredQuestionError(PanError): ...
+
+
+# A thread from X asked to reach a session that already exists (pan send, pan propose). Text
+# from X is someone else's text, so until the X safety gate (MOB-87) is in place X may only
+# start new sessions. Nothing was sent or posted.
+class XSourceRefusedError(PanError): ...
 
 
 # Installing, loading, unloading or reading pan's launchd agents failed (`pan service`).

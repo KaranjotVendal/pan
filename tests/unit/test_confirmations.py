@@ -75,9 +75,9 @@ def _question(
     *candidates: ConfirmationCandidate,
     asked_at: datetime = _ASKED_AT,
     thread_ts: str = _THREAD,
-    answered: bool = True,
+    answer: str | None = "yes, 1, 2 or 3",
 ) -> PendingConfirmation:
-    # Answered a minute after it was asked unless `answered` is False.
+    # Answered with `answer` a minute after it was asked; unanswered when `answer` is None.
     return PendingConfirmation(
         thread_ts=thread_ts,
         channel="C0TEST",
@@ -86,7 +86,8 @@ def _question(
         requester="U0TEST",
         candidates=list(candidates),
         created_at=asked_at,
-        answered_at=asked_at + timedelta(minutes=1) if answered else None,
+        answered_at=asked_at + timedelta(minutes=1) if answer is not None else None,
+        answer_text=answer,
     )
 
 
@@ -174,19 +175,22 @@ def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Pa
     assert store.get(ThreadSource.SLACK, _THREAD) is None
 
 
-def test_store_marks_a_question_answered_once(tmp_path: Path) -> None:
+def test_store_keeps_the_latest_answer_and_clears_it(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.put(_question(_PAN_CANDIDATE, answered=False))
+    store.put(_question(_PAN_CANDIDATE, answer=None))
     first_reply = _ASKED_AT + timedelta(minutes=2)
+    second_reply = first_reply + timedelta(minutes=1)
 
-    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply)
-    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply + timedelta(minutes=1))
-    store.mark_answered(ThreadSource.SLACK, "1700000000.000999", first_reply)
+    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply, "yes")
+    store.mark_answered(ThreadSource.SLACK, _THREAD, second_reply, "no wait")
+    store.mark_answered(ThreadSource.SLACK, "1700000000.000999", first_reply, "yes")
 
     stored = store.get(ThreadSource.SLACK, _THREAD)
     assert stored is not None
-    assert stored.answered_at == first_reply
+    assert (stored.answered_at, stored.answer_text) == (second_reply, "no wait")
     assert store.get(ThreadSource.SLACK, "1700000000.000999") is None
+    store.clear_answer(ThreadSource.SLACK, _THREAD)
+    assert store.get(ThreadSource.SLACK, _THREAD) == _question(_PAN_CANDIDATE, answer=None)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +201,8 @@ def test_store_marks_a_question_answered_once(tmp_path: Path) -> None:
         ("U0TEST", -1, "U0TEST", False),
         ("U0TEST", 0, "U0TEST", False),
         ("U0TEST", 31, "U0TEST", False),
-        ("U0TEST", 2, None, False),
+        ("U000OTHER", 2, None, True),
+        ("U000OTHER", 31, None, False),
     ],
     ids=[
         "requester-after",
@@ -205,13 +210,14 @@ def test_store_marks_a_question_answered_once(tmp_path: Path) -> None:
         "before-asking",
         "same-moment",
         "expired",
-        "no-requester",
+        "stored-without-requester-anyone",
+        "stored-without-requester-expired",
     ],
 )
 def test_is_answer(
     slack_user: str, minutes_after_asking: int, requester: str | None, expected: bool
 ) -> None:
-    question = _question(_PAN_CANDIDATE, answered=False).model_copy(update={"requester": requester})
+    question = _question(_PAN_CANDIDATE, answer=None).model_copy(update={"requester": requester})
     received_at = _ASKED_AT + timedelta(minutes=minutes_after_asking)
 
     assert is_answer(question, slack_user, received_at) is expected
@@ -370,16 +376,54 @@ def test_confirm_with_a_reply_that_picks_nothing_asks_again(
 
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
+    # Asked again, so the reply that picked nothing no longer answers it.
+    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(*candidates, answer=None)
 
 
-def test_confirm_before_the_requester_replied_sends_and_posts_nothing(tmp_path: Path) -> None:
-    _store(tmp_path).put(_question(_PAN_CANDIDATE, answered=False))
-    terminal_host = _host(_pan_session())
+@pytest.mark.parametrize(
+    "answer, choice",
+    [
+        (None, "yes"),
+        ("no", "yes"),
+        ("N", "yes"),
+        ("nope, wrong one", "yes"),
+        ("<@U000BOT> cancel", "yes"),
+        ("stop", "yes"),
+        ("none of those", "yes"),
+        ("neither", "2"),
+        ("not those, the api one", "yes"),
+        ("don't send it", "yes"),
+        ("yes please", "1"),
+        ("the second one", "2"),
+        ("2nd", "2"),
+        ("12", "2"),
+    ],
+    ids=[
+        "unanswered",
+        "no",
+        "n",
+        "nope",
+        "cancel-after-mention",
+        "stop",
+        "none-of-those",
+        "neither",
+        "not-those",
+        "dont-send",
+        "number-not-typed",
+        "number-in-words",
+        "ordinal",
+        "other-number",
+    ],
+)
+def test_confirm_refuses_without_an_answer_that_picks_the_choice(
+    tmp_path: Path, answer: str | None, choice: str
+) -> None:
+    _store(tmp_path).put(_question(_PAN_CANDIDATE, _DOCS_CANDIDATE, answer=answer))
+    terminal_host = _host(_pan_session(), _docs_session())
     slack = RecordingSlack()
 
     with pytest.raises(UnansweredQuestionError):
-        _confirm(tmp_path, terminal_host, slack, "yes")
+        _confirm(tmp_path, terminal_host, slack, choice)
 
     assert terminal_host.sent == []
     assert slack.texts() == []
@@ -479,7 +523,8 @@ def test_confirm_to_a_session_not_ready_keeps_the_question_open(
 
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(*candidates)
+    # Still open, but the person must answer again.
+    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(*candidates, answer=None)
 
 
 @pytest.mark.parametrize(

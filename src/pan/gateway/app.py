@@ -166,6 +166,9 @@ class BoltSlackAdapter:
             logger.info(f"gateway answered help id={event_id} named={named}")
             return
 
+        # Only the app_mention handler's events mention the bot; a forwarded reply does not.
+        is_mention = event.get("type") == "app_mention"
+
         # Fast :eyes: ack, ordered BEFORE the append so the sender sees acknowledgement
         # immediately and before any downstream work (INV-1).
         self.add_reaction(channel, message_ts, _EYES)
@@ -179,10 +182,11 @@ class BoltSlackAdapter:
             raw_text=raw_text,
             received_at=self._clock.now(),
             source=ThreadSource.SLACK,
+            mentioned=is_mention,
         )
         self._inbox.append(item)
         logger.info(f"gateway appended event id={event_id} channel={channel}")
-        if event.get("type") == "app_mention":
+        if is_mention:
             self._remember_mentioned_thread(channel, thread_ts)
 
     def _remember_mentioned_thread(self, channel: str, thread_ts: str) -> None:

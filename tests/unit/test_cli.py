@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 import pan.cli as cli
 from pan.adapters.hc import HcError, ShellHcAdapter
 from pan.confirmations import FilePendingConfirmations, confirmations_path
+from pan.drained import FileDrainedLog, drained_log_path
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -45,6 +46,7 @@ from pan.errors import (
     UnauthorizedSenderError,
     UnsafeWorktreeError,
     UnsavedWorkError,
+    XSourceRefusedError,
 )
 from pan.hooks.notification import notification_hook
 from pan.hooks.stop import stop_hook
@@ -681,6 +683,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (PrivateMessageError("x"), 32),
         (DiscardNotRequestedError("x"), 33),
         (UnansweredQuestionError("x"), 34),
+        (XSourceRefusedError("x"), 35),
         (PanError("x"), 1),
     ],
 )
@@ -1197,60 +1200,106 @@ def test_forget_command_unties_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_p
     ]
 
 
+_GATE_THREAD = "1700000000.000100"
+
+
+def _drained(
+    config: PanConfig,
+    raw_text: str,
+    *,
+    event_id: str = "Ev1",
+    slack_user: str = "U000TEST",
+    thread_ts: str = _GATE_THREAD,
+    channel: str = "C000TEST",
+    source: ThreadSource = ThreadSource.SLACK,
+) -> None:
+    # Records the item as `pan inbox drain` would, so --item can find it.
+    item = InboxItem(
+        id=event_id,
+        slack_user=slack_user,
+        channel=channel,
+        thread_ts=thread_ts,
+        is_thread_reply=True,
+        raw_text=raw_text,
+        received_at=datetime.now(tz=UTC),
+        source=source,
+    )
+    FileDrainedLog(drained_log_path(config.paths.threads)).record([item], datetime.now(tz=UTC))
+
+
 @pytest.mark.parametrize(
-    "discard_args, expected_discard",
+    "drained_text, discard_args, expected_discard",
     [
-        ([], False),
-        (["--discard", "--request-text", "<@U000BOT> done --discard"], True),
-        (["--discard", "--request-text", "<@U000BOT> done \u2014discard"], True),
+        (None, [], False),
+        ("<@U000BOT> done --discard", ["--discard", "--item", "Ev1"], True),
+        ("<@U000BOT> Done  \u2014discard", ["--discard", "--item", "Ev1"], True),
     ],
     ids=["keep", "discard-typed", "discard-phone-dash"],
 )
 def test_done_command_wires_to_done_thread(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    drained_text: str | None,
     discard_args: list[str],
     expected_discard: bool,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
+    if drained_text is not None:
+        _drained(config, drained_text)
     _use_terminal_host(monkeypatch, FakeTerminalHost())
     _use_slack(monkeypatch)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(cli, "done_thread", lambda **kwargs: captured.update(kwargs))
 
     result = runner.invoke(
-        cli.app, ["done", "--thread", "t-1", "--channel", "C0TEST", *discard_args]
+        cli.app, ["done", "--thread", _GATE_THREAD, "--channel", "C000TEST", *discard_args]
     )
 
     assert result.exit_code == 0
-    assert captured["thread_ts"] == "t-1"
-    assert captured["channel"] == "C0TEST"
+    assert captured["thread_ts"] == _GATE_THREAD
+    assert captured["channel"] == "C000TEST"
     assert captured["discard"] is expected_discard
     assert captured["worktree_base"] == config.orchestrator.worktree_base
     assert captured["fallback_repo"] == config.orchestrator.cwd
 
 
 @pytest.mark.parametrize(
-    "request_args",
+    "drained_text, drained_thread, item_args",
     [
-        [],
-        ["--request-text", "<@U000BOT> done"],
-        ["--request-text", "<@U000BOT> just close it, throw the changes away"],
-        ["--request-text", "<@U000BOT> done discard"],
+        ("<@U000BOT> done --discard", _GATE_THREAD, []),
+        ("<@U000BOT> done --discard", _GATE_THREAD, ["--item", "Ev9"]),
+        ("<@U000BOT> done --discard", "1700000000.000999", ["--item", "Ev1"]),
+        ("<@U000BOT> done", _GATE_THREAD, ["--item", "Ev1"]),
+        ("<@U000BOT> just close it, throw the changes away", _GATE_THREAD, ["--item", "Ev1"]),
+        ("<@U000BOT> done discard", _GATE_THREAD, ["--item", "Ev1"]),
+        ("<@U000BOT> close pan-7 with --discard", _GATE_THREAD, ["--item", "Ev1"]),
     ],
-    ids=["no-request-text", "plain-done", "by-meaning", "no-dashes"],
+    ids=[
+        "no-item",
+        "unknown-item",
+        "item-from-another-thread",
+        "plain-done",
+        "by-meaning",
+        "no-dashes",
+        "discard-inside-a-sentence",
+    ],
 )
-def test_done_command_refuses_discard_the_person_did_not_type(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request_args: list[str]
+def test_done_command_refuses_discard_the_person_did_not_send(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    drained_text: str,
+    drained_thread: str,
+    item_args: list[str],
 ) -> None:
-    _use_config(monkeypatch, tmp_path)
+    config = _use_config(monkeypatch, tmp_path)
+    _drained(config, drained_text, thread_ts=drained_thread)
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
     slack = _use_slack(monkeypatch)
     monkeypatch.setattr(cli, "done_thread", lambda **kwargs: pytest.fail("must not close"))
 
     result = runner.invoke(
         cli.app,
-        ["done", "--thread", "t-1", "--channel", "C000TEST", "--discard", *request_args],
+        ["done", "--thread", _GATE_THREAD, "--channel", "C000TEST", "--discard", *item_args],
     )
 
     assert isinstance(result.exception, DiscardNotRequestedError)
@@ -1297,10 +1346,42 @@ def test_done_command_keeps_a_worktree_with_unsaved_work(
     ]
 
 
+def _send_to(selector: str, *extra_args: str) -> list[str]:
+    return [
+        "send",
+        "--thread",
+        _GATE_THREAD,
+        "--channel",
+        "C000TEST",
+        "--to",
+        selector,
+        "--task",
+        "add the tests",
+        *extra_args,
+    ]
+
+
+_FOLLOW_UP = ["send", "--thread", _GATE_THREAD, "--channel", "C000TEST", "--task", "more"]
+_PROPOSE = [
+    "propose",
+    "--thread",
+    _GATE_THREAD,
+    "--channel",
+    "C000TEST",
+    "--to",
+    "pan-7",
+    "--task",
+    "add the tests",
+    "--requester",
+    "U000TEST",
+]
+
+
 def test_send_command_wires_to_send_to_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _use_config(monkeypatch, tmp_path)
+    config = _use_config(monkeypatch, tmp_path)
+    _drained(config, "<@U000BOT> to pan-7: add the tests")
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
     slack = _use_slack(monkeypatch)
     captured: dict[str, Any] = {}
@@ -1308,37 +1389,22 @@ def test_send_command_wires_to_send_to_session(
 
     result = runner.invoke(
         cli.app,
-        [
-            "send",
-            "--thread",
-            "t-1",
-            "--channel",
-            "C0TEST",
-            "--to",
-            "pan-7",
-            "--task",
-            "add the tests",
-            "--requester",
-            "U0TEST",
-            "--request-text",
-            "<@U000BOT> to pan-7: add the tests",
-            "--reply-in-slack",
-        ],
+        _send_to("pan-7", "--requester", "U000TEST", "--item", "Ev1", "--reply-in-slack"),
     )
 
     assert result.exit_code == 0
-    assert captured["thread_ts"] == "t-1"
-    assert captured["channel"] == "C0TEST"
+    assert captured["thread_ts"] == _GATE_THREAD
+    assert captured["channel"] == "C000TEST"
     assert captured["selector"] == "pan-7"
     assert captured["text"] == "add the tests"
-    assert captured["requester"] == "U0TEST"
+    assert captured["requester"] == "U000TEST"
     assert captured["reply_in_slack"] is True
     assert captured["terminal_host"] is terminal_host
     assert captured["slack"] is slack
 
 
 @pytest.mark.parametrize(
-    "selector, request_text, expected_sent",
+    "selector, drained_text, expected_sent",
     [
         ("pan-7", "<@U000BOT> to pan-7: add the tests", True),
         ("PAN-7", "<@U000BOT> ask pan-7 to add the tests", True),
@@ -1362,33 +1428,17 @@ def test_send_command_sends_only_to_a_session_the_person_named(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     selector: str,
-    request_text: str,
+    drained_text: str,
     expected_sent: bool,
 ) -> None:
-    _use_config(monkeypatch, tmp_path)
+    config = _use_config(monkeypatch, tmp_path)
+    _drained(config, drained_text)
     _use_terminal_host(monkeypatch, FakeTerminalHost())
     slack = _use_slack(monkeypatch)
     sent: list[str] = []
     monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: sent.append(kwargs["selector"]))
 
-    result = runner.invoke(
-        cli.app,
-        [
-            "send",
-            "--thread",
-            "1700000000.000100",
-            "--channel",
-            "C000TEST",
-            "--to",
-            selector,
-            "--task",
-            "add the tests",
-            "--requester",
-            "U000TEST",
-            "--request-text",
-            request_text,
-        ],
-    )
+    result = runner.invoke(cli.app, _send_to(selector, "--requester", "U000TEST", "--item", "Ev1"))
 
     assert sent == ([selector] if expected_sent else [])
     if not expected_sent:
@@ -1397,28 +1447,82 @@ def test_send_command_sends_only_to_a_session_the_person_named(
     assert slack.posts == []
 
 
-def test_send_command_to_a_session_needs_the_request_text(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "drained_kwargs, extra_args",
+    [
+        ({}, []),
+        ({}, ["--item", "Ev9"]),
+        ({"thread_ts": "1700000000.000999"}, ["--item", "Ev1"]),
+        ({"channel": "C000OTHER"}, ["--item", "Ev1"]),
+        ({"slack_user": "U000OTHER"}, ["--item", "Ev1", "--requester", "U000TEST"]),
+    ],
+    ids=["no-item", "unknown-item", "other-thread", "other-channel", "other-sender"],
+)
+def test_send_command_to_a_session_refuses_without_the_persons_recorded_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    drained_kwargs: dict[str, Any],
+    extra_args: list[str],
 ) -> None:
-    _use_config(monkeypatch, tmp_path)
+    config = _use_config(monkeypatch, tmp_path)
+    _drained(config, "<@U000BOT> to pan-7: add the tests", **drained_kwargs)
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
     monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: pytest.fail("must not send"))
 
-    result = runner.invoke(
-        cli.app,
-        [
-            "send",
-            "--thread",
-            "1700000000.000100",
-            "--channel",
-            "C000TEST",
-            "--to",
-            "pan-7",
-            "--task",
-            "add the tests",
-        ],
-    )
+    result = runner.invoke(cli.app, _send_to("pan-7", *extra_args))
 
-    assert result.exit_code != 0
+    assert isinstance(result.exception, NoExactMatchError)
+    assert cli._exit_code_for(result.exception) == 28
+
+
+@pytest.mark.parametrize(
+    "arguments, item_from_x, record_from_x",
+    [
+        (_send_to("pan-7", "--item", "Ev1"), True, False),
+        (_send_to("pan-7", "--item", "Ev1"), False, True),
+        (_FOLLOW_UP, False, True),
+        ([*_FOLLOW_UP, "--item", "Ev1"], True, False),
+        ([*_PROPOSE, "--item", "Ev1"], True, False),
+        (_PROPOSE, False, True),
+    ],
+    ids=[
+        "send-to-item-from-x",
+        "send-to-thread-from-x",
+        "follow-up-thread-from-x",
+        "follow-up-item-from-x",
+        "propose-item-from-x",
+        "propose-thread-from-x",
+    ],
+)
+def test_x_threads_never_reach_an_existing_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: list[str],
+    item_from_x: bool,
+    record_from_x: bool,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    source = ThreadSource.X if item_from_x else ThreadSource.SLACK
+    _drained(config, "<@U000BOT> to pan-7: add the tests", source=source)
+    if record_from_x:
+        FileThreadMap(config.paths.threads, cli.SystemClock()).tie(
+            _record(_GATE_THREAD).model_copy(
+                update={"source": ThreadSource.X, "channel": "C000TEST"}
+            )
+        )
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+    for name in ("send_to_session", "follow_up_to_session", "propose_sessions"):
+        monkeypatch.setattr(cli, name, lambda **kwargs: pytest.fail("must not reach a session"))
+
+    result = runner.invoke(cli.app, arguments)
+
+    assert isinstance(result.exception, XSourceRefusedError)
+    assert cli._exit_code_for(result.exception) == 35
+    assert str(result.exception) == (
+        "messages from X cannot use to <name>: yet; they can only start new sessions"
+    )
+    assert slack.posts == []
 
 
 @pytest.mark.parametrize(
@@ -1492,20 +1596,20 @@ def _reply(event_id: str, slack_user: str, raw_text: str = "yes") -> InboxItem:
 
 
 @pytest.mark.parametrize(
-    "slack_user, requester, raw_text, expected_answered",
+    "slack_user, requester, raw_text, expected_answer",
     [
-        ("U1", "U1", "yes", True),
-        ("U1", "U1", "<@U000BOT> the second one please", True),
-        ("U1", "U1", "no wait, start something new", True),
-        ("U000OTHER", "U1", "yes", False),
-        ("U1", None, "yes", False),
+        ("U1", "U1", "yes", "yes"),
+        ("U1", "U1", "<@U000BOT> the second one please", "the second one please"),
+        ("U1", "U1", "no wait, start something new", "no wait, start something new"),
+        ("U000OTHER", "U1", "yes", None),
+        ("U000OTHER", None, "<@U000BOT> 1", "1"),
     ],
     ids=[
         "requester-yes",
         "requester-by-meaning",
         "requester-other-text",
         "another-user",
-        "no-requester",
+        "stored-without-requester",
     ],
 )
 def test_inbox_drain_marks_the_question_answered_only_by_the_requester(
@@ -1514,10 +1618,11 @@ def test_inbox_drain_marks_the_question_answered_only_by_the_requester(
     slack_user: str,
     requester: str | None,
     raw_text: str,
-    expected_answered: bool,
+    expected_answer: str | None,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
     _store_question(config, asked_minutes_ago=1, requester=requester)
+    expected_answered = expected_answer is not None
     FileInboxStore(config.paths.inbox).append(_reply("Ev1", slack_user, raw_text))
 
     result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
@@ -1529,9 +1634,11 @@ def test_inbox_drain_marks_the_question_answered_only_by_the_requester(
     assert question["task"] == "add the tests"
     assert question["candidates"] == [{"number": 1, "label": "t3 (folder pan)", "address": "t3"}]
     assert question["answered_by_requester"] is expected_answered
+    assert question["answer_text"] == expected_answer
     stored = _stored_question(config)
     assert stored is not None
     assert (stored.answered_at is not None) is expected_answered
+    assert stored.answer_text == expected_answer
 
 
 def test_inbox_drain_shows_no_question_once_it_expired(
@@ -1558,10 +1665,54 @@ def test_inbox_drain_keeps_the_answer_for_later_items_in_the_batch(
 
     result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
 
-    answered = [
-        entry["open_question"]["answered_by_requester"] for entry in json.loads(result.stdout)
+    answers = [
+        (entry["open_question"]["answered_by_requester"], entry["open_question"]["answer_text"])
+        for entry in json.loads(result.stdout)
     ]
-    assert answered == [True, True]
+    assert answers == [(True, "yes"), (True, "yes")]
+
+
+def test_inbox_drain_keeps_the_latest_reply_from_the_requester(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _store_question(config, asked_minutes_ago=1)
+    store = FileInboxStore(config.paths.inbox)
+    store.append(_reply("Ev1", "U1", "yes"))
+    store.append(_reply("Ev2", "U1", "no wait, not that one"))
+
+    runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    stored = _stored_question(config)
+    assert stored is not None
+    assert stored.answer_text == "no wait, not that one"
+
+
+def test_inbox_drain_records_the_items_for_the_gates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    FileInboxStore(config.paths.inbox).append(_reply("Ev1", "U1", "<@U000BOT> done --discard"))
+
+    runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    recorded = FileDrainedLog(drained_log_path(config.paths.threads)).get("Ev1")
+    assert recorded is not None
+    assert recorded.raw_text == "<@U000BOT> done --discard"
+
+
+@pytest.mark.parametrize("mentioned", [True, False], ids=["mention", "untagged-reply"])
+def test_inbox_drain_emits_whether_the_message_mentioned_pan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mentioned: bool
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    item = _item("Ev1").model_copy(update={"mentioned": mentioned})
+    FileInboxStore(config.paths.inbox).append(item)
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    (entry,) = json.loads(result.stdout)
+    assert entry["item"]["mentioned"] is mentioned
 
 
 @pytest.mark.parametrize(
@@ -1684,15 +1835,30 @@ def test_confirm_command_needs_exactly_one_of_choice_or_cancel(
     assert result.exit_code != 0
 
 
-@pytest.mark.parametrize("answered", [False, True], ids=["unanswered", "answered"])
-def test_confirm_command_sends_only_after_the_requester_replied(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, answered: bool
+@pytest.mark.parametrize(
+    "answer_text, choice, expected_sent",
+    [
+        (None, "yes", False),
+        ("yes", "yes", True),
+        ("1", "1", True),
+        ("yes please", "1", False),
+        ("none of those", "yes", False),
+        ("nope", "yes", False),
+    ],
+    ids=["unanswered", "yes", "number", "number-not-typed", "none-of-those", "nope"],
+)
+def test_confirm_command_sends_only_on_the_requesters_own_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    answer_text: str | None,
+    choice: str,
+    expected_sent: bool,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
     _store_question(config, asked_minutes_ago=1)
-    if answered:
+    if answer_text is not None:
         FilePendingConfirmations(confirmations_path(config.paths.threads)).mark_answered(
-            ThreadSource.SLACK, "1718000000.000200", datetime.now(tz=UTC)
+            ThreadSource.SLACK, "1718000000.000200", datetime.now(tz=UTC), answer_text
         )
     terminal_host = _use_terminal_host(
         monkeypatch, _terminal_host_with(make_terminal("t3", cwd=Path("/tmp/pan")))
@@ -1702,10 +1868,10 @@ def test_confirm_command_sends_only_after_the_requester_replied(
 
     result = runner.invoke(
         cli.app,
-        ["confirm", "--thread", "1718000000.000200", "--channel", "C1", "--choice", "yes"],
+        ["confirm", "--thread", "1718000000.000200", "--channel", "C1", "--choice", choice],
     )
 
-    if answered:
+    if expected_sent:
         assert result.exit_code == 0
         assert [address for address, _text in terminal_host.sent] == ["t3"]
     else:

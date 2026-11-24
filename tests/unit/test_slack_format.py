@@ -182,6 +182,20 @@ def test_an_answer_converts_to_slack_mrkdwn(answer: str, expected: str) -> None:
         ),
         ("<@U000TEST> moved src/home/x", "<@U000TEST> moved src/home/x"),
         ("nothing to cut", "nothing to cut"),
+        ("</Users/someone/x/config.py|config.py>", "config.py"),
+        ("</Users/someone/x/config.py>", ".../config.py"),
+        ("<~/dev/pan/notes.md|notes>", "notes"),
+        ("<docs/plan.md|the plan>", "the plan"),
+        ("<file:///Users/someone/a.txt|a.txt>", "a.txt"),
+        ("<file:///Users/someone/a.txt>", ".../a.txt"),
+        ("<mailto:someone@example.com|mail>", "<mailto:someone@example.com|mail>"),
+        ("<#C000TEST|general> and <!here>", "<#C000TEST|general> and <!here>"),
+        ("path:/Users/someone/a/b", "path:.../b"),
+        ("```\nx < /Users/someone/a/b > y\n```", "```\nx < .../b > y\n```"),
+        ("`</Users/someone/a/b>`", "`<.../b>`"),
+        ("open /Users/someone/My Project/x.py now", "open .../x.py now"),
+        ("in /Users/someone/My Project files", "in .../My Project files"),
+        ("/Users/someone/a https://example.com/b", ".../a https://example.com/b"),
     ],
     ids=[
         "users",
@@ -194,7 +208,27 @@ def test_an_answer_converts_to_slack_mrkdwn(answer: str, expected: str) -> None:
         "slack-link-untouched",
         "relative-path-untouched",
         "plain",
+        "local-link-to-label",
+        "local-link-without-label",
+        "tilde-link-to-label",
+        "relative-link-to-label",
+        "file-link-to-label",
+        "file-link-without-label",
+        "mailto-untouched",
+        "channel-and-special-mentions-untouched",
+        "colon-is-a-boundary",
+        "inside-a-fence-with-angle-brackets",
+        "angle-brackets-in-inline-code",
+        "folder-with-a-space-cut-whole",
+        "space-then-plain-words-cut-at-the-space",
+        "url-after-a-path-untouched",
     ],
 )
 def test_redact_paths(text: str, expected: str) -> None:
     assert redact_paths(text) == expected
+
+
+def test_a_markdown_link_to_a_local_file_keeps_only_its_label() -> None:
+    converted = to_slack_mrkdwn("see [config.py](/Users/someone/x/config.py)")
+
+    assert redact_paths(converted) == "see config.py"

@@ -585,6 +585,44 @@ def test_update_message_and_post_ephemeral_delegate_to_the_client() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "event_type, expected_mentioned",
+    [("app_mention", True), ("message", False)],
+    ids=["mention", "forwarded-reply"],
+)
+def test_gateway_records_whether_the_message_mentioned_pan(
+    event_type: str, expected_mentioned: bool
+) -> None:
+    adapter, _client, inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {
+        "type": event_type,
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000300",
+        "thread_ts": "1718000000.000200",
+        "text": "and the docs",
+    }
+
+    adapter.handle_event(event, "Ev1")
+
+    (item,) = inbox.items
+    assert item.mentioned is expected_mentioned
+
+
+def test_an_item_written_before_mentioned_existed_counts_as_a_mention() -> None:
+    raw_item = {
+        "id": "Ev1",
+        "slack_user": "U1",
+        "channel": "C1",
+        "thread_ts": "1718000000.000200",
+        "is_thread_reply": False,
+        "raw_text": "<@B> check",
+        "received_at": "2026-07-16T10:00:00Z",
+    }
+
+    assert InboxItem.model_validate(raw_item).mentioned is True
+
+
 def test_gateway_writes_the_raw_text_and_no_route() -> None:
     adapter, _client, inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
     event = {"user": "U1", "channel": "C1", "ts": "1718000000.000200", "text": "<@B> check"}

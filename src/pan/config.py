@@ -103,6 +103,11 @@ INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
 CONFIRMATION_TIMEOUT = timedelta(minutes=30)
 # A proposal names at most this many sessions, numbered 1 to this.
 CONFIRMATION_MAX_CANDIDATES = 3
+# `pan inbox drain` keeps the items it drained (drained.jsonl, next to the thread map) so `pan send
+# --to` and `pan done --discard` can read the person's own message by item id. Items older than
+# this, and all but the newest DRAINED_LOG_MAX_ITEMS, are dropped at each drain.
+DRAINED_LOG_RETENTION = timedelta(hours=24)
+DRAINED_LOG_MAX_ITEMS = 1000
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -166,10 +171,13 @@ what you want in your own words, for example:
   forget                     untie this thread (the session keeps running)
   done [--discard]           close pan's session for this thread and remove its
                              worktree and branch; kept if it has uncommitted files or
-                             unpushed commits, unless you type --discard yourself; a
-                             session you started yourself is only untied
+                             unpushed commits; done --discard (the whole message) closes
+                             it anyway; a session you started yourself is only untied
   ... reply in slack ...     also post the session's answers here at every turn end
-  read <name>                summarize what a live session is doing
+  --stream <name>            name a new session's terminal
+  relay <name> <message>     send a one-off message into a live session (ties nothing)
+  read <name> [--full]       summarize what a live session is doing, or post its whole
+                             transcript with --full
   help [command]             this help
 Untagged replies count only in a thread pan is working in.
 """.strip()

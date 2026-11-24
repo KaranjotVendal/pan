@@ -87,6 +87,9 @@ class InboxItem(BaseModel, frozen=True):
     raw_text: str
     received_at: datetime
     source: ThreadSource = ThreadSource.SLACK
+    # The message mentioned the bot (an app_mention event); False for a reply the gateway
+    # forwarded without one. Items written before it existed were all mentions.
+    mentioned: bool = True
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -168,8 +171,10 @@ class PendingConfirmation(BaseModel, frozen=True):
     # pan's open question in a Slack thread: which session should get `task`. Stored per
     # thread until it is answered, cancelled or expires (CONFIRMATION_TIMEOUT). It is not kept
     # on the thread's ThreadRecord because a send to a named session in a new thread has no
-    # record yet. `answered_at` is set by `pan inbox drain` when the requester replies in the
-    # thread after the question; `pan confirm --choice` refuses until it is set.
+    # record yet. `answered_at` and `answer_text` (the reply, cleaned) are set by `pan inbox
+    # drain` when the requester (anyone in the thread, for a question stored without one)
+    # replies after the question; `pan confirm --choice` refuses until they are set, and they
+    # are cleared whenever pan asks again.
     thread_ts: str
     channel: str
     source: ThreadSource = ThreadSource.SLACK
@@ -180,6 +185,7 @@ class PendingConfirmation(BaseModel, frozen=True):
     candidates: list[ConfirmationCandidate]
     created_at: datetime
     answered_at: datetime | None = None
+    answer_text: str | None = None
 
 
 class Terminal(BaseModel, frozen=True):

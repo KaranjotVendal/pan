@@ -59,12 +59,21 @@ def clean_message(raw_text: str) -> str:
     return _LEADING_MENTION.sub("", text, count=1).strip()
 
 
-# Safety gates on the person's own message (pan send --to, pan done --discard). The
-# orchestrator decides what a message means; these only check that the words that make an
-# action risky were typed by the person. A selector is named when it appears as a whole word or
-# phrase, any letter case: letters, digits, `_` and `-` on either side make it part of a longer
-# word, so "ocr" is not named by "ocr-action".
-_DISCARD_FLAG = re.compile(r"(?<![\w-])--discard(?![\w-])")
+# Safety gates on the person's own message, as pan recorded it (pan send --to, pan done
+# --discard, pan confirm). The orchestrator decides what a message means; these only check that
+# the words that make an action risky were typed by the person. A selector is named when it
+# appears as a whole word or phrase, any letter case: letters, digits, `_` and `-` on either
+# side make it part of a longer word, so "ocr" is not named by "ocr-action".
+_DONE_DISCARD_WORDS = ("done", "--discard")
+# A reply that turns pan's question down: it starts with one of these words, or holds one of
+# these phrases anywhere.
+_DECLINE_START = re.compile(r"^(?:no|n|nope|nah|cancel|stop|none|neither|nothing)\b", re.IGNORECASE)
+_DECLINE_PHRASE = re.compile(
+    r"\b(?:none of (?:those|these|them)|not (?:those|these|them|that one|any)|"
+    r"don'?t send|do not send)\b",
+    re.IGNORECASE,
+)
+_NUMBER = re.compile(r"(?<!\w)\d+(?!\w)")
 
 
 def names_selector(request_text: str, selector: str) -> bool:
@@ -76,4 +85,16 @@ def names_selector(request_text: str, selector: str) -> bool:
 
 
 def asks_to_discard(request_text: str) -> bool:
-    return _DISCARD_FLAG.search(clean_message(request_text)) is not None
+    # The whole message is `done --discard`, any letter case and spacing (a phone's `—discard`
+    # is read as `--discard`).
+    return tuple(clean_message(request_text).lower().split()) == _DONE_DISCARD_WORDS
+
+
+def is_decline(answer_text: str) -> bool:
+    cleaned = clean_message(answer_text)
+    return _DECLINE_START.search(cleaned) is not None or _DECLINE_PHRASE.search(cleaned) is not None
+
+
+def names_number(answer_text: str, number: str) -> bool:
+    # The number appears on its own in the reply ("2", "the 2nd" does not count).
+    return number in _NUMBER.findall(clean_message(answer_text))

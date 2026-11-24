@@ -15,26 +15,40 @@ as it works (see `AGENT_LOOP.md` step 9).
   gives each item as `item`, `text` (the message with the mention, a trailing client signature
   and phone punctuation cleaned; `clean_message`, formerly `_clean_message`), `tie` and
   `open_question` (pan's open `pan propose` question in the thread, with
-  `answered_by_requester`). The `route`, `directive` and `cancels_confirmation` fields are gone;
-  an inbox item an older gateway wrote with a `route` still loads.
-- `pan send --to` needs `--request-text`, the person's own message, and exits 28 (nothing sent or
-  posted) unless the name appears in it as a whole word or phrase, any letter case, as well as
-  matching exactly one live session as before.
-- `pan done --discard` needs `--request-text` holding `--discard` as the person typed it (a
-  phone's `—discard` counts); otherwise it exits 33 (`DiscardNotRequestedError`) and touches or
-  posts nothing.
+  `answered_by_requester` and `answer_text`). The `route`, `directive` and
+  `cancels_confirmation` fields are gone; an inbox item an older gateway wrote with a `route`
+  still loads. `InboxItem.mentioned` is True for an `app_mention` and False for a reply the
+  gateway forwarded without one (True for older items).
+- `pan inbox drain` keeps every drained item for 24 hours, at most 1000
+  (`FileDrainedLog`, `drained.jsonl` next to the thread map), so the gates read what the person
+  typed from pan's own record. `pan send --to` takes `--item <item id>` and exits 28 (nothing
+  sent or posted) unless that item exists, was sent in this thread and channel (by
+  `--requester` when given), and holds the name as a whole word or phrase, any letter case, as
+  well as matching exactly one live session as before.
+- `pan done --discard` takes `--item` and exits 33 (`DiscardNotRequestedError`), touching and
+  posting nothing, unless that item in this thread is exactly `done --discard` (a phone's
+  `—discard` counts).
 - Confirmations: the orchestrator reads the reply to a "Send this to ...?" question.
-  `pan inbox drain` marks the question answered (`PendingConfirmation.answered_at`) when the
-  requester replies in its thread after it was asked; `pan confirm --choice` (`yes`, `y` or 1-3)
-  exits 34 (`UnansweredQuestionError`), sending and posting nothing, until then. Expiry, range
-  and still-live checks are unchanged; a decline is `--cancel`. `pan propose` requires
-  `--requester`.
+  `pan inbox drain` records the requester's latest reply in its thread after it was asked
+  (`PendingConfirmation.answered_at`, `answer_text`); a question stored without a requester is
+  answered by anyone in the thread. `pan confirm --choice` (`yes`, `y` or 1-3) exits 34
+  (`UnansweredQuestionError`), sending and posting nothing, with no reply, a reply that declines
+  ("no", "nope", "cancel", "none of those", ...), or a number not in the reply. Re-asking (yes to
+  several, a number out of range) and refusing a busy or waiting session clear the reply.
+  Expiry, range and still-live checks are unchanged; a decline is `--cancel`. `pan propose`
+  requires `--requester`.
+- A thread from X may only start new sessions: `pan send` (with or without `--to`) and
+  `pan propose` exit 35 (`XSourceRefusedError`, `X_TO_ROUTE_NOTICE`) when the thread record or
+  the `--item` comes from X. The X safety gate itself is still to come (MOB-87).
 - `pan sessions --match` is replaced by `--show <address,...>` with `--thread`, `--channel` and
   `--requester`: the orchestrator picks the sessions and their order, pan sends at most 5 of them
   to the requester alone.
 - Public posts and edits (`post_message`, `post_blocks`, `update_message`, block texts included)
-  cut local paths under `/Users`, `/home` and `~` to `.../<last part>` (`redact_paths`); Slack
-  entities and URLs are left alone. Ephemeral messages to the requester are not cut.
+  cut local paths under `/Users`, `/home` and `~` to `.../<last part>` (`redact_paths`), in code
+  too, and a folder name with a space before the last part is cut with it. A Slack link to a
+  local file (`</Users/...|x>`, a relative or `file:` target) is replaced by its label, or the
+  target's last part; web links and mentions are left alone. Ephemeral messages to the
+  requester are not cut.
 - The orchestrating skill is rewritten (about 140 lines): what each inbox item gives, the
   actions with their exit codes, and the safety rules. The Slack help footer describes requests
   in plain words.
@@ -44,8 +58,7 @@ as it works (see `AGENT_LOOP.md` step 9).
 - `parse_directive`, `parse_route`, `route_for_source`, `parse_confirm_reply`, the retired-flag
   notices, `TaskMode`, `RouteKind`, `Route`, `Directive`, `InboxItem.route`, `OpenQuestions`,
   `route_with_pending`, `select_sessions_for_slack`, `match_words` and
-  `SESSIONS_MATCH_MIN_WORD_LENGTH`. X-sourced threads are to be refused by `send` and `propose`
-  once the X front door lands (TODO, MOB-87).
+  `SESSIONS_MATCH_MIN_WORD_LENGTH`.
 
 ### Fixed
 

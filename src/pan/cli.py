@@ -4,6 +4,7 @@ import io
 import json
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -30,6 +31,7 @@ from pan.confirmations import (
 )
 from pan.credentials import load_credentials, save_credentials
 from pan.directive import asks_to_discard, clean_message, names_selector
+from pan.drained import FileDrainedLog, drained_log_path
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -56,6 +58,7 @@ from pan.errors import (
     UnauthorizedSenderError,
     UnsafeWorktreeError,
     UnsavedWorkError,
+    XSourceRefusedError,
 )
 from pan.gateway.app import BoltSlackAdapter
 from pan.gateway.slack_post import slack_post
@@ -75,6 +78,7 @@ from pan.models import (
     SlackCredentials,
     StatusState,
     ThreadRecord,
+    ThreadSource,
     WorkerStatus,
 )
 from pan.seams import SlackAdapter, ThreadMap
@@ -143,7 +147,12 @@ _EXIT_CODES: dict[type[PanError], int] = {
     PrivateMessageError: 32,
     DiscardNotRequestedError: 33,
     UnansweredQuestionError: 34,
+    XSourceRefusedError: 35,
 }
+
+# Text from X is someone else's text, so it must never steer a session that already exists:
+# until the X safety gate (MOB-87) is in place, X may only start new sessions.
+X_TO_ROUTE_NOTICE = "messages from X cannot use to <name>: yet; they can only start new sessions"
 
 
 def _exit_code_for(error: PanError) -> int:
@@ -262,6 +271,7 @@ def _open_question_fact(pending: PendingConfirmation, answered: bool) -> dict[st
             for number, candidate in enumerate(pending.candidates, start=1)
         ],
         "answered_by_requester": answered,
+        "answer_text": pending.answer_text if answered else None,
     }
 
 
@@ -271,13 +281,51 @@ def _mark_answered(
     # Runs after the drain, so a failed write must not cost the drained items: it is logged
     # and the question stays unanswered (`pan confirm --choice` then refuses).
     try:
-        confirmations.mark_answered(pending.source, pending.thread_ts, item.received_at)
+        confirmations.mark_answered(
+            pending.source, pending.thread_ts, item.received_at, clean_message(item.raw_text)
+        )
     except OSError as e:
         logger.warning(
             f"could not mark the question answered thread={pending.thread_ts}: {type(e).__name__}"
         )
         return False
     return True
+
+
+def _drained_log(config: PanConfig) -> FileDrainedLog:
+    return FileDrainedLog(drained_log_path(config.paths.threads))
+
+
+def _record_drained(config: PanConfig, items: list[InboxItem], now: datetime) -> None:
+    # A failed write must not cost the drained items: the gates that read the log then refuse.
+    try:
+        _drained_log(config).record(items, now)
+    except OSError as e:
+        logger.warning(f"could not record the drained items: {type(e).__name__}")
+
+
+def _drained_item(
+    config: PanConfig, item_id: str | None, thread: str, channel: str
+) -> InboxItem | None:
+    # The item as pan drained it, only when it was sent in this thread and channel.
+    if item_id is None:
+        return None
+    item = _drained_log(config).get(item_id)
+    if item is None or item.thread_ts != thread or item.channel != channel:
+        logger.info(f"no drained item id={item_id} in thread={thread}")
+        return None
+    return item
+
+
+def _refuse_x(thread_map: ThreadMap, thread: str, item: InboxItem | None) -> None:
+    # TODO(MOB-87): replace with the X safety gate; until then X may only start new sessions.
+    record = thread_map.get(thread)
+    from_x = (item is not None and item.source is ThreadSource.X) or (
+        record is not None and record.source is ThreadSource.X
+    )
+    if from_x:
+        logger.info(f"refused a thread from X thread={thread}")
+        raise XSourceRefusedError(X_TO_ROUTE_NOTICE)
 
 
 @inbox_app.command("drain")
@@ -296,6 +344,7 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     items = FileInboxStore(config.paths.inbox).drain()
     thread_map = FileThreadMap(config.paths.threads, clock)
     now = clock.now()
+    _record_drained(config, items, now)
 
     # Facts only: what the person typed (mention, signature and phone punctuation cleaned), the
     # thread's tie read now (it can change after the gateway wrote the item), and the open
@@ -304,14 +353,18 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
         pending = live_pending(open_questions.get((item.source, item.thread_ts)), now)
         if pending is None:
             return None
-        answered = pending.answered_at is not None
-        if not answered and is_answer(pending, item.slack_user, item.received_at):
-            answered = _mark_answered(confirmations, pending, item)
-            if answered:
-                open_questions[(item.source, item.thread_ts)] = pending.model_copy(
-                    update={"answered_at": item.received_at}
-                )
-        return _open_question_fact(pending, answered)
+        if is_answer(pending, item.slack_user, item.received_at) and _mark_answered(
+            confirmations, pending, item
+        ):
+            # The latest reply from the requester is the answer.
+            pending = pending.model_copy(
+                update={
+                    "answered_at": item.received_at,
+                    "answer_text": clean_message(item.raw_text),
+                }
+            )
+            open_questions[(item.source, item.thread_ts)] = pending
+        return _open_question_fact(pending, pending.answered_at is not None)
 
     if as_json:
         payload = []
@@ -736,8 +789,10 @@ def done(
     discard: bool = typer.Option(
         False, "--discard", help="close it even if uncommitted files or unpushed commits are lost"
     ),
-    request_text: str | None = typer.Option(
-        None, "--request-text", help="the person's own message; needed with --discard"
+    item: str | None = typer.Option(
+        None,
+        "--item",
+        help="the inbox item id (item.id) of the person's message; needed with --discard",
     ),
 ) -> None:
     """Close the thread's tied session: remove its terminal, its worktree and its branch, then
@@ -749,13 +804,15 @@ def done(
     cleanup exits 30 and keeps the thread tied for a retry; a folder pan never removes (outside
     the worktree folder, or a main repository) exits 31. With the worktree folder already gone
     it still deletes the branch. A session pan did not start is only untied, never closed.
-    --discard needs --request-text holding --discard as the person typed it; otherwise nothing
-    is touched or posted and it exits 33."""
-    if discard and (request_text is None or not asks_to_discard(request_text)):
-        raise DiscardNotRequestedError(
-            f"--discard refused for thread {thread}: the person's message does not say --discard"
-        )
+    --discard needs --item, a drained message in this thread that is exactly done --discard;
+    otherwise nothing is touched or posted and it exits 33."""
     config = _config()
+    if discard:
+        drained = _drained_item(config, item, thread, channel)
+        if drained is None or not asks_to_discard(drained.raw_text):
+            raise DiscardNotRequestedError(
+                f"--discard refused for thread {thread}: the person did not send done --discard"
+            )
     done_thread(
         thread_ts=thread,
         channel=channel,
@@ -784,8 +841,8 @@ def send(
     ),
     task: str = typer.Option(..., "--task"),
     requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
-    request_text: str | None = typer.Option(
-        None, "--request-text", help="the person's own message; needed with --to"
+    item: str | None = typer.Option(
+        None, "--item", help="the inbox item id (item.id) of the person's message; needed with --to"
     ),
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
@@ -793,25 +850,28 @@ def send(
 ) -> None:
     """Send a task to a live session (pan's own or one of yours) and tie the thread to it; post
     a notice naming its Inbox thread. --to must name one session exactly: its address, name, or
-    Herdr label or space, and the person's own message (--request-text) must hold it as a whole
-    word or phrase. Otherwise (no exact match, a label several sessions share, or a name the
-    person did not type) nothing is sent or posted and it exits 28: propose a session with pan
-    propose. Without --to, send a
-    follow-up to the thread's tied session; --reply-in-slack then switches the thread to posting
+    Herdr label or space, and the message pan drained as --item (in this thread, from the
+    requester) must hold it as a whole word or phrase. Otherwise (no exact match, a label
+    several sessions share, a name the person did not type, an unknown item) nothing is sent or
+    posted and it exits 28: propose a session with pan propose. Without --to, send a follow-up to the thread's tied session; --reply-in-slack then switches the thread to posting
     answers in Slack (never back). A busy or blocked session gets a short reply and
     nothing is typed; a session pan did not start gets one line on top saying the text came
-    from Slack and which Inbox thread to use."""
-    # TODO(MOB-87): refuse threads whose source is X here and in propose once the X front door
-    # lands: text from X must never steer a session that already exists.
-    if to is not None:
-        if request_text is None:
-            raise typer.BadParameter("--request-text is required with --to")
-        if not names_selector(request_text, to):
-            logger.info(f"selector not in the request thread={thread}")
-            raise NoExactMatchError(f"'{to}' is not named in the person's message")
+    from Slack and which Inbox thread to use. A thread from X exits 35: X may only start new
+    sessions."""
     config = _config()
     clock = SystemClock()
     thread_map = FileThreadMap(config.paths.threads, clock)
+    drained = _drained_item(config, item, thread, channel)
+    _refuse_x(thread_map, thread, drained)
+    if to is not None:
+        if (
+            drained is None
+            or (requester is not None and drained.slack_user != requester)
+            or not names_selector(drained.raw_text, to)
+        ):
+            logger.info(f"selector not in the person's drained message thread={thread}")
+            raise NoExactMatchError(f"'{to}' is not named in the person's message")
+        requester = drained.slack_user
     terminal_host = build_terminal_host(config.terminal_host)
     if to is None:
         follow_up_to_session(
@@ -854,6 +914,9 @@ def propose(
     requester: str = typer.Option(
         ..., "--requester", help="the sender's Slack user id; only their reply answers"
     ),
+    item: str | None = typer.Option(
+        None, "--item", help="the inbox item id (item.id) of the person's message"
+    ),
     reply_in_slack: bool = typer.Option(
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
@@ -861,8 +924,14 @@ def propose(
     """Ask the person to confirm where a task for a named session goes when pan send exited
     28. One candidate: "Send this to <session>? Reply yes."; several: a numbered list to pick
     1-3 from. Nothing is typed into any session until the requester replies. Candidates that
-    are not live terminal addresses are dropped; with none left it says no session matches."""
+    are not live terminal addresses are dropped; with none left it says no session matches.
+    A thread from X exits 35: X may only start new sessions."""
     config = _config()
+    _refuse_x(
+        FileThreadMap(config.paths.threads, SystemClock()),
+        thread,
+        _drained_item(config, item, thread, channel),
+    )
     propose_sessions(
         thread_ts=thread,
         channel=channel,

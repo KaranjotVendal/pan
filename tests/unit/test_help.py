@@ -246,7 +246,9 @@ def test_directive_footer_documents_what_to_say_from_slack() -> None:
         "forget",
         "done [--discard]",
         "reply in slack",
-        "read <name>",
+        "read <name> [--full]",
+        "relay <name> <message>",
+        "--stream <name>",
         "help [command]",
     ):
         assert spelling in SLACK_DIRECTIVE_FLAGS_FOOTER
