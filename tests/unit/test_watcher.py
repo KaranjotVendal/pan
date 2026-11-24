@@ -19,7 +19,8 @@ from watchdog.events import (
 from pan.adapters.hc import HcError
 from pan.config import WATCHER_DEBOUNCE_SECONDS
 from pan.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
-from pan.watcher import WAKE_INSTRUCTION, WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
+from pan.orchestrating_skill import SkillVersion, orchestrating_skill, wake_instruction
+from pan.watcher import WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
 
 
 class FakeTimer:
@@ -51,16 +52,16 @@ class FakeTimerFactory:
         return timer
 
 
-def test_on_inbox_changed_sends_only_the_fixed_wake_instruction() -> None:
-    # One hc send pastes the fixed instruction and presses Enter; no payload, no separate
-    # keypress (INV-2).
+def test_on_inbox_changed_sends_only_the_content_free_wake_instruction() -> None:
+    # One hc send pastes the wake instruction (fixed text plus the skill's path and version)
+    # and presses Enter; no message content, no separate keypress (INV-2).
     terminal_host = FakeTerminalHost()
 
     WatchdogInboxWatcher(
         terminal_host, "pan-orchestrator", Path("/tmp/pan-inbox")
     ).on_inbox_changed()
 
-    assert terminal_host.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("pan-orchestrator", wake_instruction(orchestrating_skill()))]
 
 
 @pytest.mark.parametrize(
@@ -84,6 +85,24 @@ def test_on_inbox_changed_logs_and_survives_terminal_host_failures(
     ).on_inbox_changed()
 
     assert terminal_host.sent == []
+
+
+def test_on_inbox_changed_sends_a_versionless_wake_when_the_skill_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing_skill = tmp_path / "SKILL.md"
+    monkeypatch.setattr(
+        "pan.watcher.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
+    )
+    terminal_host = FakeTerminalHost()
+
+    WatchdogInboxWatcher(
+        terminal_host, "pan-orchestrator", Path("/tmp/pan-inbox")
+    ).on_inbox_changed()
+
+    expected = wake_instruction(SkillVersion(path=missing_skill, version=None))
+    assert terminal_host.sent == [("pan-orchestrator", expected)]
+    assert "pan could not read its version" in expected
 
 
 def test_debouncer_runs_the_action_once_for_a_burst_of_triggers() -> None:
@@ -163,7 +182,7 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     (timer,) = timer_factory.timers
     assert timer.interval == WATCHER_DEBOUNCE_SECONDS
     timer.fire()
-    assert terminal_host.sent == [("pan-orchestrator", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("pan-orchestrator", wake_instruction(orchestrating_skill()))]
 
 
 _INBOX = "/inbox"

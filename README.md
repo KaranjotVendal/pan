@@ -89,8 +89,10 @@ Config is JSON at `~/.config/pan/config.json` and contains **no secrets**. A min
 ```
 
 - `orchestrator.terminal` is the hc terminal name of your persistent orchestrator Claude session
-  (default `pan-orchestrator`); `orchestrator.cwd` is the folder it runs in (this repo, so it can
-  read the orchestrating skill). `pan up` creates it under that name, so nothing needs pasting after
+  (default `pan-orchestrator`); `orchestrator.cwd` is the folder it runs in. It reads the
+  orchestrating skill installed with pan, by absolute path, which is outside that folder, so
+  `orchestrator.command` must let it read that file without a prompt (for example through the
+  session's permission mode or `--add-dir <pan install folder>`). `pan up` creates it under that name, so nothing needs pasting after
   a restart. Optional: `orchestrator.command` (default `["claude"]`) is the program it starts with,
   and `orchestrator.app_space` is a Herdr app space id (from `herdr-app ls`): when set, each worker
   appears as a tab in that space; when absent, workers stay hidden (watch any of them with
@@ -113,6 +115,11 @@ whose terminals are gone as `failed`, and wakes an orchestrator that is already 
 backlog in the inbox is drained. herdr-core restores no agents after a Mac reboot, so run `pan up`
 after one, or install the LaunchAgents below (`pan service install`) to do it at login. A worker lost
 to a reboot keeps its worktree; a follow-up in its thread can reopen it there (`pan reopen`).
+
+The boot brief and every wake name the installed orchestrating skill (`SKILL.md`) and its version
+(a short hash of the file). To test a branch, run `uv tool install <checkout> --force` and then
+`pan service install`: the restarted watcher's next wake carries the new version, and the running
+orchestrator reads the branch's skill again before it drains.
 
 ## Run always-on (launchd)
 

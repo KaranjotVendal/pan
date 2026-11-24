@@ -7,9 +7,14 @@ import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import TargetBlockedError, TerminalNameTakenError
-from pan.lifecycle import ORCHESTRATOR_BOOT_BRIEF, UpReport, bring_up, reconcile_lost_workers
+from pan.lifecycle import UpReport, bring_up, reconcile_lost_workers
 from pan.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
-from pan.watcher import WAKE_INSTRUCTION
+from pan.orchestrating_skill import (
+    SkillVersion,
+    orchestrating_skill,
+    orchestrator_boot_brief,
+    wake_instruction,
+)
 
 _NOW = datetime(2026, 11, 15, 9, 0, 0, tzinfo=UTC)
 _CWD = Path("/Users/me/dev/pan")
@@ -65,7 +70,7 @@ def test_bring_up_starts_a_missing_orchestrator_with_the_boot_brief() -> None:
     (run,) = terminal_host.runs
     assert run.name == "pan-orchestrator"
     assert run.cwd == _CWD
-    assert run.argv == [*_COMMAND, ORCHESTRATOR_BOOT_BRIEF]
+    assert run.argv == [*_COMMAND, orchestrator_boot_brief(orchestrating_skill())]
     assert run.labels == {"pan.role": "orchestrator"}
     assert report.started is True
     assert report.orchestrator_address == "t101"
@@ -83,7 +88,51 @@ def test_bring_up_leaves_a_healthy_orchestrator_and_wakes_it() -> None:
     assert terminal_host.runs == []
     assert report.started is False
     assert report.orchestrator_address == "t42"
-    assert terminal_host.sent == [("t42", WAKE_INSTRUCTION)]
+    assert terminal_host.sent == [("t42", wake_instruction(orchestrating_skill()))]
+
+
+def _make_skill_unreadable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SkillVersion:
+    missing_skill = tmp_path / "SKILL.md"
+    monkeypatch.setattr(
+        "pan.lifecycle.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
+    )
+    return SkillVersion(path=missing_skill, version=None)
+
+
+def test_bring_up_starts_with_a_versionless_boot_brief_when_the_skill_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = _make_skill_unreadable(monkeypatch, tmp_path)
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(
+        make_terminal(
+            "t42",
+            name="pan-orchestrator",
+            state=TerminalState.FINISHED,
+            agent_status=AgentStatus.NONE,
+        )
+    )
+
+    report = _bring_up(terminal_host)
+
+    (run,) = terminal_host.runs
+    assert run.argv == [*_COMMAND, orchestrator_boot_brief(skill)]
+    assert str(skill.path) in run.argv[-1]
+    assert "version" not in run.argv[-1]
+    assert report.started is True
+
+
+def test_bring_up_wakes_with_a_versionless_wake_when_the_skill_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = _make_skill_unreadable(monkeypatch, tmp_path)
+    terminal_host = FakeTerminalHost()
+    terminal_host.add(make_terminal("t42", name="pan-orchestrator", agent="claude-code"))
+
+    report = _bring_up(terminal_host)
+
+    assert terminal_host.sent == [("t42", wake_instruction(skill))]
+    assert report.woke is True
 
 
 def test_bring_up_replaces_a_finished_orchestrator() -> None:

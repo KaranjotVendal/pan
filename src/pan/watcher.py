@@ -18,15 +18,10 @@ from pan.config import WATCHER_DEBOUNCE_SECONDS
 from pan.errors import TerminalHostError
 from pan.inbox import is_inbox_entry_name
 from pan.logging import initialise_logger
+from pan.orchestrating_skill import orchestrating_skill, wake_instruction
 from pan.seams import TerminalHost
 
 logger = initialise_logger(__name__)
-
-WAKE_INSTRUCTION = (
-    "A new item is in the pan inbox. Run your orchestrating drain-classify-route loop now: "
-    "shell `pan inbox drain --json`, then classify and route each item per the "
-    "orchestrating skill."
-)
 
 
 class Timer(Protocol):
@@ -88,13 +83,16 @@ class WatchdogInboxWatcher:
         self._debouncer = WakeDebouncer(self.on_inbox_changed, debounce_seconds, timer_factory)
 
     def on_inbox_changed(self) -> None:
-        # INV-2: send the fixed wake instruction; one terminal host send pastes it and presses Enter.
-        # It carries NO task payload; the payload lives in the durable inbox. A blocked or
-        # missing orchestrator (or any terminal host failure) is logged, never raised: the item stays
-        # in the inbox, the next change re-nudges, and `pan up` sends a wake, whereas a
-        # crash would only make launchd restart the watcher in a loop.
+        # INV-2: send the wake instruction; one terminal host send pastes it and presses Enter.
+        # It carries NO task payload (only the skill's path and version, read on each wake so
+        # an edited skill is picked up); the payload lives in the durable inbox. An unreadable
+        # skill still sends a wake without a version (orchestrating_skill logs it). A blocked
+        # or missing orchestrator (or any terminal host failure) is logged, never raised: the
+        # item stays in the inbox, the next change re-nudges, and `pan up` sends a wake,
+        # whereas a crash would only make launchd restart the watcher in a loop.
+        instruction = wake_instruction(orchestrating_skill())
         try:
-            self._terminal_host.send(self._orchestrator_terminal, WAKE_INSTRUCTION)
+            self._terminal_host.send(self._orchestrator_terminal, instruction)
         except TerminalHostError as error:
             logger.warning(f"watcher could not wake orchestrator: {type(error).__name__}")
             return

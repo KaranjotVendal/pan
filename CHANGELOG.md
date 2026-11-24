@@ -9,6 +9,17 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ### Changed
 
+- The orchestrator follows the orchestrating skill installed with the running pan, not a path
+  relative to its folder. `pan.orchestrating_skill` gives the packaged `SKILL.md`'s absolute
+  path and a version (the first 12 hex characters of its sha256). The boot brief
+  (`orchestrator_boot_brief`, formerly `ORCHESTRATOR_BOOT_BRIEF`) and every wake from the watcher
+  and `pan up` (`wake_instruction`, formerly `WAKE_INSTRUCTION`) name both, and the wake tells
+  the orchestrator to read the file again when the version is not the one it last read. Testing
+  a branch now needs only `uv tool install <checkout> --force` and `pan service install`. When
+  the skill file cannot be read, pan logs it and still boots or wakes the orchestrator, with
+  text that names the path without a version and asks it to read the file again. The texts now
+  say "decide what each person means and act through `pan` subcommands" instead of
+  "classify and route".
 - The orchestrator decides what a message means; code keeps only the actions and the safety
   rules. The gateway no longer parses route words: it writes the raw message to the inbox (the
   `@pan help` fast path and the untagged-reply rule are unchanged). `pan inbox drain --json` now
