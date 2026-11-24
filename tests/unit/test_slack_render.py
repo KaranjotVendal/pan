@@ -17,15 +17,16 @@ from pan.models import (
 from pan.slack_render import (
     SESSIONS_EMPTY_TEXT,
     SESSIONS_HEADER,
+    SESSIONS_NONE_SHOWN_TEXT,
     check_state,
     elapsed_text,
     escape_mrkdwn,
     plain_mrkdwn,
     private_details_text,
     render_sessions_for_slack,
-    select_sessions_for_slack,
     session_display_name,
     session_group,
+    sessions_to_show,
     slack_time,
     status_blocks,
     status_label,
@@ -314,10 +315,6 @@ def _session(**updates: object) -> SessionSummary:
     return session.model_copy(update=updates)
 
 
-def _used(minutes_ago: int) -> datetime:
-    return _NOW - timedelta(minutes=minutes_ago)
-
-
 def _names(sessions: list[SessionSummary]) -> list[str | None]:
     return [session.name for session in sessions]
 
@@ -402,75 +399,42 @@ def test_session_display_name(updates: dict[str, object], expected: str) -> None
     assert session_display_name(_session(**updates)) == expected
 
 
-def test_select_sessions_for_slack_without_words_puts_needs_action_then_recent_first() -> None:
-    sessions = [
-        _session(name="finished-new", agent_status=AgentStatus.DONE, updated_at=_used(1)),
-        _session(name="idle-old", agent_status=AgentStatus.IDLE, updated_at=_used(90)),
-        _session(name="idle-unrecorded", agent_status=AgentStatus.IDLE),
-        _session(name="working", agent_status=AgentStatus.WORKING, updated_at=_used(50)),
-        _session(name="idle-new", agent_status=AgentStatus.IDLE, updated_at=_used(5)),
-        _session(name="waiting", agent_status=AgentStatus.BLOCKED, updated_at=_used(60)),
-        _session(name=_ORCHESTRATOR, agent_status=AgentStatus.BLOCKED),
-        _session(name="zsh-1", agent="zsh", agent_status=AgentStatus.NONE),
-    ]
-
-    selected = select_sessions_for_slack(sessions, _ORCHESTRATOR)
-
-    assert _names(selected) == ["waiting", "working", "idle-new", "idle-old", "idle-unrecorded"]
-
-
-def test_select_sessions_for_slack_fills_room_with_finished_and_stopped() -> None:
-    sessions = [
-        _session(name="stopped", agent_status=AgentStatus.ERROR, updated_at=_used(1)),
-        _session(name="finished", agent_status=AgentStatus.DONE, updated_at=_used(2)),
-        _session(name="idle", agent_status=AgentStatus.IDLE, updated_at=_used(30)),
-    ]
-
-    assert _names(select_sessions_for_slack(sessions, _ORCHESTRATOR)) == [
-        "idle",
-        "stopped",
-        "finished",
-    ]
-
-
 @pytest.mark.parametrize(
-    "match_text, expected_names",
+    "addresses, expected_names",
     [
-        ("ocr", ["ocr-pipeline", "review-ocr"]),
-        ("OCR Review", ["review-ocr", "ocr-pipeline", "code-review"]),
-        ("sizing", ["plan-doc"]),
-        ("moshi", ["moshi-browser / pan"]),
-        ("invoices", ["billing"]),
-        ("nothing-like-this", []),
+        (["t3", "t1", "t2"], ["three", "one", "two"]),
+        (["t2", "t2", "t1"], ["two", "one"]),
+        (["t9", "t1"], ["one"]),
+        (["t0", "t4", "t1"], ["one"]),
+        ([], []),
+        (["t1", "t2", "t3", "t5", "t6", "t7", "t8"], ["one", "two", "three", "five", "six"]),
     ],
-    ids=["one-word", "most-words-first", "label", "where", "last-ask", "no-match"],
+    ids=[
+        "given-order",
+        "each-once",
+        "unknown-dropped",
+        "orchestrator-and-shell-dropped",
+        "none",
+        "at-most-five",
+    ],
 )
-def test_select_sessions_for_slack_with_words(match_text: str, expected_names: list[str]) -> None:
+def test_sessions_to_show(addresses: list[str], expected_names: list[str]) -> None:
     sessions = [
-        _session(name="ocr-pipeline", agent_status=AgentStatus.BLOCKED),
-        _session(name="code-review", agent_status=AgentStatus.IDLE),
-        _session(name="review-ocr", agent_status=AgentStatus.WORKING),
-        _session(name="plan-doc", label="Sizing plan"),
-        _session(name=None, where="moshi-browser / pan"),
-        _session(name="billing", last_ask="check the invoices"),
-    ]
-    sessions = [session.model_copy(update={"cwd": Path("/tmp/wt/stream")}) for session in sessions]
-
-    selected = select_sessions_for_slack(sessions, _ORCHESTRATOR, match_text)
-
-    assert [session_display_name(session) for session in selected] == [
-        "Sizing plan" if name == "plan-doc" else name for name in expected_names
+        _session(address="t0", name=_ORCHESTRATOR),
+        _session(address="t1", name="one"),
+        _session(address="t2", name="two", agent_status=AgentStatus.IDLE),
+        _session(address="t3", name="three", agent_status=AgentStatus.BLOCKED),
+        _session(address="t4", name="zsh-1", agent="zsh", agent_status=AgentStatus.NONE),
+        *(
+            _session(address=f"t{index}", name=name)
+            for index, name in [(5, "five"), (6, "six"), (7, "seven"), (8, "eight")]
+        ),
     ]
 
-
-@pytest.mark.parametrize("match_text", [None, "pan"], ids=["no-words", "words"])
-def test_select_sessions_for_slack_lists_at_most_five(match_text: str | None) -> None:
-    sessions = [_session(name=f"pan-{index}") for index in range(8)]
-
-    assert len(select_sessions_for_slack(sessions, _ORCHESTRATOR, match_text)) == 5
+    assert _names(sessions_to_show(sessions, _ORCHESTRATOR, addresses)) == expected_names
 
 
-def test_render_sessions_for_slack_without_words() -> None:
+def test_render_sessions_for_slack() -> None:
     sessions = [
         _session(
             address="t3",
@@ -501,31 +465,12 @@ def test_render_sessions_for_slack_without_words() -> None:
 
 
 @pytest.mark.parametrize(
-    "match_text, expected",
-    [
-        ("ocr review", '*Sessions matching "ocr review"*\n• *pan-sizing* · Working'),
-        ("OCR  ocr", '*Sessions matching "ocr"*\n• *pan-sizing* · Working'),
-    ],
-    ids=["words", "repeated-words-once"],
+    "any_running, expected",
+    [(True, SESSIONS_NONE_SHOWN_TEXT), (False, SESSIONS_EMPTY_TEXT)],
+    ids=["sessions-running", "nothing-running"],
 )
-def test_render_sessions_for_slack_with_words(match_text: str, expected: str) -> None:
-    assert render_sessions_for_slack([_session()], {}, match_text) == expected
-
-
-@pytest.mark.parametrize(
-    "match_text, expected",
-    [
-        (None, SESSIONS_EMPTY_TEXT),
-        ("", SESSIONS_EMPTY_TEXT),
-        ("ocr review", 'No sessions match "ocr review".'),
-        ("*ocr*", 'No sessions match "ocr".'),
-    ],
-    ids=["no-words", "blank-words", "words", "emphasis-in-words"],
-)
-def test_render_sessions_for_slack_with_nothing_selected(
-    match_text: str | None, expected: str
-) -> None:
-    assert render_sessions_for_slack([], {}, match_text) == expected
+def test_render_sessions_for_slack_with_nothing_selected(any_running: bool, expected: str) -> None:
+    assert render_sessions_for_slack([], {}, any_running=any_running) == expected
 
 
 @pytest.mark.parametrize(
@@ -576,34 +521,3 @@ def test_render_sessions_for_slack_drops_emphasis_from_a_name() -> None:
     text = render_sessions_for_slack([_session(label="**urgent** fix")], {})
 
     assert text.splitlines()[1] == "• *urgent fix* · Working"
-
-
-@pytest.mark.parametrize(
-    "updates, match_text, matches",
-    [
-        ({"name": "ocr-action"}, "ocr", True),
-        ({"name": "rapid-fix"}, "api", False),
-        ({"name": "api-client"}, "API", True),
-        ({"label": "Fix the login page", "name": "pan-x"}, "pan", True),
-        ({"name": None, "where": "work / 1", "cwd": Path("/tmp/wt/billing-sync")}, "billing", True),
-        ({"name": "x-stream"}, "x", True),
-        ({"name": "x-stream"}, "x st", True),
-        ({"name": "pan-a", "last_ask": "fix the OCR step"}, "ocr", True),
-    ],
-    ids=[
-        "token-prefix",
-        "not-inside-a-token",
-        "case-insensitive",
-        "terminal-name-behind-a-label",
-        "folder-name",
-        "only-short-words-list-unfiltered",
-        "short-word-ignored-others-kept",
-        "last-ask",
-    ],
-)
-def test_select_sessions_for_slack_matches_word_starts(
-    updates: dict[str, object], match_text: str, matches: bool
-) -> None:
-    session = _session(**{"cwd": Path("/tmp/wt/stream"), **updates})
-
-    assert (select_sessions_for_slack([session], _ORCHESTRATOR, match_text) == [session]) is matches

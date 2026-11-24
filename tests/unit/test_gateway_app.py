@@ -16,8 +16,6 @@ from pan.gateway.app import BoltSlackAdapter
 from pan.models import (
     InboxItem,
     PanConfig,
-    Route,
-    RouteKind,
     SlackCredentials,
     ThreadRecord,
     ThreadSource,
@@ -155,7 +153,6 @@ def test_allowed_app_mention_acks_then_appends() -> None:
     assert item.raw_text == "<@B> do the thing"
     assert item.received_at == _FIXED_NOW
     assert item.source is ThreadSource.SLACK
-    assert item.route == Route(text="do the thing")
 
     kinds = [entry[0] for entry in timeline]
     assert kinds == ["reaction", "append"]  # :eyes: before append (INV-1)
@@ -589,22 +586,111 @@ def test_update_message_and_post_ephemeral_delegate_to_the_client() -> None:
 
 
 @pytest.mark.parametrize(
-    "text, expected_route",
-    [
-        ("<@B> new: fix the login page", Route(kind=RouteKind.NEW, text="fix the login page")),
-        ("<@B> to pan-7: add tests", Route(kind=RouteKind.TO, session="pan-7", text="add tests")),
-        ("<@B> check", Route(kind=RouteKind.CHECK)),
-    ],
+    "event_type, expected_mentioned",
+    [("app_mention", True), ("message", False)],
+    ids=["mention", "forwarded-reply"],
 )
-def test_gateway_writes_the_parsed_route_on_the_item(text: str, expected_route: Route) -> None:
+def test_gateway_records_whether_the_message_mentioned_pan(
+    event_type: str, expected_mentioned: bool
+) -> None:
     adapter, _client, inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
-    event = {"user": "U1", "channel": "C1", "ts": "1718000000.000200", "text": text}
+    event = {
+        "type": event_type,
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1718000000.000300",
+        "thread_ts": "1718000000.000200",
+        "text": "and the docs",
+    }
 
     adapter.handle_event(event, "Ev1")
 
     (item,) = inbox.items
-    assert item.route == expected_route
-    assert item.raw_text == text
+    assert item.mentioned is expected_mentioned
+
+
+def test_an_item_written_before_mentioned_existed_counts_as_a_mention() -> None:
+    raw_item = {
+        "id": "Ev1",
+        "slack_user": "U1",
+        "channel": "C1",
+        "thread_ts": "1718000000.000200",
+        "is_thread_reply": False,
+        "raw_text": "<@B> check",
+        "received_at": "2026-07-16T10:00:00Z",
+    }
+
+    assert InboxItem.model_validate(raw_item).mentioned is True
+
+
+def test_gateway_writes_the_raw_text_and_no_route() -> None:
+    adapter, _client, inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    event = {"user": "U1", "channel": "C1", "ts": "1718000000.000200", "text": "<@B> check"}
+
+    adapter.handle_event(event, "Ev1")
+
+    (item,) = inbox.items
+    assert item.raw_text == "<@B> check"
+    assert "route" not in item.model_dump()
+
+
+_PATH_TEXT = "Saved to /Users/someone/dev/pan-worktrees/pan-7/notes.md, see ~/dev/pan."
+_REDACTED_TEXT = "Saved to .../notes.md, see .../pan."
+_PATH_BLOCKS: list[dict[str, Any]] = [
+    {"type": "section", "text": {"type": "mrkdwn", "text": "Working\n/home/someone/repo"}},
+    {"type": "context", "elements": [{"type": "mrkdwn", "text": "in ~/dev/pan-worktrees/pan-7"}]},
+]
+_REDACTED_BLOCKS: list[dict[str, Any]] = [
+    {"type": "section", "text": {"type": "mrkdwn", "text": "Working\n.../repo"}},
+    {"type": "context", "elements": [{"type": "mrkdwn", "text": "in .../pan-7"}]},
+]
+
+
+@pytest.mark.parametrize(
+    "send, expected_entry",
+    [
+        (
+            lambda adapter: adapter.post_message("C000TEST", "1700000000.000100", _PATH_TEXT),
+            ("post", ("C000TEST", "1700000000.000100", _REDACTED_TEXT)),
+        ),
+        (
+            lambda adapter: adapter.post_blocks(
+                "C000TEST", "1700000000.000100", _PATH_BLOCKS, _PATH_TEXT
+            ),
+            ("post_blocks", ("C000TEST", "1700000000.000100", _REDACTED_BLOCKS, _REDACTED_TEXT)),
+        ),
+        (
+            lambda adapter: adapter.update_message(
+                "C000TEST", "1700000000.000900", _PATH_BLOCKS, _PATH_TEXT
+            ),
+            ("update", ("C000TEST", "1700000000.000900", _REDACTED_BLOCKS, _REDACTED_TEXT)),
+        ),
+        (
+            lambda adapter: adapter.post_ephemeral(
+                "C000TEST", "1700000000.000100", "U000TEST", _PATH_TEXT
+            ),
+            ("ephemeral", ("C000TEST", "1700000000.000100", "U000TEST", _PATH_TEXT)),
+        ),
+    ],
+    ids=["message", "blocks", "status-edit", "ephemeral-untouched"],
+)
+def test_public_posts_cut_local_paths_and_ephemerals_keep_them(
+    send: Any, expected_entry: tuple[str, Any]
+) -> None:
+    adapter, _client, _inbox, timeline = _make_adapter({})
+
+    send(adapter)
+
+    assert timeline == [expected_entry]
+
+
+def test_redaction_leaves_the_caller_blocks_unchanged() -> None:
+    adapter, _client, _inbox, _timeline = _make_adapter({})
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "/Users/someone/a"}}]
+
+    adapter.post_blocks("C000TEST", "1700000000.000100", blocks, "text")
+
+    assert blocks[0]["text"]["text"] == "/Users/someone/a"
 
 
 def test_permalink_returns_the_message_link() -> None:

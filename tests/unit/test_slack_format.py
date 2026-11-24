@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.slack_format import split_for_slack, to_slack_mrkdwn
+from pan.slack_format import redact_paths, split_for_slack, to_slack_mrkdwn
 
 
 @pytest.mark.parametrize(
@@ -164,3 +164,123 @@ def test_split_for_slack_keeps_every_line_in_order() -> None:
 )
 def test_an_answer_converts_to_slack_mrkdwn(answer: str, expected: str) -> None:
     assert to_slack_mrkdwn(answer) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("see /Users/someone/dev/pan-worktrees/pan-7", "see .../pan-7"),
+        ("in /home/someone/repo/", "in .../repo"),
+        ("at ~/dev/pan/src/app.py, line 3", "at .../app.py, line 3"),
+        ("(/Users/someone/a/b)", "(.../b)"),
+        ("`/Users/someone/a/b`", "`.../b`"),
+        ("https://example.com/home/someone/page", "https://example.com/home/someone/page"),
+        ("file:///Users/someone/a.txt", ".../a.txt"),
+        (
+            "<https://example.com/Users/a|/Users/someone/a/b>",
+            "<https://example.com/Users/a|.../b>",
+        ),
+        ("<@U000TEST> moved src/home/x", "<@U000TEST> moved src/home/x"),
+        ("nothing to cut", "nothing to cut"),
+        ("</Users/someone/x/config.py|config.py>", "config.py"),
+        ("</Users/someone/x/config.py>", ".../config.py"),
+        ("<~/dev/pan/notes.md|notes>", "notes"),
+        ("<docs/plan.md|the plan>", "<docs/plan.md|the plan>"),
+        ("<./docs/plan.md|the plan>", "the plan"),
+        ("<www.example.com|Example>", "<www.example.com|Example>"),
+        ("<@U000TEST|/Users/someone/a>", "<@U000TEST|.../a>"),
+        ("<!subteam^S000TEST|~/team/x>", "<!subteam^S000TEST|.../x>"),
+        ("<#C000TEST|/home/someone/repo>", "<#C000TEST|.../repo>"),
+        ("<file:///Users/someone/a.txt|a.txt>", "a.txt"),
+        ("<file:///Users/someone/a.txt>", ".../a.txt"),
+        ("<mailto:someone@example.com|mail>", "<mailto:someone@example.com|mail>"),
+        ("<#C000TEST|general> and <!here>", "<#C000TEST|general> and <!here>"),
+        ("path:/Users/someone/a/b", "path:.../b"),
+        ("```\nx < /Users/someone/a/b > y\n```", "```\nx < .../b > y\n```"),
+        ("`</Users/someone/a/b>`", "`<.../b>`"),
+        ("open /Users/someone/My Project/x.py now", "open .../x.py now"),
+        ("`/Users/someone/My Project/x.py`", "`.../x.py`"),
+        ('see "/Users/someone/My Project/x.py"', 'see ".../x.py"'),
+        ("```\n~/a.py ~/b.py\n```", "```\n.../a.py .../b.py\n```"),
+        ("`file:///Users/someone/a.py`", "`.../a.py`"),
+        ("/Users/someone/a.py and/or ~/b.py", ".../a.py and/or .../b.py"),
+        ("~/a.py ~/b.py", ".../a.py .../b.py"),
+        ("/Users/someone/x.py 1/2 done", ".../x.py 1/2 done"),
+        ("in /Users/someone/My Project files", "in .../My Project files"),
+        (
+            "saved to /Users/someone/Library/Mobile Documents/com~apple~CloudDocs/"
+            "AcmeCorp Contract/draft.pdf",
+            "saved to .../draft.pdf",
+        ),
+        ("/Users/someone/My Project/x.py", ".../x.py"),
+        ("edited /Users/someone/a.py and/or ~/b.py", "edited .../a.py and/or .../b.py"),
+        ("compare ~/a.py ~/b.py", "compare .../a.py .../b.py"),
+        ("`cat /Users/someone/a.txt foo/bar`", "`cat .../a.txt foo/bar`"),
+        ("the file:// scheme", "the file:// scheme"),
+        ("FILE:///Users/someone/a.py", ".../a.py"),
+        ("`File:///home/someone/b.py`", "`.../b.py`"),
+        ("<https://example.com|/Users/someone/a.py>", "<https://example.com|.../a.py>"),
+        ("<mailto:a@example.com|~/mail/a.txt>", "<mailto:a@example.com|.../a.txt>"),
+        ("<www.example.com|/home/someone/b>", "<www.example.com|.../b>"),
+        ("/Users/someone/dir https://example.com/x", ".../dir https://example.com/x"),
+        ("/Users/someone/a https://example.com/b", ".../a https://example.com/b"),
+    ],
+    ids=[
+        "users",
+        "home-trailing-slash",
+        "tilde-with-comma",
+        "in-parentheses",
+        "in-backticks",
+        "url-untouched",
+        "file-url-cut",
+        "web-link-keeps-target-label-cut",
+        "relative-path-untouched",
+        "plain",
+        "local-link-to-label",
+        "local-link-without-label",
+        "tilde-link-to-label",
+        "relative-link-without-dot-kept",
+        "dot-relative-link-to-label",
+        "bare-domain-link-kept",
+        "user-mention-label-cut",
+        "subteam-mention-label-cut",
+        "channel-mention-label-cut",
+        "file-link-to-label",
+        "file-link-without-label",
+        "mailto-untouched",
+        "channel-and-special-mentions-untouched",
+        "colon-is-a-boundary",
+        "inside-a-fence-with-angle-brackets",
+        "angle-brackets-in-inline-code",
+        "prose-folder-with-a-space-cut-whole",
+        "code-path-with-a-space-cut-whole",
+        "quoted-path-with-a-space-cut-whole",
+        "code-two-paths-kept-apart",
+        "file-url-in-code",
+        "prose-and-or-not-swallowed",
+        "prose-two-paths-kept-apart",
+        "prose-fraction-not-swallowed",
+        "space-then-plain-words-cut-at-the-space",
+        "url-after-a-path-untouched",
+        "icloud-folders-with-spaces",
+        "folder-with-a-space",
+        "and-or-regression",
+        "two-paths-regression",
+        "code-path-then-relative-path",
+        "bare-file-scheme-untouched",
+        "file-scheme-upper-case",
+        "file-scheme-mixed-case-in-code",
+        "web-link-label-cut",
+        "mailto-label-cut",
+        "www-label-cut",
+        "folder-then-url-not-joined",
+    ],
+)
+def test_redact_paths(text: str, expected: str) -> None:
+    assert redact_paths(text) == expected
+
+
+def test_a_markdown_link_to_a_local_file_keeps_only_its_label() -> None:
+    converted = to_slack_mrkdwn("see [config.py](/Users/someone/x/config.py)")
+
+    assert redact_paths(converted) == "see config.py"

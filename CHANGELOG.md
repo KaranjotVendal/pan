@@ -7,6 +7,72 @@ as it works (see `AGENT_LOOP.md` step 9).
 
 ## [Unreleased]
 
+### Changed
+
+- The orchestrator decides what a message means; code keeps only the actions and the safety
+  rules. The gateway no longer parses route words: it writes the raw message to the inbox (the
+  `@pan help` fast path and the untagged-reply rule are unchanged). `pan inbox drain --json` now
+  gives each item as `item`, `text` (the message with the mention, a trailing client signature
+  and phone punctuation cleaned; `clean_message`, formerly `_clean_message`), `tie` and
+  `open_question` (pan's open `pan propose` question in the thread, with
+  `answered_by_requester` and `answer_text`). The `route`, `directive` and
+  `cancels_confirmation` fields are gone; an inbox item an older gateway wrote with a `route`
+  still loads. `InboxItem.mentioned` is True for an `app_mention` and False for a reply the
+  gateway forwarded without one (True for older items).
+- `pan inbox drain` keeps every drained item for 24 hours, at most 1000
+  (`FileDrainedLog`, `drained.jsonl` next to the thread map), so the gates read what the person
+  typed from pan's own record (written under an exclusive lock). `--item` must be the newest
+  item pan drained in its thread and channel from the same sender (a teammate's later "+1" does
+  not block it). When pan cannot use `--item` (unknown, not the sender's newest, not from the
+  requester) it posts "I couldn't act on that message; please send the request again."
+  (`UNUSABLE_ITEM_REPLY`) in the thread. `pan send --to` and `pan relay` (which now takes
+  `--thread` and `--channel`) take `--item <item id>` and exit 28 (nothing sent or posted) unless that item was sent in this
+  thread and channel (by `--requester` when given) and holds the name as a whole word or phrase,
+  any letter case, as well as matching exactly one live session as before. `pan propose`
+  requires `--item` from `--requester` (exit 28 otherwise).
+- `pan done --discard` takes `--item` and exits 33 (`DiscardNotRequestedError`), touching and
+  posting nothing, unless that item is the thread's newest, was sent by the thread's requester
+  (`ThreadRecord.requester`) and is exactly `done --discard` (a phone's `—discard` counts).
+- Confirmations: the orchestrator reads the reply to a "Send this to ...?" question.
+  `pan inbox drain` records the requester's latest reply in its thread after pan last asked
+  (`PendingConfirmation.asked_at`, `answered_at`, `answer_text`). A question stored without a
+  requester (before pan kept one) is never answered and simply expires after 30 minutes.
+  `pan confirm --choice` (`yes`, `y` or 1-3) exits 34 (`UnansweredQuestionError`), sending and
+  posting nothing, with no reply, a reply that declines ("no", "nope", "cancel", "none of
+  those", ...), `yes` chosen but a reply that is not a plain yes (a yes word with only
+  punctuation, "please", "thanks", "go ahead", "send it" or "that one" after it), or a number chosen but a
+  reply not starting with it ("2", "2 please", "#2"; "not 2, 3" picks nothing). Re-asking (yes
+  to several, a number out of range) and refusing a busy or waiting session clear the reply and
+  reset `asked_at`. A question expires 30 minutes after pan last asked, so asking again keeps it
+  open.
+  Expiry, range and still-live checks are unchanged; a decline is `--cancel`. `pan propose`
+  requires `--requester`.
+- A thread from X may only start new sessions: `pan send` (with or without `--to`),
+  `pan propose`, `pan relay` and `pan reopen` exit 35 (`XSourceRefusedError`, `X_TO_ROUTE_NOTICE`) when the thread record or
+  the `--item` comes from X. The X safety gate itself is still to come (MOB-87).
+- `pan sessions --match` is replaced by `--show <address,...>` with `--thread`, `--channel` and
+  `--requester`: the orchestrator picks the sessions and their order, pan sends at most 5 of them
+  to the requester alone.
+- Public posts and edits (`post_message`, `post_blocks`, `update_message`, block texts included)
+  cut local paths under `/Users`, `/home` and `~`, and `file://` URLs (any letter case, with a
+  path after the scheme), to `.../<last part>` (`redact_paths`), in code too. A path continues
+  past one space only when the segment before it has no file extension and the next run holds a
+  `/` and starts no new path or URL, so `.../Mobile Documents/.../draft.pdf` is cut whole while
+  "a.py and/or ~/b.py" is not joined. A Slack link whose target starts with `/`, `~`, `.` or
+  `file:` is replaced by its label, or the target's last part; other links and mentions keep
+  their target and have paths cut from their label. Ephemeral messages to the
+  requester are not cut.
+- The orchestrating skill is rewritten (about 140 lines): what each inbox item gives, the
+  actions with their exit codes, and the safety rules. The Slack help footer describes requests
+  in plain words.
+
+### Removed
+
+- `parse_directive`, `parse_route`, `route_for_source`, `parse_confirm_reply`, the retired-flag
+  notices, `TaskMode`, `RouteKind`, `Route`, `Directive`, `InboxItem.route`, `OpenQuestions`,
+  `route_with_pending`, `select_sessions_for_slack`, `match_words` and
+  `SESSIONS_MATCH_MIN_WORD_LENGTH`.
+
 ### Fixed
 
 - The gateway forwarded every human thread reply without an `@pan` mention, in any channel the

@@ -9,7 +9,6 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from pan.config import CODE_FENCE
-from pan.directive import parse_route
 from pan.errors import SlackPostError, UnauthorizedSenderError
 from pan.gateway.auth import auth_check, is_authorized
 from pan.gateway.slack_post import slack_post
@@ -17,6 +16,7 @@ from pan.help import parse_help_request, render_cli_help
 from pan.logging import initialise_logger
 from pan.models import InboxItem, PanConfig, SlackCredentials, ThreadSource
 from pan.seams import Clock, InboxStore, ThreadMap
+from pan.slack_format import redact_block_paths, redact_paths
 
 logger = initialise_logger(__name__)
 
@@ -68,9 +68,14 @@ class BoltSlackAdapter:
         except SlackApiError as error:
             raise SlackPostError(f"failed to add reaction in channel {channel}") from error
 
+    # Every public post and edit has local paths cut to their last part (redact_paths), so a
+    # session's answer never shows the machine's folders in a channel. post_ephemeral is left
+    # as is: only the requester sees it, and its details deliberately name the worktree.
     def post_message(self, channel: str, thread_ts: str, text: str) -> None:
         try:
-            self._client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+            self._client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts, text=redact_paths(text)
+            )
         except SlackApiError as error:
             raise SlackPostError(f"failed to post message to thread {thread_ts}") from error
 
@@ -79,7 +84,10 @@ class BoltSlackAdapter:
     ) -> str:
         try:
             response = self._client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts, blocks=blocks, text=text
+                channel=channel,
+                thread_ts=thread_ts,
+                blocks=redact_block_paths(blocks),
+                text=redact_paths(text),
             )
         except SlackApiError as error:
             raise SlackPostError(f"failed to post blocks to thread {thread_ts}") from error
@@ -92,7 +100,9 @@ class BoltSlackAdapter:
         self, channel: str, ts: str, blocks: list[dict[str, Any]], text: str
     ) -> None:
         try:
-            self._client.chat_update(channel=channel, ts=ts, blocks=blocks, text=text)
+            self._client.chat_update(
+                channel=channel, ts=ts, blocks=redact_block_paths(blocks), text=redact_paths(text)
+            )
         except SlackApiError as error:
             raise SlackPostError(f"failed to update message {ts}") from error
 
@@ -156,11 +166,8 @@ class BoltSlackAdapter:
             logger.info(f"gateway answered help id={event_id} named={named}")
             return
 
-        # INV-1, as amended for session control: the gateway parses the route words (pure
-        # string logic, parse_route) and writes the route on the item, so every front door
-        # shares one parser. It still decides nothing about the work: the orchestrator acts
-        # on the route.
-        route = parse_route(raw_text)
+        # Only the app_mention handler's events mention the bot; a forwarded reply does not.
+        is_mention = event.get("type") == "app_mention"
 
         # Fast :eyes: ack, ordered BEFORE the append so the sender sees acknowledgement
         # immediately and before any downstream work (INV-1).
@@ -175,11 +182,11 @@ class BoltSlackAdapter:
             raw_text=raw_text,
             received_at=self._clock.now(),
             source=ThreadSource.SLACK,
-            route=route,
+            mentioned=is_mention,
         )
         self._inbox.append(item)
         logger.info(f"gateway appended event id={event_id} channel={channel}")
-        if event.get("type") == "app_mention":
+        if is_mention:
             self._remember_mentioned_thread(channel, thread_ts)
 
     def _remember_mentioned_thread(self, channel: str, thread_ts: str) -> None:
@@ -202,7 +209,7 @@ class BoltSlackAdapter:
         # edit/system message (any subtype but file_share and thread_broadcast) are ignored;
         # a top-level (non-thread) message is ignored; a sender the allowlist refuses is
         # ignored; a reply in any other thread (unknown, or untied by done, forget, a move
-        # with `to <name>:` or a failed start) is ignored, so starting work there still
+        # to another session or a failed start) is ignored, so starting work there still
         # needs an @pan mention; and a message that mentions the bot is left to the
         # app_mention handler — Slack delivers an in-thread mention as BOTH an app_mention
         # and a message with distinct event ids, so forwarding both would append the same

@@ -6,7 +6,6 @@ from typing import Any
 
 from pan.config import (
     CLAUDE_AGENT_NAMES,
-    SESSIONS_MATCH_MIN_WORD_LENGTH,
     SESSIONS_SLACK_MAX_COUNT,
     STATUS_LABEL_MAX_LENGTH,
 )
@@ -173,30 +172,13 @@ def private_details_text(record: ThreadRecord) -> str:
     return "\n".join(lines)
 
 
-# `@pan sessions` in Slack: a few sessions, the ones the person most likely wants to send a
-# message to, sent to them alone. The text is Slack mrkdwn, posted as is (chat.postEphemeral).
+# `pan sessions --show` in Slack: the sessions the orchestrator picked, in its order, sent to
+# the requester alone. The text is Slack mrkdwn, posted as is (chat.postEphemeral).
 SESSIONS_IDLE_TITLE = "Idle"
-SESSIONS_GROUP_ORDER: tuple[str, ...] = (
-    STATUS_TITLES[StatusState.WAITING],
-    STATUS_TITLES[StatusState.WORKING],
-    SESSIONS_IDLE_TITLE,
-    STATUS_TITLES[StatusState.FINISHED],
-    STATUS_TITLES[StatusState.STOPPED],
-)
-# Without words, sessions are picked in these tiers, the most recently used first within a
-# tier: finished and stopped sessions only fill the room left.
-_SESSIONS_TIER: dict[str, int] = {
-    STATUS_TITLES[StatusState.WAITING]: 0,
-    STATUS_TITLES[StatusState.WORKING]: 1,
-    SESSIONS_IDLE_TITLE: 2,
-    STATUS_TITLES[StatusState.FINISHED]: 3,
-    STATUS_TITLES[StatusState.STOPPED]: 3,
-}
 # A Herdr location's tab number ("jiracli-generate / 1"), which says nothing to a reader.
 _WHERE_TAB_NUMBER = re.compile(r" / \d+$")
-# Splits a field into the tokens a query word is matched against.
-_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 SESSIONS_EMPTY_TEXT = "No sessions running."
+SESSIONS_NONE_SHOWN_TEXT = "None of those sessions is running."
 SESSIONS_HEADER = "*Your sessions*"
 
 _SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
@@ -270,75 +252,24 @@ def session_display_name(summary: SessionSummary) -> str:
     return summary.label or summary.inbox_thread_name or summary.name or where or summary.cwd.name
 
 
-def match_words(match_text: str | None) -> list[str]:
-    # The words of `@pan sessions <words>`, lowercased, each once, in order; a word shorter
-    # than SESSIONS_MATCH_MIN_WORD_LENGTH matches too much to be useful and is ignored.
-    words: list[str] = []
-    for word in (match_text or "").lower().split():
-        if len(word) >= SESSIONS_MATCH_MIN_WORD_LENGTH and word not in words:
-            words.append(word)
-    return words
-
-
-def _matched_word_count(summary: SessionSummary, words: list[str]) -> int:
-    # A word matches a token (a run of letters and digits) that starts with it, so "ocr"
-    # matches "ocr-action" and "api" does not match "rapid".
-    fields = [
-        session_display_name(summary),
-        summary.name,
-        summary.where,
-        summary.label,
-        summary.inbox_thread_name,
-        summary.last_ask,
-        summary.cwd.name,
-    ]
-    tokens = {
-        token
-        for field in fields
-        if field
-        for token in _NON_ALPHANUMERIC.split(field.lower())
-        if token
-    }
-    return sum(1 for word in words if any(token.startswith(word) for token in tokens))
-
-
-def _recency_key(summary: SessionSummary) -> float:
-    # Newest first; a session pan has no record for sorts after the ones it has.
-    return -summary.updated_at.timestamp() if summary.updated_at is not None else 0.0
-
-
-def select_sessions_for_slack(
+def sessions_to_show(
     summaries: list[SessionSummary],
     orchestrator_name: str,
-    match_text: str | None = None,
+    addresses: list[str],
     *,
     max_count: int = SESSIONS_SLACK_MAX_COUNT,
 ) -> list[SessionSummary]:
-    # With words: the sessions matching any of them (case-insensitive, against the name,
-    # location, label, Inbox thread and last ask), most words matched first, then by state.
-    # Without: waiting for you, working, then the most recently used.
-    grouped = [
-        (summary, group)
-        for summary in listed_sessions(summaries, orchestrator_name)
-        if (group := session_group(summary)) is not None
-    ]
-    words = match_words(match_text)
-    if words:
-        matching = [
-            (summary, group, count)
-            for summary, group in grouped
-            if (count := _matched_word_count(summary, words))
-        ]
-        matching.sort(
-            key=lambda entry: (
-                -entry[2],
-                SESSIONS_GROUP_ORDER.index(entry[1]),
-                _recency_key(entry[0]),
-            )
-        )
-        return [summary for summary, _group, _count in matching[:max_count]]
-    grouped.sort(key=lambda entry: (_SESSIONS_TIER[entry[1]], _recency_key(entry[0])))
-    return [summary for summary, _group in grouped[:max_count]]
+    # The listed sessions at the given terminal addresses, in the order given, each once, at
+    # most max_count. An address that is not a listed session is dropped.
+    by_address = {
+        summary.address: summary for summary in listed_sessions(summaries, orchestrator_name)
+    }
+    shown: list[SessionSummary] = []
+    for address in addresses:
+        summary = by_address.get(address)
+        if summary is not None and summary not in shown:
+            shown.append(summary)
+    return shown[:max_count]
 
 
 def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
@@ -348,13 +279,12 @@ def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
 
 
 def render_sessions_for_slack(
-    selected: list[SessionSummary], permalinks: dict[str, str], match_text: str | None = None
+    selected: list[SessionSummary], permalinks: dict[str, str], *, any_running: bool = True
 ) -> str:
-    # `selected` comes from select_sessions_for_slack. `permalinks` maps a session's
-    # thread_ts to its thread's link; a session without one is listed without a link.
-    words = match_words(match_text)
-    quoted_words = plain_mrkdwn(" ".join(words))
+    # `selected` comes from sessions_to_show. `permalinks` maps a session's thread_ts to its
+    # thread's link; a session without one is listed without a link.
     if not selected:
-        return f'No sessions match "{quoted_words}".' if words else SESSIONS_EMPTY_TEXT
-    header = f'*Sessions matching "{quoted_words}"*' if words else SESSIONS_HEADER
-    return "\n".join([header, *(_session_line(summary, permalinks) for summary in selected)])
+        return SESSIONS_NONE_SHOWN_TEXT if any_running else SESSIONS_EMPTY_TEXT
+    return "\n".join(
+        [SESSIONS_HEADER, *(_session_line(summary, permalinks) for summary in selected)]
+    )

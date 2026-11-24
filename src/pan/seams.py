@@ -163,6 +163,15 @@ class PendingConfirmations(Protocol):
 
     def put(self, pending: PendingConfirmation) -> None: ...
 
+    # Sets the question's answer (the latest reply wins); a no-op when there is no question.
+    def mark_answered(
+        self, source: ThreadSource, thread_ts: str, answered_at: datetime, answer_text: str
+    ) -> None: ...
+
+    # Clears the question's answer when pan asks again at `asked_at`; a no-op when there is no
+    # question.
+    def clear_answer(self, source: ThreadSource, thread_ts: str, asked_at: datetime) -> None: ...
+
     def clear(self, source: ThreadSource, thread_ts: str) -> None: ...
 
 

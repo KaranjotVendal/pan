@@ -79,10 +79,8 @@ WORKER_BRIEF_TASK_MARKER = "\n\nTask:\n"
 SLACK_READ_THREAD_TOOL_NAME = "mcp__plugin_slack_slack__slack_read_thread"
 # `pan sessions` shows the last thing each session was asked on one line, cut to this length.
 SESSION_LAST_ASK_MAX_LENGTH = 80
-# `@pan sessions` in Slack lists at most this many sessions, the most relevant first.
+# `pan sessions --show` sends the requester at most this many sessions, in the order given.
 SESSIONS_SLACK_MAX_COUNT = 5
-# `@pan sessions <words>` ignores words shorter than this.
-SESSIONS_MATCH_MIN_WORD_LENGTH = 2
 
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.
@@ -99,12 +97,17 @@ PLANNOTATOR_INBOX_TOOL_MARKER = "plannotator_inbox"
 # `send` never hang on the Inbox.
 INBOX_LOOKUP_THREAD_LIMIT = 50
 INBOX_LOOKUP_TIMEOUT_SECONDS = 10.0
-# `to <selector>:` with no exact match asks the person to confirm a proposed session in the
-# Slack thread (`pan propose`); a question left unanswered this long is dropped, and the next
-# reply in the thread is handled as usual.
+# A send to a named session with no exact match asks the person to confirm a proposed session
+# in the Slack thread (`pan propose`); a question left unanswered this long is dropped, and the
+# next reply in the thread is handled as usual.
 CONFIRMATION_TIMEOUT = timedelta(minutes=30)
 # A proposal names at most this many sessions, numbered 1 to this.
 CONFIRMATION_MAX_CANDIDATES = 3
+# `pan inbox drain` keeps the items it drained (drained.jsonl, next to the thread map) so `pan send
+# --to` and `pan done --discard` can read the person's own message by item id. Items older than
+# this, and all but the newest DRAINED_LOG_MAX_ITEMS, are dropped at each drain.
+DRAINED_LOG_RETENTION = timedelta(hours=24)
+DRAINED_LOG_MAX_ITEMS = 1000
 
 # Slack mrkdwn converter tunables (Principle 7 — named, not inlined in slack_format.py).
 # The sentinel template stashes a protected region behind a NUL-delimited key that survives
@@ -151,32 +154,32 @@ HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
 # Slack renders a fenced block as monospace, and to_slack_mrkdwn passes a fence through verbatim,
 # so the generated help keeps its column alignment.
 CODE_FENCE = "```"
-# The Slack-only grammar (route words in parse_route, directive flags in parse_directive) is NOT
-# in Typer, so the auto-generated help cannot see it (help tech-spec R-1). This short block is the
-# one hand-written piece and must be updated whenever a route word or directive flag changes.
+# What to say from Slack is not in Typer, so the auto-generated help cannot see it (help tech-spec
+# R-1). The orchestrator reads each message for its meaning; these are the requests it knows.
 SLACK_DIRECTIVE_FLAGS_FOOTER = """
-The commands above are terminal commands (pan <command>). From Slack, say these:
+The commands above are terminal commands (pan <command>). From Slack, mention @pan and say
+what you want in your own words, for example:
   <task>                     in a new thread, start a session in a new worktree;
                              in a tied thread, send it to the tied session
-  new: <task>                start a new session even in a tied thread (the tie moves)
-  to <name>: <task>          send to a live session (pan's or yours) if it is idle; tie
-                             this thread to it. <name> is its address, name or Herdr
-                             label; with no exact match pan proposes the likely session
-                             (or up to 3) and sends only when you reply yes or 1-3
+  start a new session: ...   start a new session even in a tied thread (the tie moves)
+  send to <name>: <task>     send to a live session (pan's or yours) if it is idle and tie
+                             this thread to it. <name> must be typed exactly as its
+                             address, name or Herdr label; otherwise pan proposes the
+                             likely session (or up to 3) and sends only when you answer
   check                      post the tied session's latest answer here
-  sessions                   list live sessions: name, idle or busy, last ask, and
-                             Inbox thread when pan knows it (--sessions works too)
+  what's running             list live sessions, sent only to you
   forget                     untie this thread (the session keeps running)
   done [--discard]           close pan's session for this thread and remove its
                              worktree and branch; kept if it has uncommitted files or
-                             unpushed commits, unless --discard; a session you
-                             started yourself is only untied
+                             unpushed commits; done --discard (the whole message) closes
+                             it anyway; a session you started yourself is only untied
   ... reply in slack ...     also post the session's answers here at every turn end
   --stream <name>            name a new session's terminal
-  relay <target> <message>   send a one-off message into a live session (ties nothing)
-  read <target> [--full]     read a live session's recent output (or all of it)
+  relay <name> <message>     send a one-off message into a live session (ties nothing)
+  read <name> [--full]       summarize what a live session is doing, or post its whole
+                             transcript with --full
   help [command]             this help
---new, --status, --sync and a leading ! are retired: use new:, check, and reply in slack.
+Untagged replies count only in a thread pan is working in.
 """.strip()
 
 

@@ -8,13 +8,6 @@ from typing import Any
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
-class TaskMode(StrEnum):
-    DELEGATE = "delegate"
-    SESSIONS = "sessions"
-    RELAY = "relay"  # send a message into a target terminal
-    READ = "read"  # read a target session's output (recent | --full transcript)
-
-
 class WorkerStatus(StrEnum):
     SPAWNING = "spawning"
     RUNNING = "running"
@@ -85,53 +78,6 @@ class Agent(StrEnum):
     PI = "pi"
 
 
-class RouteKind(StrEnum):
-    # The route words at the start of a message (see directive.parse_route). TASK means no
-    # route word: the thread's tie decides. NOTICE means pan only replies with Route.notice
-    # (a retired flag, or a route word with no task) and does nothing else. CONFIRM is a reply
-    # (`yes`, `y`, 1-3, or a decline: `no`, `n`, `cancel`, `stop`) to pan's open question in
-    # the thread asking which session to send a task to; only `pan inbox drain` sets it, because only it knows whether a question is open.
-    # DONE closes the thread's session (`done`, or `done --discard` to drop unsaved work).
-    TASK = "task"
-    NEW = "new"
-    TO = "to"
-    SESSIONS = "sessions"
-    FORGET = "forget"
-    CHECK = "check"
-    DONE = "done"
-    NOTICE = "notice"
-    CONFIRM = "confirm"
-
-
-class Route(BaseModel, frozen=True):
-    kind: RouteKind = RouteKind.TASK
-    # The live session named by `to <name>:`.
-    session: str | None = None
-    # The message with the mention and route word removed: the task, or the text to send.
-    text: str = ""
-    # "reply in slack" appears in the message.
-    reply_in_slack: bool = False
-    notice: str | None = None
-    # For CONFIRM: the reply, `yes`, a number from 1 to 3, or `no` (a decline).
-    choice: str | None = None
-    # For DONE: `done --discard`, so uncommitted files and unpushed commits are thrown away.
-    discard: bool = False
-
-
-class Directive(BaseModel, frozen=True):
-    mode: TaskMode = TaskMode.DELEGATE
-    target_stream: str | None = None
-    agent: Agent | None = None
-    # relay/read selector (hc address | terminal name | Herdr app space label) and the relay
-    # message. `target` is distinct from `target_stream` (a spawn stream name); it names a
-    # live terminal to address. `message` mirrors `cleaned_text` on the relay path.
-    target: str | None = None
-    message: str | None = None
-    # read the full transcript instead of recent lines (the `read` verb's --full modifier).
-    full: bool = False
-    cleaned_text: str
-
-
 class InboxItem(BaseModel, frozen=True):
     id: str
     slack_user: str
@@ -141,8 +87,9 @@ class InboxItem(BaseModel, frozen=True):
     raw_text: str
     received_at: datetime
     source: ThreadSource = ThreadSource.SLACK
-    # Parsed by the gateway; None on items an older gateway wrote (drain parses those).
-    route: Route | None = None
+    # The message mentioned the bot (an app_mention event); False for a reply the gateway
+    # forwarded without one. Items written before it existed were all mentions.
+    mentioned: bool = True
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -222,8 +169,12 @@ class ConfirmationCandidate(BaseModel, frozen=True):
 
 class PendingConfirmation(BaseModel, frozen=True):
     # pan's open question in a Slack thread: which session should get `task`. Stored per
-    # thread until the person replies or it expires (CONFIRMATION_TIMEOUT). It is not kept on
-    # the thread's ThreadRecord because a `to <name>:` in a new thread has no record yet.
+    # thread until it is answered, cancelled or expires (CONFIRMATION_TIMEOUT). It is not kept
+    # on the thread's ThreadRecord because a send to a named session in a new thread has no
+    # record yet. `answered_at` and `answer_text` (the reply, cleaned) are set by `pan inbox
+    # drain` when the requester replies after pan last asked; `pan confirm --choice` refuses
+    # until they are set, and they are cleared whenever pan asks again. A question stored
+    # without a requester is never answered; it expires.
     thread_ts: str
     channel: str
     source: ThreadSource = ThreadSource.SLACK
@@ -233,6 +184,14 @@ class PendingConfirmation(BaseModel, frozen=True):
     reply_in_slack: bool = False
     candidates: list[ConfirmationCandidate]
     created_at: datetime
+    # When pan last asked: at creation, and again at each re-ask or busy/blocked refusal. None
+    # on questions stored before it existed (created_at is used then).
+    asked_at: datetime | None = None
+    answered_at: datetime | None = None
+    answer_text: str | None = None
+
+    def last_asked_at(self) -> datetime:
+        return self.asked_at if self.asked_at is not None else self.created_at
 
 
 class Terminal(BaseModel, frozen=True):
