@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from git_worktree_fakes import FakeGitWorktree
+from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.adapters.hc import HcError
@@ -20,6 +21,7 @@ from pan.errors import (
 from pan.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
 from pan.slack_format import to_slack_mrkdwn
 from pan.spawn import (
+    RELAYED_FOLLOW_UP_SENTENCE,
     ClaudeLauncher,
     desk_session_ended_reply,
     inbox_thread_name,
@@ -55,19 +57,15 @@ class FakeThreadMap:
         self.ties.append(record.thread_ts)
         self.records[record.thread_ts] = record
 
+    def record_status_message(
+        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+    ) -> None:
+        record = self.records[thread_ts]
+        self.records[thread_ts] = record.model_copy(update={"status_message_ts": message_ts})
 
-class FakeSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
 
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+class FakeSlack(RecordingSlack):
+    pass
 
 
 class FakeClock:
@@ -153,17 +151,29 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert record.reply_mode is ReplyMode.ON_DEMAND
     assert record.inbox_thread_name == "pan-backend: do the thing"
     assert record.inbox_thread_id is None
-    # The record ties the thread to the session (INV-7) and the one start notice goes via
-    # egress, naming the session's Inbox thread.
-    assert thread_map.records[_THREAD] is record
+    assert record.status_label == "do the thing"
+    assert record.task_started_at == _FIXED_NOW
+    # The record ties the thread to the session (INV-7). The thread gets one status message
+    # (Working) and no plain post; the Inbox thread and terminal go only to the requester.
+    assert record.status_message_ts == "status-1"
+    assert thread_map.records[_THREAD] == record
     assert thread_map.ties == [_THREAD]
-    assert slack.posts == [
+    assert slack.posts == []
+    (status_post,) = slack.status_posts
+    assert (status_post.channel, status_post.thread_ts) == ("C1", _THREAD)
+    assert status_post.text == "Working: do the thing"
+    assert status_post.blocks[0]["text"]["text"] == "*Working*\ndo the thing"
+    assert slack.ephemerals == [
         (
             "C1",
             _THREAD,
-            'Started pan-backend in a new worktree · Inbox thread: "pan-backend: do the thing"',
+            "U0TEST",
+            "Details for pan-backend (only visible to you)\n"
+            'Inbox thread: "pan-backend: do the thing"\n'
+            "Terminal: t101",
         )
     ]
+    assert "localhost" not in status_post.text
 
 
 @pytest.mark.parametrize(
@@ -202,9 +212,8 @@ def test_spawn_sets_the_reply_mode_from_the_request(
     )
 
     assert record.reply_mode is expected_mode
-    assert slack.posts[0][2].endswith("answers will also be posted here") is (
-        expected_mode is ReplyMode.SLACK
-    )
+    context_text = slack.status_posts[0].blocks[1]["elements"][0]["text"]
+    assert context_text.endswith("answers posted here") is (expected_mode is ReplyMode.SLACK)
     (run,) = terminal_host.runs
     assert run.argv[1] == worker_brief(record.inbox_thread_name or "", task, expected_mode)
 
@@ -450,9 +459,27 @@ def test_reopen_continues_the_conversation_in_the_same_worktree(
     assert reopened.status is WorkerStatus.SPAWNING
     assert reopened.claude_session_id == "s-1"
     assert reopened.created_at == _FIXED_NOW
-    assert thread_map.records[_THREAD] is reopened
+    assert reopened.status_label == "also update the docs"
+    assert thread_map.records[_THREAD] == reopened
     assert thread_map.ties == [_THREAD]
-    assert slack.posts == [("C1", _THREAD, "reopened — stream pan-backend")]
+    # The thread's status message says Working again; no plain ack is posted.
+    assert slack.posts == []
+    assert slack.status_texts() == ["Working: also update the docs"]
+
+
+def test_reopen_edits_the_status_message_the_thread_already_has(tmp_path: Path) -> None:
+    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    record = _finished_record(tmp_path).model_copy(
+        update={"status_message_ts": "1718000000.000300"}
+    )
+
+    reopened = _reopen(record, terminal_host, thread_map, slack)
+
+    assert slack.status_posts == []
+    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
+        ("1718000000.000300", "Working: also update the docs")
+    ]
+    assert reopened.status_message_ts == "1718000000.000300"
 
 
 @pytest.mark.parametrize(
@@ -519,7 +546,7 @@ def test_worker_brief_says_who_replies_in_slack(
 
     preamble, task = brief.split("\n\nTask:\n")
     assert task == "do the thing"
-    assert preamble.endswith(expected_sentence)
+    assert preamble.endswith(f"{expected_sentence} {RELAYED_FOLLOW_UP_SENTENCE}")
     assert unwanted_text not in preamble
     assert "Do not post to Slack." not in preamble
 

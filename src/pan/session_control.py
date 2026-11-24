@@ -30,6 +30,7 @@ from pan.models import (
     BranchStatus,
     InboxThread,
     ReplyMode,
+    StatusState,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -49,14 +50,16 @@ from pan.sessions import (
     inbox_thread_known,
     joins_by_address,
     joins_terminal,
-    worker_status_for,
 )
+from pan.slack_render import check_state, status_label
 from pan.spawn import (
+    RELAYED_FOLLOW_UP_SENTENCE,
     desk_session_ended_reply,
     inbox_thread_name,
     slack_reply_sentence,
     upgraded_reply_mode,
 )
+from pan.status_message import post_answer, publish_status, send_private_details
 from pan.transcript import last_assistant_text
 
 logger = initialise_logger(__name__)
@@ -66,14 +69,14 @@ UNTIED_THREAD_REPLY = "this thread isn't tied to a session; @pan sessions lists 
 # knows the session's Inbox thread.
 FROM_SLACK_HEADER = (
     "From Slack via pan. Put questions and progress in the Plannotator Inbox thread named "
-    '"{inbox_thread_name}". {slack_reply_sentence}'
+    '"{inbox_thread_name}". {slack_reply_sentence} {relayed_follow_up_sentence}'
 )
 # The same line for a session pan did not start and whose Inbox thread pan does not know yet:
 # it may already report this work in a thread of its own.
 FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER = (
     "From Slack via pan. Put questions and progress in your existing Plannotator Inbox thread "
     'for this work if you already have one; otherwise start one named "{inbox_thread_name}". '
-    "{slack_reply_sentence}"
+    "{slack_reply_sentence} {relayed_follow_up_sentence}"
 )
 # The agent states in which a session is waiting for input, so text can be typed into it. Any
 # other state (working, an error, no status, an unknown one) counts as busy, except a fresh
@@ -82,28 +85,6 @@ _READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
 # A screen line made only of box-drawing characters (Claude Code's dividers and banner frame),
 # ASCII rule characters and whitespace carries nothing worth posting.
 _DIVIDER_LINE = re.compile(r"[\s\u2500-\u259f\-=_]*")
-
-# What `check` says about the session's state, from the status its terminal implies.
-_STATE_SENTENCES: dict[WorkerStatus, str] = {
-    WorkerStatus.SPAWNING: "{name} is starting, so there may be no answer yet.",
-    WorkerStatus.RUNNING: "{name} is still working, so this answer may not be final.",
-    WorkerStatus.IDLE: "{name} is idle.",
-    WorkerStatus.BLOCKED: "{name} is waiting on a prompt at the terminal.",
-    WorkerStatus.DONE: "{name} has finished.",
-    WorkerStatus.FAILED: "{name} has ended.",
-}
-
-
-def inbox_reference(record: ThreadRecord) -> str | None:
-    # The session's Inbox thread: its link once captured, else its name; a name pan only
-    # suggested to a desk session is shown as the alternative it is.
-    if record.inbox_thread_url:
-        return f"Inbox: {record.inbox_thread_url}"
-    if record.inbox_thread_name and inbox_thread_known(record):
-        return f'Inbox thread: "{record.inbox_thread_name}"'
-    if record.inbox_thread_name:
-        return f'Inbox thread: its existing one, or "{record.inbox_thread_name}"'
-    return None
 
 
 def _session_name(terminal: Terminal) -> str:
@@ -121,16 +102,6 @@ def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> Thre
     return max(matches, key=lambda record: record.updated_at) if matches else None
 
 
-def sent_notice(record: ThreadRecord) -> str:
-    notice = f"Sent to {record.terminal_name}"
-    reference = inbox_reference(record)
-    if reference is not None:
-        notice = f"{notice} · {reference}"
-    if record.reply_mode is ReplyMode.SLACK:
-        notice = f"{notice} · answers will also be posted here"
-    return notice
-
-
 def from_slack_text(
     inbox_thread: str, text: str, reply_mode: ReplyMode, *, thread_known: bool = True
 ) -> str:
@@ -141,7 +112,9 @@ def from_slack_text(
     # session's last ask.
     template = FROM_SLACK_HEADER if thread_known else FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER
     header = template.format(
-        inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
+        inbox_thread_name=inbox_thread,
+        slack_reply_sentence=slack_reply_sentence(reply_mode),
+        relayed_follow_up_sentence=RELAYED_FOLLOW_UP_SENTENCE,
     )
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
 
@@ -258,6 +231,8 @@ def send_to_session(
     # several sessions share, nothing is sent or posted: NoExactMatchError tells the
     # orchestrator to propose a session for the person to confirm (`pan propose`). A busy
     # session or one waiting on a prompt gets a short reply and raises, with nothing sent.
+    # On success the thread's status message says Working, and the session's Inbox thread and
+    # terminal go to the requester only.
     terminals = terminal_host.list_terminals()
     try:
         target = resolve_target(selector, terminals)
@@ -314,6 +289,8 @@ def send_to_session(
             requester=requester,
             reply_mode=reply_mode,
             inbox_thread_name=inbox_thread,
+            status_label=status_label(text),
+            task_started_at=now,
         )
     else:
         same_thread = session_record.thread_ts == thread_ts
@@ -327,6 +304,10 @@ def send_to_session(
             "inbox_thread_name": inbox_thread,
             "created_at": session_record.created_at if same_thread else now,
             "updated_at": now,
+            "status_label": status_label(text),
+            "task_started_at": now,
+            # A status message lives in its own thread; moving to another starts a new one.
+            "status_message_ts": session_record.status_message_ts if same_thread else None,
         }
         if not session_record.started_by_pan:
             # No hooks report a desk session's turns; it was just given work.
@@ -339,7 +320,14 @@ def send_to_session(
     if looked_up_name is None or tied_record.inbox_thread_name != looked_up_name:
         # Not looked up yet in this send (a lookup that just missed would miss again).
         tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
-    slack_post(slack, channel, thread_ts, sent_notice(tied_record))
+    tied_record = publish_status(
+        slack=slack,
+        thread_map=thread_map,
+        record=tied_record,
+        state=StatusState.WORKING,
+        clock=clock,
+    )
+    send_private_details(slack=slack, record=tied_record)
     logger.info(
         f"sent to session terminal={target.address} thread={thread_ts} "
         f"started_by_pan={tied_record.started_by_pan} len={len(text)}"
@@ -355,6 +343,7 @@ def follow_up_to_session(
     terminal_host: TerminalHost,
     thread_map: ThreadMap,
     slack: SlackAdapter,
+    clock: Clock,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
     # A message with no route words in a tied thread goes to the tied session, with the same
@@ -364,7 +353,8 @@ def follow_up_to_session(
     # reopen it; a desk session is never reopened, so pan says it ended.
     # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved right after the
     # text is typed, so the Stop hook posts this answer; a busy or blocked refusal leaves the
-    # record unchanged. Without it the mode is left as it is (never back to on demand).
+    # record unchanged. Without it the mode is left as it is (never back to on demand). Once
+    # typed, the follow-up is the thread's task and its status message says Working.
     record = thread_map.get(thread_ts)
     if record is None or not record.tied:
         slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
@@ -389,6 +379,15 @@ def follow_up_to_session(
         record = record.model_copy(update={"reply_mode": reply_mode})
     if not record.started_by_pan:
         thread_map.update_status(thread_ts, WorkerStatus.RUNNING, session_name=record.terminal_name)
+    label, started_at = status_label(text), clock.now()
+    thread_map.record_task(thread_ts, label, started_at, session_name=record.terminal_name)
+    record = publish_status(
+        slack=slack,
+        thread_map=thread_map,
+        record=record.model_copy(update={"status_label": label, "task_started_at": started_at}),
+        state=StatusState.WORKING,
+        clock=clock,
+    )
     logger.info(f"follow-up sent terminal={terminal.address} thread={thread_ts} len={len(text)}")
     return record
 
@@ -463,39 +462,34 @@ def clean_screen_text(screen: str, max_lines: int = CHECK_SCREEN_MAX_LINES) -> s
     return "\n".join(tail)
 
 
-def check_reply(record: ThreadRecord, terminal_host: TerminalHost, *, screen_lines: int) -> str:
-    # The tied session's latest answer, as is: the last assistant text from its transcript,
-    # or, without one, its recent screen lines labelled as such. Headed by the session name,
-    # its Inbox thread and what state it is in.
-    terminal = _live_terminal(terminal_host, record)
-    status = worker_status_for(terminal, record.status)
-    header = record.terminal_name
-    reference = inbox_reference(record)
-    header = (
-        f"{header} · {reference}" if reference is not None else f"{header} · no Inbox thread yet"
-    )
-    state = _STATE_SENTENCES[status].format(name=record.terminal_name)
-
-    answer = last_assistant_text(record.transcript_path) if record.transcript_path else None
-    if answer is not None:
-        body = answer
-    elif terminal is not None:
-        try:
-            screen = read_session(
-                terminal_host,
-                [],
-                terminal.address,
-                [terminal],
-                full=False,
-                lines=screen_lines,
-                full_history_lines=screen_lines,
-            )
-            body = f"Screen text (no transcript yet):\n```\n{clean_screen_text(screen)}\n```"
-        except TerminalHostError:
-            body = "Its screen could not be read."
-    else:
-        body = "No answer recorded."
-    return f"{header}\n{state}\n\n{body}"
+def screen_answer(
+    record: ThreadRecord,
+    terminal: Terminal | None,
+    terminal_host: TerminalHost,
+    *,
+    screen_lines: int,
+) -> str | None:
+    # For a session with no transcript (a desk session has no hooks): its recent screen lines,
+    # cleaned and labelled as such. None when there is no live terminal or nothing to show.
+    if terminal is None:
+        return None
+    try:
+        screen = read_session(
+            terminal_host,
+            [],
+            terminal.address,
+            [terminal],
+            full=False,
+            lines=screen_lines,
+            full_history_lines=screen_lines,
+        )
+    except TerminalHostError:
+        logger.info(f"check could not read the screen thread={record.thread_ts}")
+        return None
+    cleaned = clean_screen_text(screen)
+    if not cleaned:
+        return None
+    return f"Screen text (no transcript yet):\n```\n{cleaned}\n```"
 
 
 def check_thread(
@@ -506,16 +500,32 @@ def check_thread(
     terminal_host: TerminalHost,
     inbox_directory: InboxDirectory,
     slack: SlackAdapter,
+    clock: Clock,
     screen_lines: int,
 ) -> None:
+    # Bring the thread's status message up to date (edited in place, or posted anew when it is
+    # missing), post the latest answer as its own clean message when there is one, and send
+    # the session's Inbox thread and terminal to the requester only.
     record = thread_map.get(thread_ts)
     if record is None or not record.tied:
         slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
         return
     record = _with_inbox_link(record, inbox_directory, thread_map)
-    slack_post_parts(
-        slack, channel, thread_ts, check_reply(record, terminal_host, screen_lines=screen_lines)
+    terminal = _live_terminal(terminal_host, record)
+    state = check_state(terminal, record.status)
+    record = publish_status(
+        slack=slack, thread_map=thread_map, record=record, state=state, clock=clock
     )
+    # The last answer in the transcript, posted alone unless pan already posted that same
+    # answer (the Stop hook, in the reply-in-Slack mode); without a transcript, screen text.
+    answer = last_assistant_text(record.transcript_path) if record.transcript_path else None
+    if answer is not None:
+        post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
+    else:
+        screen = screen_answer(record, terminal, terminal_host, screen_lines=screen_lines)
+        if screen is not None:
+            slack_post_parts(slack, channel, thread_ts, screen)
+    send_private_details(slack=slack, record=record)
     logger.info(f"check thread={thread_ts} session={record.terminal_name}")
 
 
@@ -636,13 +646,15 @@ def done_thread(
     terminal_host: TerminalHost,
     git: GitWorktreeAdapter,
     slack: SlackAdapter,
+    clock: Clock,
 ) -> None:
     # `done`: close the thread's tied session. A session pan did not start is only untied.
     # For pan's own, nothing is closed while it is working or waiting on a prompt, or while
     # closing it would lose work (uncommitted files, or branch commits not pushed or merged),
     # unless `discard`. Otherwise its terminal is removed (when it still exists), then its
     # worktree (or, when the folder is already gone, the repository's record of it) and its
-    # branch, and only then is the record marked DONE and untied.
+    # branch, and only then is the record marked DONE and untied, and the thread's status
+    # message says Closed.
     record = thread_map.get(thread_ts)
     if record is None or not record.tied:
         slack_post(slack, channel, thread_ts, NO_SESSION_REPLY)
@@ -736,6 +748,9 @@ def done_thread(
 
     thread_map.update_status(thread_ts, WorkerStatus.DONE, session_name=name)
     thread_map.untie(thread_ts)
+    publish_status(
+        slack=slack, thread_map=thread_map, record=record, state=StatusState.CLOSED, clock=clock
+    )
     slack_post(
         slack,
         channel,

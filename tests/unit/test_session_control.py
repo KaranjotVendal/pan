@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 from git_worktree_fakes import FakeGitWorktree
 from inbox_fakes import FakeInboxDirectory
+from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.errors import (
@@ -14,12 +16,14 @@ from pan.errors import (
     NoExactMatchError,
     PanError,
     SessionBusyError,
+    SlackPostError,
     TargetBlockedError,
     TerminalGoneError,
     ThreadNotFoundError,
     UnsafeWorktreeError,
     UnsavedWorkError,
 )
+from pan.hooks.stop import stop_hook
 from pan.interface import INCOMPLETE_READ_NOTICE
 from pan.models import (
     AgentStatus,
@@ -43,7 +47,8 @@ from pan.session_control import (
     send_to_session,
 )
 from pan.slack_format import to_slack_mrkdwn
-from pan.spawn import desk_session_ended_reply
+from pan.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
+from pan.status_message import answer_digest
 from pan.threadmap import FileThreadMap
 
 _FIXED_NOW = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
@@ -54,23 +59,6 @@ _NEW_THREAD = "1700000000.000200"
 class FixedClock:
     def now(self) -> datetime:
         return _FIXED_NOW
-
-
-class RecordingSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
-
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def texts(self) -> list[str]:
-        return [text for _channel, _thread, text in self.posts]
 
 
 def _record(
@@ -135,20 +123,19 @@ def _send(
 
 
 @pytest.mark.parametrize(
-    "reply_in_slack, inbox_url, expected_notice",
+    "reply_in_slack, inbox_url, expected_inbox_line",
     [
-        (False, None, 'Sent to pan-7 · Inbox thread: "pan-7: fix the login page"'),
+        (False, None, 'Inbox thread: "pan-7: fix the login page"'),
         (
             True,
-            "https://inbox.example/threads/abc",
-            "Sent to pan-7 · Inbox: https://inbox.example/threads/abc"
-            " · answers will also be posted here",
+            "http://localhost:19441/#thread=abc",
+            "Inbox thread: <http://localhost:19441/#thread=abc|pan-7: fix the login page>",
         ),
     ],
     ids=["inbox-name", "inbox-link-and-slack-replies"],
 )
-def test_send_to_session_sends_ties_and_posts_a_notice(
-    tmp_path: Path, reply_in_slack: bool, inbox_url: str | None, expected_notice: str
+def test_send_to_session_sends_ties_and_posts_a_status(
+    tmp_path: Path, reply_in_slack: bool, inbox_url: str | None, expected_inbox_line: str
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(inbox_thread_url=inbox_url))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
@@ -175,7 +162,36 @@ def test_send_to_session_sends_ties_and_posts_a_notice(
     old = thread_map.get(_OLD_THREAD)
     assert old is not None
     assert old.tied is False
-    assert slack.posts == [("C0TEST", _NEW_THREAD, expected_notice)]
+    # One status message in the new thread, nothing else in it; the Inbox link (on this
+    # machine) and the terminal go only to the requester.
+    assert slack.posts == []
+    (status_post,) = slack.status_posts
+    assert (status_post.thread_ts, status_post.text) == (_NEW_THREAD, "Working: add the tests")
+    assert "localhost" not in str(status_post.blocks)
+    assert tied.status_message_ts == "status-1"
+    assert tied.status_label == "add the tests"
+    assert slack.ephemerals == [
+        (
+            "C0TEST",
+            _NEW_THREAD,
+            "U0TEST",
+            f"Details for pan-7 (only visible to you)\n{expected_inbox_line}\nTerminal: t7",
+        )
+    ]
+
+
+def test_send_to_a_session_from_another_thread_never_edits_that_threads_status(
+    tmp_path: Path,
+) -> None:
+    thread_map = _thread_map(tmp_path, _record(status_message_ts="1700000000.000900"))
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+    slack = RecordingSlack()
+
+    tied = _send(terminal_host, thread_map, slack)
+
+    assert slack.status_updates == []
+    assert [post.thread_ts for post in slack.status_posts] == [_NEW_THREAD]
+    assert tied.status_message_ts == "status-1"
 
 
 @pytest.mark.parametrize(
@@ -313,9 +329,11 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     assert tied.terminal_address == "t9"
     assert tied.worktree_path == desk_folder
     assert tied.inbox_thread_name == "desk-api: add the tests"
-    assert slack.texts() == [
-        'Sent to desk-api · Inbox thread: its existing one, or "desk-api: add the tests"'
-    ]
+    assert slack.texts() == []
+    assert slack.status_texts() == ["Working: add the tests"]
+    assert slack.ephemerals[0][3].split("\n")[1] == (
+        'Inbox thread: its existing one, or "desk-api: add the tests"'
+    )
 
 
 @pytest.mark.parametrize(
@@ -390,7 +408,10 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
     old = thread_map.get(_OLD_THREAD)
     assert old is not None
     assert old.tied is False
-    assert slack.texts() == ["Sent to desk-api · Inbox: https://inbox.example/threads/thr_9"]
+    assert slack.texts() == []
+    assert slack.ephemerals[0][3].split("\n")[1] == (
+        "Inbox thread: <https://inbox.example/threads/thr_9|desk-api: fix the build>"
+    )
 
 
 @pytest.mark.parametrize(
@@ -534,13 +555,14 @@ def _check(
         terminal_host=terminal_host,
         inbox_directory=inbox_directory if inbox_directory is not None else FakeInboxDirectory(),
         slack=slack,
+        clock=FixedClock(),
         screen_lines=50,
     )
 
 
 @pytest.mark.parametrize(
     "live_terminal_name, expected_state",
-    [("pan-7", "pan-7 is idle."), ("pan-8", "pan-7 has ended.")],
+    [("pan-7", "Finished"), ("pan-8", "Stopped")],
     ids=["same-terminal", "address-reused-by-another-name"],
 )
 def test_check_finds_the_session_terminal_by_address_only_when_names_agree(
@@ -554,24 +576,27 @@ def test_check_finds_the_session_terminal_by_address_only_when_names_agree(
 
     _check(thread_map, terminal_host, slack)
 
-    assert expected_state in slack.texts()[0]
+    assert slack.status_texts() == [expected_state]
 
 
 @pytest.mark.parametrize(
     "agent_status, expected_state",
     [
-        (AgentStatus.IDLE, "pan-7 is idle."),
-        (AgentStatus.WORKING, "pan-7 is still working, so this answer may not be final."),
-        (AgentStatus.BLOCKED, "pan-7 is waiting on a prompt at the terminal."),
+        (AgentStatus.IDLE, "Finished: fix the login page"),
+        (AgentStatus.WORKING, "Working: fix the login page"),
+        (AgentStatus.BLOCKED, "Waiting for you: fix the login page"),
     ],
     ids=["idle", "working", "blocked"],
 )
-def test_check_posts_the_last_answer_with_the_inbox_link_and_state(
+def test_check_edits_the_status_posts_the_clean_answer_and_sends_the_link_privately(
     tmp_path: Path, agent_status: AgentStatus, expected_state: str
 ) -> None:
     record = _record(
-        transcript_path=_transcript_answering(tmp_path, "Fixed the login page."),
-        inbox_thread_url="https://inbox.example/threads/abc",
+        transcript_path=_transcript_answering(tmp_path, "Fixed the **login** page."),
+        inbox_thread_url="http://localhost:19441/#thread=abc",
+        requester="U0TEST",
+        status_message_ts="1700000000.000900",
+        status_label="fix the login page",
     )
     thread_map = _thread_map(tmp_path, record)
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
@@ -579,15 +604,36 @@ def test_check_posts_the_last_answer_with_the_inbox_link_and_state(
 
     _check(thread_map, terminal_host, slack)
 
-    assert slack.posts == [
+    # The answer alone, in mrkdwn: no session name, state line or Inbox link around it.
+    assert slack.posts == [("C0TEST", _OLD_THREAD, "Fixed the *login* page.")]
+    assert slack.status_posts == []
+    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
+        ("1700000000.000900", expected_state)
+    ]
+    assert slack.ephemerals == [
         (
             "C0TEST",
             _OLD_THREAD,
-            "pan-7 · Inbox: https://inbox.example/threads/abc\n"
-            f"{expected_state}\n\nFixed the login page.",
+            "U0TEST",
+            "Details for pan-7 (only visible to you)\n"
+            "Inbox thread: <http://localhost:19441/#thread=abc|pan-7: fix the login page>\n"
+            "Terminal: t7",
         )
     ]
     assert terminal_host.reads == []
+
+
+def test_check_posts_a_new_status_when_the_old_one_cannot_be_edited(tmp_path: Path) -> None:
+    thread_map = _thread_map(tmp_path, _record(status_message_ts="1700000000.000900"))
+    slack = RecordingSlack()
+    slack.update_error = SlackPostError("message_not_found")
+
+    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+
+    assert slack.status_texts() == ["Finished"]
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.status_message_ts == "status-1"
 
 
 def test_check_without_a_transcript_posts_screen_text(tmp_path: Path) -> None:
@@ -598,21 +644,23 @@ def test_check_without_a_transcript_posts_screen_text(tmp_path: Path) -> None:
 
     _check(thread_map, terminal_host, slack)
 
-    assert slack.texts() == [
-        'pan-7 · Inbox thread: "pan-7: fix the login page"\n'
-        "pan-7 is idle.\n\n"
-        "Screen text (no transcript yet):\n```\nlast screen lines\n```"
-    ]
+    assert slack.texts() == ["Screen text (no transcript yet):\n```\nlast screen lines\n```"]
     assert terminal_host.reads == [("t7", 50)]
 
 
-def test_check_on_an_ended_session_says_so(tmp_path: Path) -> None:
-    thread_map = _thread_map(tmp_path, _record(inbox_thread_name=None))
+def test_check_on_an_ended_session_with_no_answer_only_updates_the_status(
+    tmp_path: Path,
+) -> None:
+    thread_map = _thread_map(tmp_path, _record(inbox_thread_name=None, requester="U0TEST"))
     slack = RecordingSlack()
 
     _check(thread_map, _host(), slack)
 
-    assert slack.texts() == ["pan-7 · no Inbox thread yet\npan-7 has ended.\n\nNo answer recorded."]
+    assert slack.texts() == []
+    assert slack.status_texts() == ["Stopped"]
+    assert slack.ephemerals[0][3] == (
+        "Details for pan-7 (only visible to you)\nInbox thread: none yet\nTerminal: t7"
+    )
 
 
 def test_check_splits_a_long_answer_into_labelled_parts(tmp_path: Path) -> None:
@@ -625,7 +673,7 @@ def test_check_splits_a_long_answer_into_labelled_parts(tmp_path: Path) -> None:
 
     texts = slack.texts()
     assert len(texts) > 1
-    assert texts[0].startswith(f"(1/{len(texts)})\npan-7 · ")
+    assert texts[0].startswith(f"(1/{len(texts)})\nline 0 of the answer")
     assert texts[-1].endswith("line 399 of the answer")
 
 
@@ -639,14 +687,16 @@ def test_check_on_an_untied_thread_replies_one_line(
     _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
 
     assert slack.posts == [("C0TEST", _OLD_THREAD, UNTIED_THREAD_REPLY)]
+    assert slack.status_posts == []
+    assert slack.ephemerals == []
 
 
 @pytest.mark.parametrize(
-    "found, expected_header",
+    "found, expected_inbox_line",
     [
         (
             InboxThread(thread_id="thr_9", name="desk-api: fix the build", url=None),
-            'desk-api · Inbox thread: "desk-api: fix the build"',
+            'Inbox thread: "desk-api: fix the build"',
         ),
         (
             InboxThread(
@@ -654,14 +704,14 @@ def test_check_on_an_untied_thread_replies_one_line(
                 name="desk-api: fix the build",
                 url="https://inbox.example/threads/thr_9",
             ),
-            "desk-api · Inbox: https://inbox.example/threads/thr_9",
+            "Inbox thread: <https://inbox.example/threads/thr_9|desk-api: fix the build>",
         ),
-        (None, 'desk-api · Inbox thread: its existing one, or "desk-api: fix the build"'),
+        (None, 'Inbox thread: its existing one, or "desk-api: fix the build"'),
     ],
     ids=["found-without-link", "found-with-link", "not-found"],
 )
 def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
-    tmp_path: Path, found: InboxThread | None, expected_header: str
+    tmp_path: Path, found: InboxThread | None, expected_inbox_line: str
 ) -> None:
     desk_folder = Path("/tmp/desk/api")
     record = _record(
@@ -670,6 +720,7 @@ def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
         started_by_pan=False,
         worktree_path=desk_folder,
         inbox_thread_name="desk-api: fix the build",
+        requester="U0TEST",
     )
     thread_map = _thread_map(tmp_path, record)
     known_threads = {(desk_folder, "desk-api: fix the build"): found} if found else {}
@@ -678,7 +729,7 @@ def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
 
     _check(thread_map, _host(make_terminal("t9", name="desk-api")), slack, inbox_directory)
 
-    assert slack.texts()[0].startswith(f"{expected_header}\n")
+    assert slack.ephemerals[0][3].split("\n")[1] == expected_inbox_line
     assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]
     stored = thread_map.get(_OLD_THREAD)
     assert stored is not None
@@ -740,6 +791,7 @@ def _follow_up(
         terminal_host=terminal_host,
         thread_map=thread_map,
         slack=slack,
+        clock=FixedClock(),
         reply_in_slack=reply_in_slack,
     )
 
@@ -831,6 +883,12 @@ def test_follow_up_types_into_the_tied_idle_session(
 
     assert terminal_host.sent == [(record.terminal_address, expected_text)]
     assert slack.posts == []
+    # The follow-up is the thread's task now, and its status message says Working.
+    assert slack.status_texts() == ["Working: and the docs"]
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.status_label == "and the docs"
+    assert stored.task_started_at == _FIXED_NOW
 
 
 @pytest.mark.parametrize(
@@ -861,6 +919,7 @@ def test_follow_up_to_a_session_not_ready_types_nothing(
 
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
+    assert slack.status_posts == []
 
 
 @pytest.mark.parametrize(
@@ -917,7 +976,7 @@ def test_from_slack_text_says_who_replies_in_slack(
     header, task = typed.split("\n\nTask:\n")
     assert task == "add the tests"
     assert '"desk-api: fix the build"' in header
-    assert header.endswith(expected_sentence)
+    assert header.endswith(f"{expected_sentence} {RELAYED_FOLLOW_UP_SENTENCE}")
 
 
 def test_follow_up_to_a_desk_session_in_slack_mode_says_pan_posts_the_answer(
@@ -940,6 +999,7 @@ def test_follow_up_to_a_desk_session_in_slack_mode_says_pan_posts_the_answer(
         terminal_host=terminal_host,
         thread_map=thread_map,
         slack=RecordingSlack(),
+        clock=FixedClock(),
     )
 
     assert terminal_host.sent == [
@@ -1002,8 +1062,6 @@ def test_check_without_a_transcript_posts_cleaned_screen_text(tmp_path: Path) ->
     _check(thread_map, terminal_host, slack)
 
     assert slack.texts() == [
-        'pan-7 · Inbox thread: "pan-7: fix the login page"\n'
-        "pan-7 is idle.\n\n"
         f"Screen text (no transcript yet):\n```\n{INCOMPLETE_READ_NOTICE}\nlast screen lines\n```"
     ]
 
@@ -1163,6 +1221,7 @@ def _done(
         terminal_host=terminal_host,
         git=git,
         slack=slack,
+        clock=FixedClock(),
     )
 
 
@@ -1370,6 +1429,7 @@ def test_done_closes_the_session_and_removes_its_worktree_and_branch(
         ("delete_branch", _MAIN_REPO, "pan-7", expected_delete_force),
     ]
     assert slack.texts() == ["Closed pan-7 and removed its worktree and branch."]
+    assert slack.status_texts() == ["Closed"]
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
@@ -1597,3 +1657,58 @@ def test_done_retry_after_a_failed_branch_delete_reports_only_the_branch(
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
+
+
+@pytest.mark.parametrize(
+    "reply_mode, expected_posts_after_check",
+    [
+        (ReplyMode.SLACK, ["Fixed the login page."]),
+        (ReplyMode.ON_DEMAND, ["Fixed the login page."]),
+    ],
+    ids=["reply-in-slack-stop-hook-posted-it", "on-demand-check-posts-it"],
+)
+def test_check_never_reposts_the_answer_already_posted(
+    tmp_path: Path, reply_mode: ReplyMode, expected_posts_after_check: list[str]
+) -> None:
+    # In the reply-in-Slack mode the Stop hook posts the answer, so check only updates the
+    # status; on demand nothing was posted, so check posts it. Either way it appears once.
+    transcript = _transcript_answering(tmp_path, "Fixed the login page.")
+    thread_map = _thread_map(tmp_path, _record(reply_mode=reply_mode))
+    terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=AgentStatus.DONE))
+    slack = RecordingSlack()
+    stop_payload = json.dumps(
+        {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
+    )
+
+    stop_hook(
+        _OLD_THREAD,
+        "C0TEST",
+        thread_map,
+        slack,
+        stdin=io.StringIO(stop_payload),
+        session_name="pan-7",
+        clock=FixedClock(),
+    )
+    thread_map.record_session(_OLD_THREAD, "s1", transcript, session_name="pan-7")
+    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, slack)
+
+    assert slack.texts() == expected_posts_after_check
+    # hc's `done` on a live terminal is a finished turn, never Closed.
+    assert set(slack.status_texts()) == {"Finished"}
+
+
+def test_check_posts_a_newer_answer_than_the_one_already_posted(tmp_path: Path) -> None:
+    record = _record(
+        transcript_path=_transcript_answering(tmp_path, "Second answer."),
+        last_answer_digest=answer_digest("First answer."),
+    )
+    thread_map = _thread_map(tmp_path, record)
+    slack = RecordingSlack()
+
+    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+
+    assert slack.texts() == ["Second answer."]
+    stored = thread_map.get(_OLD_THREAD)
+    assert stored is not None
+    assert stored.last_answer_digest == answer_digest("Second answer.")

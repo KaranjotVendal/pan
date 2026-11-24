@@ -54,6 +54,36 @@ class BoltSlackAdapter:
         except SlackApiError as error:
             raise SlackPostError(f"failed to post message to thread {thread_ts}") from error
 
+    def post_blocks(
+        self, channel: str, thread_ts: str, blocks: list[dict[str, Any]], text: str
+    ) -> str:
+        try:
+            response = self._client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts, blocks=blocks, text=text
+            )
+        except SlackApiError as error:
+            raise SlackPostError(f"failed to post blocks to thread {thread_ts}") from error
+        message_ts = response.get("ts")
+        if not isinstance(message_ts, str) or not message_ts:
+            raise SlackPostError(f"Slack returned no message ts for thread {thread_ts}")
+        return message_ts
+
+    def update_message(
+        self, channel: str, ts: str, blocks: list[dict[str, Any]], text: str
+    ) -> None:
+        try:
+            self._client.chat_update(channel=channel, ts=ts, blocks=blocks, text=text)
+        except SlackApiError as error:
+            raise SlackPostError(f"failed to update message {ts}") from error
+
+    def post_ephemeral(self, channel: str, thread_ts: str, user: str, text: str) -> None:
+        try:
+            self._client.chat_postEphemeral(
+                channel=channel, thread_ts=thread_ts, user=user, text=text
+            )
+        except SlackApiError as error:
+            raise SlackPostError(f"failed to post ephemeral to thread {thread_ts}") from error
+
     def handle_event(self, event: dict[str, Any], event_id: str) -> None:
         slack_user = event.get("user", "")
         channel = event.get("channel", "")

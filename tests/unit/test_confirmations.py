@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from inbox_fakes import FakeInboxDirectory
+from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.confirmations import (
@@ -45,23 +46,6 @@ class SettableClock:
 
     def now(self) -> datetime:
         return self.current
-
-
-class RecordingSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
-
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def texts(self) -> list[str]:
-        return [text for _channel, _thread, text in self.posts]
 
 
 def _pan_session(**updates: object) -> Terminal:
@@ -368,7 +352,8 @@ def test_confirm_sends_the_stored_task_and_ties_the_thread(
     assert sent_text.startswith("From Slack via pan.")
     assert sent_text.endswith("add the tests")
     assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
-    assert slack.texts()[-1].startswith("Sent to ")
+    assert slack.status_texts() == ["Working: add the tests"]
+    assert [ephemeral[2] for ephemeral in slack.ephemerals] == ["U0TEST"]
 
 
 @pytest.mark.parametrize(

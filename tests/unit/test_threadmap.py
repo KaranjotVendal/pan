@@ -241,6 +241,10 @@ def test_a_record_written_before_session_control_loads_with_defaults(tmp_path: P
         "inbox_thread_name",
         "inbox_thread_id",
         "inbox_thread_url",
+        "status_message_ts",
+        "status_label",
+        "task_started_at",
+        "last_answer_digest",
     }
     older_payload = {
         key: value
@@ -261,6 +265,10 @@ def test_a_record_written_before_session_control_loads_with_defaults(tmp_path: P
     assert loaded.inbox_thread_name is None
     assert loaded.inbox_thread_id is None
     assert loaded.inbox_thread_url is None
+    assert loaded.status_message_ts is None
+    assert loaded.status_label is None
+    assert loaded.task_started_at is None
+    assert loaded.last_answer_digest is None
 
 
 def test_tie_moves_a_session_from_its_old_thread(tmp_path: Path) -> None:
@@ -340,13 +348,35 @@ def test_record_inbox_thread_stores_the_id_and_link(tmp_path: Path) -> None:
     assert loaded.updated_at == later
 
 
+def test_record_status_message_and_task_store_the_status_fields(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
+    thread_map = FileThreadMap(tmp_path / "threads.json", clock)
+    thread_map.tie(_record("t1"))
+    later = datetime(2026, 7, 16, 10, 1, 0, tzinfo=UTC)
+    clock.set(later)
+
+    thread_map.record_status_message("t1", "1718000000.000900", session_name="pan-task-3")
+    thread_map.record_task("t1", "fix the login page", later, session_name="pan-task-3")
+
+    loaded = thread_map.get("t1")
+    assert loaded is not None
+    assert loaded.status_message_ts == "1718000000.000900"
+    assert loaded.status_label == "fix the login page"
+    assert loaded.task_started_at == later
+    assert loaded.updated_at == later
+
+
 @pytest.mark.parametrize(
     "operation",
     [
         lambda thread_map: thread_map.untie("nope"),
         lambda thread_map: thread_map.record_inbox_thread("nope", "thr_1", "https://inbox.example"),
+        lambda thread_map: thread_map.record_status_message("nope", "1718000000.000900"),
+        lambda thread_map: thread_map.record_task(
+            "nope", "fix it", datetime(2026, 7, 16, tzinfo=UTC)
+        ),
     ],
-    ids=["untie", "record-inbox-thread"],
+    ids=["untie", "record-inbox-thread", "record-status-message", "record-task"],
 )
 def test_thread_operations_on_an_unknown_thread_raise(tmp_path: Path, operation: object) -> None:
     thread_map = FileThreadMap(

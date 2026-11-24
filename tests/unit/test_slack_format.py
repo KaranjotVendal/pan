@@ -139,3 +139,28 @@ def test_split_for_slack_keeps_every_line_in_order() -> None:
 
     assert len(parts) > 1
     assert "\n".join(parts).split("\n") == lines
+
+
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        ("See [the PR](https://x.test/pull/1).", "See <https://x.test/pull/1|the PR>."),
+        ("**bold** and __also bold__", "*bold* and *also bold*"),
+        ("# Summary\n## Details", "*Summary*\n*Details*"),
+        ("- one\n- two", "- one\n- two"),
+        ("```\n**kept** as is\n```", "```\n**kept** as is\n```"),
+        ("~~gone~~", "~gone~"),
+        ("snake__case__name and `__init__`", "snake__case__name and `__init__`"),
+    ],
+    ids=[
+        "link",
+        "bold",
+        "headings",
+        "bullets",
+        "code-block",
+        "strikethrough",
+        "underscores-in-words",
+    ],
+)
+def test_an_answer_converts_to_slack_mrkdwn(answer: str, expected: str) -> None:
+    assert to_slack_mrkdwn(answer) == expected

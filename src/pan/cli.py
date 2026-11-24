@@ -68,7 +68,16 @@ from pan.inbox import FileInboxStore
 from pan.interface import read_session, relay_to_session
 from pan.lifecycle import bring_up
 from pan.logging import initialise_logger
-from pan.models import InboxItem, PanConfig, Route, SessionSummary, SlackCredentials, WorkerStatus
+from pan.models import (
+    InboxItem,
+    PanConfig,
+    Route,
+    SessionSummary,
+    SlackCredentials,
+    StatusState,
+    ThreadRecord,
+    WorkerStatus,
+)
 from pan.seams import SlackAdapter, ThreadMap
 from pan.service import (
     install_services,
@@ -85,6 +94,7 @@ from pan.session_control import (
 )
 from pan.sessions import collect_sessions, worker_status_for
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
+from pan.status_message import publish_status
 from pan.threadmap import FileThreadMap, tie_note
 from pan.watcher import WatchdogInboxWatcher
 
@@ -617,6 +627,7 @@ def check(
         terminal_host=build_terminal_host(config.terminal_host),
         inbox_directory=ShellPlannotatorInboxAdapter(),
         slack=_slack_adapter(config),
+        clock=SystemClock(),
         screen_lines=READ_RECENT_LINES,
     )
 
@@ -664,6 +675,7 @@ def done(
         terminal_host=build_terminal_host(config.terminal_host),
         git=ShellGitWorktreeAdapter(),
         slack=_slack_adapter(config),
+        clock=SystemClock(),
     )
 
 
@@ -705,6 +717,7 @@ def send(
             terminal_host=terminal_host,
             thread_map=thread_map,
             slack=_slack_adapter(config),
+            clock=clock,
             reply_in_slack=reply_in_slack,
         )
         return
@@ -844,10 +857,12 @@ def read(
 
 @app.command()
 def stop(thread: str = typer.Option(..., "--thread")) -> None:
-    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED.
-    Refuses for a session pan did not start: it only unties the thread and never stops it."""
+    """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED;
+    the thread's status message says Stopped. Refuses for a session pan did not start: it only
+    unties the thread and never stops it."""
     config = _config()
-    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    clock = SystemClock()
+    thread_map = FileThreadMap(config.paths.threads, clock)
     record = thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
@@ -861,7 +876,23 @@ def stop(thread: str = typer.Option(..., "--thread")) -> None:
     if record.terminal_address:
         build_terminal_host(config.terminal_host).remove(record.terminal_address)
     thread_map.update_status(thread, WorkerStatus.FAILED, session_name=record.terminal_name)
+    if record.tied:
+        _publish_stopped(config, thread_map, record, clock)
     typer.echo(f"stopped {thread}")
+
+
+def _publish_stopped(
+    config: PanConfig, thread_map: ThreadMap, record: ThreadRecord, clock: SystemClock
+) -> None:
+    # Best effort: the kill switch has done its work whether or not Slack can be reached.
+    try:
+        slack = _slack_adapter(config)
+    except CredentialsError as e:
+        logger.warning(f"stop could not update the status message: {type(e).__name__}")
+        return
+    publish_status(
+        slack=slack, thread_map=thread_map, record=record, state=StatusState.STOPPED, clock=clock
+    )
 
 
 @app.command()

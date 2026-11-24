@@ -11,6 +11,7 @@ import pytest
 from git_worktree_fakes import FakeGitWorktree
 from pydantic import SecretStr
 from service_manager_fakes import FakeServiceManager
+from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 from typer.testing import CliRunner
 
@@ -625,6 +626,28 @@ def test_stop_removes_the_terminal_and_marks_failed(
     assert stopped.status is WorkerStatus.FAILED
 
 
+def test_stop_edits_the_threads_status_message_to_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map.put(
+        _record("t-1", terminal_address="t12").model_copy(
+            update={"status_message_ts": "1718000000.000900", "status_label": "fix the bug"}
+        )
+    )
+    _use_terminal_host(monkeypatch, FakeTerminalHost())
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["stop", "--thread", "t-1"])
+
+    assert result.exit_code == 0
+    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
+        ("1718000000.000900", "Stopped: fix the bug")
+    ]
+    assert slack.posts == []
+
+
 def test_stop_never_stops_a_session_pan_did_not_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -720,26 +743,21 @@ class _HookThreadMap:
     ) -> None:
         self.status_updates.append((thread_ts, status))
 
+    def record_status_message(
+        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+    ) -> None:
+        self._record = self._record.model_copy(update={"status_message_ts": message_ts})
 
-class _HookSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
 
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+class _HookSlack(RecordingSlack):
+    pass
 
 
 def _hook_payload(cwd: str, event: str) -> str:
     return json.dumps({"hook_event_name": event, "cwd": cwd, "transcript_path": None})
 
 
-def test_hook_stop_resolves_by_cwd_posts_and_marks_idle() -> None:
+def test_hook_stop_resolves_by_cwd_updates_the_status_and_marks_idle() -> None:
     record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
         update={"reply_mode": ReplyMode.SLACK}
     )
@@ -747,11 +765,13 @@ def test_hook_stop_resolves_by_cwd_posts_and_marks_idle() -> None:
 
     cli._dispatch_completion_hook(stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, slack)
 
-    assert slack.posts[0][0:2] == ("C1", "t-1")
+    assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
+        ("C1", "t-1", "Finished")
+    ]
     assert thread_map.status_updates == [("t-1", WorkerStatus.IDLE)]
 
 
-def test_hook_notification_resolves_by_cwd_posts_and_marks_blocked() -> None:
+def test_hook_notification_resolves_by_cwd_updates_the_status_and_marks_blocked() -> None:
     record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
         update={"reply_mode": ReplyMode.SLACK}
     )
@@ -767,7 +787,10 @@ def test_hook_notification_resolves_by_cwd_posts_and_marks_blocked() -> None:
 
     cli._dispatch_completion_hook(notification_hook, payload, thread_map, slack)
 
-    assert slack.posts == [("C1", "t-1", "need input")]
+    assert slack.posts == []
+    assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
+        ("C1", "t-1", "Waiting for you")
+    ]
     assert thread_map.status_updates == [("t-1", WorkerStatus.BLOCKED)]
 
 
@@ -783,6 +806,7 @@ def test_hook_exits_cleanly_without_posting(raw_stdin: str) -> None:
     cli._dispatch_completion_hook(stop_hook, raw_stdin, thread_map, slack)
 
     assert slack.posts == []
+    assert slack.status_posts == []
     assert thread_map.status_updates == []
 
 
@@ -989,18 +1013,8 @@ def test_reopen_unknown_thread_raises(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert isinstance(result.exception, ThreadNotFoundError)
 
 
-class _RecordingSlack:
-    def __init__(self) -> None:
-        self.posts: list[tuple[str, str, str]] = []
-
-    def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def post_message(self, channel: str, thread_ts: str, text: str) -> None:
-        self.posts.append((channel, thread_ts, text))
-
-    def start(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+class _RecordingSlack(RecordingSlack):
+    pass
 
 
 def _use_slack(monkeypatch: pytest.MonkeyPatch) -> _RecordingSlack:

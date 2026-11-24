@@ -26,16 +26,33 @@ class FakeWebClient:
         self._timeline = timeline
         self.reaction_error: SlackApiError | None = None
         self.post_error: SlackApiError | None = None
+        self.post_response: dict[str, Any] = {"ok": True, "ts": "1718000000.000900"}
 
     def reactions_add(self, *, channel: str, timestamp: str, name: str) -> None:
         if self.reaction_error is not None:
             raise self.reaction_error
         self._timeline.append(("reaction", (channel, timestamp, name)))
 
-    def chat_postMessage(self, *, channel: str, thread_ts: str, text: str) -> None:
+    def chat_postMessage(
+        self, *, channel: str, thread_ts: str, text: str, blocks: Any = None
+    ) -> dict[str, Any]:
         if self.post_error is not None:
             raise self.post_error
-        self._timeline.append(("post", (channel, thread_ts, text)))
+        if blocks is None:
+            self._timeline.append(("post", (channel, thread_ts, text)))
+        else:
+            self._timeline.append(("post_blocks", (channel, thread_ts, blocks, text)))
+        return self.post_response
+
+    def chat_update(self, *, channel: str, ts: str, blocks: Any, text: str) -> None:
+        if self.post_error is not None:
+            raise self.post_error
+        self._timeline.append(("update", (channel, ts, blocks, text)))
+
+    def chat_postEphemeral(self, *, channel: str, thread_ts: str, user: str, text: str) -> None:
+        if self.post_error is not None:
+            raise self.post_error
+        self._timeline.append(("ephemeral", (channel, thread_ts, user, text)))
 
 
 class FakeInbox:
@@ -292,18 +309,57 @@ def test_unauthorized_help_mention_is_still_dropped() -> None:
     assert inbox.items == []
 
 
-@pytest.mark.parametrize("method_name", ["add_reaction", "post_message"])
-def test_client_failure_becomes_slack_post_error(method_name: str) -> None:
+_BLOCKS = [{"type": "section", "text": {"type": "mrkdwn", "text": "*Working*"}}]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda adapter: adapter.add_reaction("C1", "1718000000.000200", "eyes"),
+        lambda adapter: adapter.post_message("C1", "1718000000.000200", "text"),
+        lambda adapter: adapter.post_blocks("C1", "1718000000.000200", _BLOCKS, "Working"),
+        lambda adapter: adapter.update_message("C1", "1718000000.000900", _BLOCKS, "Working"),
+        lambda adapter: adapter.post_ephemeral("C1", "1718000000.000200", "U1", "details"),
+    ],
+    ids=["add_reaction", "post_message", "post_blocks", "update_message", "post_ephemeral"],
+)
+def test_client_failure_becomes_slack_post_error(call: Any) -> None:
     adapter, client, _inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
     api_error = SlackApiError("boom", {"ok": False, "error": "boom"})
     client.reaction_error = api_error
     client.post_error = api_error
 
     with pytest.raises(SlackPostError):
-        if method_name == "add_reaction":
-            adapter.add_reaction("C1", "1718000000.000200", "eyes")
-        else:
-            adapter.post_message("C1", "1718000000.000200", "text")
+        call(adapter)
+
+
+def test_post_blocks_posts_blocks_with_a_fallback_and_returns_the_ts() -> None:
+    adapter, _client, _inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+
+    message_ts = adapter.post_blocks("C1", "1718000000.000200", _BLOCKS, "Working")
+
+    assert message_ts == "1718000000.000900"
+    assert timeline == [("post_blocks", ("C1", "1718000000.000200", _BLOCKS, "Working"))]
+
+
+def test_post_blocks_without_a_ts_in_the_response_is_an_error() -> None:
+    adapter, client, _inbox, _timeline = _make_adapter({"U1": {"channels": ["*"]}})
+    client.post_response = {"ok": True}
+
+    with pytest.raises(SlackPostError):
+        adapter.post_blocks("C1", "1718000000.000200", _BLOCKS, "Working")
+
+
+def test_update_message_and_post_ephemeral_delegate_to_the_client() -> None:
+    adapter, _client, _inbox, timeline = _make_adapter({"U1": {"channels": ["*"]}})
+
+    adapter.update_message("C1", "1718000000.000900", _BLOCKS, "Finished")
+    adapter.post_ephemeral("C1", "1718000000.000200", "U1", "details")
+
+    assert timeline == [
+        ("update", ("C1", "1718000000.000900", _BLOCKS, "Finished")),
+        ("ephemeral", ("C1", "1718000000.000200", "U1", "details")),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -105,6 +105,12 @@ If `cancels_confirmation` is true, first drop pan's open question in the thread 
 Act on `route.kind` first. In (r2) to (r7) the `pan` command posts its own reply through the single
 Slack egress (INV-4), as is — never summarize, reword or repost its output.
 
+What Slack shows for a session: one status message per thread, which pan edits in place (Working,
+Waiting for you, Finished, Closed, Stopped); the session's answers as their own messages with
+nothing around them; and the session's Inbox thread and terminal only to the requester, as a message
+only they can see. Never post an Inbox link, an Inbox thread name, a terminal address or anything
+with `localhost` in the thread yourself.
+
 ### (r1) `route.kind == "notice"` — post the notice, do nothing else
 
 The message used a retired flag (`--new`, `--status`, `--sync`, a leading `!`) or a route word with
@@ -116,10 +122,11 @@ no task. Post `route.notice` verbatim and stop; start nothing, send nothing:
 
     pan check --thread <thread_ts> --channel <channel>
 
-It posts the tied session's latest answer (the last answer in its transcript, or its recent screen
-lines labelled as screen text), its Inbox thread, and whether it is still working or waiting on a
-prompt at the terminal, split into Slack-sized parts. In an untied thread it posts a one-line reply
-saying so. Touch no session.
+It brings the thread's status message up to date (working, waiting on a prompt, finished, stopped),
+posts the tied session's latest answer as its own message (the last answer in its transcript, or its
+recent screen lines labelled as screen text; nothing when there is neither), split into Slack-sized
+parts, and sends the session's Inbox thread and terminal to the requester only. In an untied thread
+it posts a one-line reply saying so. Touch no session.
 
 ### (r3) `route.kind == "sessions"`, or `directive.mode == "sessions"` — list live sessions
 
@@ -175,8 +182,8 @@ The session may be one pan started or one of the person's own desk sessions. `pa
 to an exact match: the session's address, name, or Herdr label or space. It types the text only if
 the session is idle (with one line on top saying it came from Slack and naming its Inbox thread, or,
 for a desk session whose thread pan does not know, saying to use its existing thread or start one),
-ties this thread to that session (its previous thread is untied) and posts "Sent to desk-api ·
-Inbox: ...". A busy session ("<name> is busy; try again, or @pan check") or one waiting on a prompt
+ties this thread to that session (its previous thread is untied), posts the thread's status
+message (Working) and sends the session's Inbox thread to the requester only. A busy session ("<name> is busy; try again, or @pan check") or one waiting on a prompt
 gets the short reply from `pan send` itself, nothing typed, exit 26 or 23: do nothing more.
 
 **Exit 28: no exact match** (or a label several sessions share). Nothing was sent or posted. Propose
@@ -213,7 +220,7 @@ Otherwise (`yes` or a number):
     pan confirm --thread <thread_ts> --channel <channel> --choice <route.choice>
 
 It sends the task stored by `pan propose` to the chosen session through the same path as `pan send`,
-ties the thread and posts "Sent to ...". A busy session or one waiting on a prompt gets a reply
+ties the thread and posts its status message. A busy session or one waiting on a prompt gets a reply
 asking the person to answer again later, and the question stays open (exit 26 or 23). A reply that
 picks nothing (`yes` to several, a number out of range) gets "Reply 1 or 2 to choose ..." and the
 question stays open; a chosen session that has ended gets a one-line reply (exit 20). Do nothing
@@ -306,8 +313,8 @@ for it.
   Pass `--reply-in-slack` under the same rule as everywhere else (step 2, "Reply in Slack by
   meaning"; a follow-up such as "reply back with the link" or "post it here" counts). Once the text
   is typed it switches the thread's reply mode to Slack, so the session's answer is posted to the
-  thread; a refused send leaves the mode as it was. With no `--to`, it sends to the thread's tied session. No new Slack notice is needed on success:
-  the `:eyes:` reaction already acknowledged the message. A busy session (exit 26) or one waiting on
+  thread; a refused send leaves the mode as it was. With no `--to`, it sends to the thread's tied session. On success
+  it edits the thread's status message back to Working; post nothing yourself. A busy session (exit 26) or one waiting on
   a prompt (exit 23) gets a short reply from `pan send` itself, and nothing is typed: do nothing
   more. Exit 22 means the session has ended: when `pan threads get` shows `started_by_pan` true,
   mark the thread failed with `pan threads set --thread <thread_ts> --status failed` and reopen it as
@@ -321,8 +328,8 @@ for it.
   Pass `--reply-in-slack` under the same rule as for `pan send` above.
 
   It starts a new terminal under the same name in the same worktree, continues that worktree's last
-  Claude conversation with the follow-up, sets the record back to `spawning`, and posts the
-  "reopened — stream pan-…" ack. Only if it fails (worktree gone, name in use; it posts the failure
+  Claude conversation with the follow-up, sets the record back to `spawning`, and edits the
+  thread's status message back to Working. Only if it fails (worktree gone, name in use; it posts the failure
   itself) is the session truly gone: then spawn a new one as in (c).
 
 ### (c) Start a new session — `route.kind == "new"`, or no route words in an untied thread
@@ -341,12 +348,14 @@ answer in this thread (step 2, "Reply in Slack by meaning"). Pass `--thread-repl
 names the channel and thread ts and tells the session to read the whole thread first with its own
 Slack read-thread tool (`slack_read_thread`), only to read. You do not read or summarize the thread
 yourself. `pan spawn` creates the git worktree,
-starts the worker Claude session in its own hc terminal, ties the thread to it, and posts one start
-notice through the single Slack egress path (INV-4), naming the session and its Plannotator Inbox
-thread (`Started pan-7 in a new worktree · Inbox thread: "pan-7: <short task>"`). The worker's brief
-tells it to report in that Inbox thread and never post to Slack. You do not post the notice
-yourself. When the thread asked for replies in Slack, the session's answers are posted to Slack at
-every turn end; otherwise Slack hears nothing more until someone writes `@pan check`.
+starts the worker Claude session in its own hc terminal, ties the thread to it, and posts the
+thread's one status message ("Working" and the short task, with the session name in small text);
+the session's Plannotator Inbox thread and terminal go to the requester only. The worker's brief
+tells it to report in that Inbox thread, never post to Slack, and treat messages from
+pan-orchestrator as the person's follow-ups (never answering them with `hc send`). You do not post
+anything yourself. The session's hooks edit the status message as it works (Finished at each turn
+end, Waiting for you on a prompt). When the thread asked for replies in Slack, each turn's answer is
+also posted, alone; otherwise Slack hears nothing more until someone writes `@pan check`.
 
 ## What is mechanical vs. what you decide
 

@@ -31,6 +31,7 @@ from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
 from pan.models import (
     ReplyMode,
+    StatusState,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -46,6 +47,8 @@ from pan.seams import (
     TerminalHost,
     ThreadMap,
 )
+from pan.slack_render import status_label
+from pan.status_message import publish_status, send_private_details
 
 logger = initialise_logger(__name__)
 
@@ -76,7 +79,14 @@ _WORKER_SETTINGS = {
 _WORKER_BRIEF_PREAMBLE = (
     "pan started you from a Slack request. Use the Plannotator Inbox for questions, decisions "
     'and progress, in a thread named exactly "{inbox_thread_name}". Send a first short message '
-    "there before you start the work. {slack_reply_sentence}"
+    "there before you start the work. {slack_reply_sentence} {relayed_follow_up_sentence}"
+)
+# Follow-ups from Slack are typed into the session from the orchestrator's terminal, so hc
+# labels them as coming from it; without this a session took them for another agent and
+# answered with `hc send`.
+RELAYED_FOLLOW_UP_SENTENCE = (
+    "Messages that arrive from pan-orchestrator are the person's follow-ups relayed from Slack: "
+    "answer them as usual, and never reply with `hc send`."
 )
 # Tells a session started or messaged from Slack who replies in the Slack thread. pan's Stop
 # hook posts the final answer itself in the reply-in-Slack mode; otherwise Slack gets a reply
@@ -148,18 +158,13 @@ def worker_brief(
 ) -> str:
     # `thread_paragraph` (slack_thread_paragraph) goes after the preamble, before the task.
     preamble = _WORKER_BRIEF_PREAMBLE.format(
-        inbox_thread_name=inbox_thread, slack_reply_sentence=slack_reply_sentence(reply_mode)
+        inbox_thread_name=inbox_thread,
+        slack_reply_sentence=slack_reply_sentence(reply_mode),
+        relayed_follow_up_sentence=RELAYED_FOLLOW_UP_SENTENCE,
     )
     if thread_paragraph is not None:
         preamble = f"{preamble}\n\n{thread_paragraph}"
     return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
-
-
-def start_notice(terminal_name: str, inbox_thread: str, reply_mode: ReplyMode) -> str:
-    notice = f'Started {terminal_name} in a new worktree · Inbox thread: "{inbox_thread}"'
-    if reply_mode is ReplyMode.SLACK:
-        notice = f"{notice} · answers will also be posted here"
-    return notice
 
 
 def desk_session_ended_reply(name: str) -> str:
@@ -301,9 +306,20 @@ def spawn_worker(
         requester=requester,
         reply_mode=reply_mode,
         inbox_thread_name=inbox_thread,
+        status_label=status_label(task),
+        task_started_at=created_at,
     )
     thread_map.tie(record)
-    slack_post(slack, channel, thread_ts, start_notice(name, inbox_thread, reply_mode))
+    # The thread's status message (Working), and the Inbox thread and terminal only to the
+    # requester: they are on this machine and mean nothing to anyone else in the channel.
+    record = publish_status(
+        slack=slack,
+        thread_map=thread_map,
+        record=record,
+        state=StatusState.WORKING,
+        clock=clock,
+    )
+    send_private_details(slack=slack, record=record)
     logger.info(f"spawn stream={name} terminal={terminal.address} thread={thread_ts}")
     return record
 
@@ -329,8 +345,8 @@ def reopen_worker(
 ) -> ThreadRecord:
     # Reopen a finished or lost worker in its existing worktree: a new terminal under the
     # same name continues the worktree's last Claude conversation with the follow-up task.
-    # The binding stays the same thread record (INV-7), tied again; only its terminal and
-    # status change. A session pan did not start is never reopened: its folder is not pan's.
+    # The binding stays the same thread record (INV-7), tied again; only its terminal, status
+    # and task change, and the thread's status message is edited back to Working. A session pan did not start is never reopened: its folder is not pan's.
     # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved with the tie once
     # the launch succeeds, so the Stop hook posts the answer; without it the mode is left as
     # it is, and a failed reopen changes nothing.
@@ -358,15 +374,24 @@ def reopen_worker(
         logger.info(f"reopen failed stream={name} thread={record.thread_ts}")
         raise SpawnError(notice) from error
 
+    now = clock.now()
     reopened = record.model_copy(
         update={
             "terminal_address": terminal.address,
             "status": WorkerStatus.SPAWNING,
-            "updated_at": clock.now(),
+            "updated_at": now,
             "reply_mode": reply_mode,
+            "status_label": status_label(task),
+            "task_started_at": now,
         }
     )
     thread_map.tie(reopened)
-    slack_post(slack, record.channel, record.thread_ts, f"reopened — stream {name}")
+    reopened = publish_status(
+        slack=slack,
+        thread_map=thread_map,
+        record=reopened,
+        state=StatusState.WORKING,
+        clock=clock,
+    )
     logger.info(f"reopen stream={name} terminal={terminal.address} thread={record.thread_ts}")
     return reopened

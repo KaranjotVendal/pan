@@ -20,6 +20,8 @@ _SLACK_ENTITY = re.compile(r"(<(?:[@#!]|(?:https?|mailto|tel):)[^>\n]+>)")
 _BLOCKQUOTE_MARKER = re.compile(r"^(>+\s)", re.MULTILINE)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _HEADER_INNER_BOLD = re.compile(r"\*\*(.+?)\*\*")
+# `__bold__`, only outside a word (as in Markdown), so `snake__case__name` stays as is.
+_UNDERSCORE_BOLD = re.compile(r"(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])")
 _BOLD_ITALIC = re.compile(r"\*\*\*(.+?)\*\*\*")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 # Single `*emphasis*`: the emphasized run must touch non-whitespace on both sides, so literal
@@ -71,6 +73,7 @@ def to_slack_mrkdwn(text: str) -> str:
     text = _HEADER.sub(convert_header, text)
     text = _BOLD_ITALIC.sub(lambda match: stash(f"*_{match.group(1)}_*"), text)
     text = _BOLD.sub(lambda match: stash(f"*{match.group(1)}*"), text)
+    text = _UNDERSCORE_BOLD.sub(lambda match: stash(f"*{match.group(1)}*"), text)
     text = _ITALIC.sub(lambda match: stash(f"_{match.group(1)}_"), text)
     text = _STRIKETHROUGH.sub(lambda match: stash(f"~{match.group(1)}~"), text)
 

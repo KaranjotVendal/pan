@@ -116,6 +116,9 @@ SLACK_TABLE_PAD_CHAR = " "
 # the part label and for mrkdwn escaping, which can lengthen the text.
 SLACK_MESSAGE_PART_MAX_LENGTH = 3500
 
+# pan's status message in a thread shows the task as a short label, cut to this many characters.
+STATUS_LABEL_MAX_LENGTH = 80
+
 # `@pan help` tunables (Principle 7 — named here, not inlined in help.py / gateway/app.py).
 # The exact tokens that mean "show me the help", matched on lowercased whole tokens only, so a
 # task brief that merely contains one is not hijacked.

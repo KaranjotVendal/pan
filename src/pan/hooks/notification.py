@@ -5,15 +5,14 @@ from typing import TextIO
 
 from pydantic import BaseModel
 
+from pan.adapters.clock import SystemClock
 from pan.errors import ThreadNotFoundError
-from pan.gateway.slack_post import slack_post
 from pan.logging import initialise_logger
-from pan.models import ReplyMode, WorkerStatus
-from pan.seams import SlackAdapter, ThreadMap
+from pan.models import StatusState, WorkerStatus
+from pan.seams import Clock, SlackAdapter, ThreadMap
+from pan.status_message import publish_status
 
 logger = initialise_logger(__name__)
-
-_DEFAULT_QUESTION = "Worker needs input."
 
 # Claude Code sends a Notification both when a prompt waits on the person (a permission or an
 # input dialog) and after about a minute of idling at the prompt. Only the first means the
@@ -48,11 +47,13 @@ def notification_hook(
     *,
     stdin: TextIO = sys.stdin,
     session_name: str | None = None,
+    clock: Clock | None = None,
 ) -> None:
-    # Questions go to the session's Inbox thread, so a prompt waiting on the person only marks
-    # the thread BLOCKED; it posts the prompt to Slack only when the thread, still tied to this
-    # session, asked for replies in Slack. An idle reminder changes nothing. `session_name`
-    # picks this session's record in the thread.
+    # Questions go to the session's Inbox thread, so a prompt waiting on the person marks the
+    # thread BLOCKED and, while the thread is still tied to this session, edits its status
+    # message to "Waiting for you" with the prompt's text under the task. Nothing new is
+    # posted. An idle reminder changes nothing. `session_name` picks this session's record in
+    # the thread.
     payload = NotificationHookPayload.model_validate_json(stdin.read())
     record = thread_map.get(thread_ts, session_name=session_name)
     if record is None:
@@ -64,8 +65,14 @@ def notification_hook(
         )
         return
 
-    if record.tied and record.reply_mode is ReplyMode.SLACK:
-        question = payload.message or _DEFAULT_QUESTION
-        slack_post(slack, channel, thread_ts, question)
     thread_map.update_status(thread_ts, WorkerStatus.BLOCKED, session_name=record.terminal_name)
+    if record.tied:
+        publish_status(
+            slack=slack,
+            thread_map=thread_map,
+            record=record,
+            state=StatusState.WAITING,
+            clock=clock or SystemClock(),
+            detail=payload.message or None,
+        )
     logger.info(f"notification hook thread={thread_ts} status=blocked")
