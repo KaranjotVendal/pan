@@ -130,11 +130,22 @@ it posts a one-line reply saying so. Touch no session.
 
 ### (r3) `route.kind == "sessions"`, or `directive.mode == "sessions"` — list live sessions
 
-    pan sessions --thread <thread_ts> --channel <channel>
+    pan sessions --thread <thread_ts> --channel <channel> --requester <item.slack_user> [--match '<route.text>']
 
-It posts the table of every live terminal (name, idle or busy, pan-owned or not, last ask) to the
-thread. `directive.mode == "sessions"` covers the older spellings (`--sessions`, "what's running").
-Touch no session.
+Add `--match` only when `route.kind == "sessions"` and `route.text` is not empty (`@pan sessions ocr
+review` gives `ocr review`); never on the `directive.mode == "sessions"` path (`--sessions`, "what's
+running", "list sessions"), which lists without a filter. Quote `route.text` in single quotes as
+the other free text here is, writing each `'` inside it as `'\''`.
+
+It sends the requester alone (an ephemeral message, never a post in the thread) up to 5 sessions to
+pick from, each with its state and a link to its Slack thread: those matching any of the words, or,
+without words, the ones waiting for them, working, idle, then finished or stopped, the most recently
+used first within each. Touch no session.
+
+**Exit 32: the private message failed.** Nothing was posted. Post one line to the thread, with no
+session names:
+
+    pan slack-post --thread <thread_ts> --channel <channel> --text 'I couldn'\''t send you the sessions list privately.'
 
 ### (r4) `route.kind == "forget"` — untie the thread
 

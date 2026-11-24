@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pan.config import STATUS_LABEL_MAX_LENGTH
+from pan.config import (
+    CLAUDE_AGENT_NAMES,
+    SESSIONS_MATCH_MIN_WORD_LENGTH,
+    SESSIONS_SLACK_MAX_COUNT,
+    STATUS_LABEL_MAX_LENGTH,
+)
 from pan.models import (
     AgentStatus,
+    SessionSummary,
     StatusState,
     Terminal,
     TerminalState,
@@ -164,3 +171,190 @@ def private_details_text(record: ThreadRecord) -> str:
     if record.terminal_address:
         lines.append(f"Terminal: {escape_mrkdwn(record.terminal_address)}")
     return "\n".join(lines)
+
+
+# `@pan sessions` in Slack: a few sessions, the ones the person most likely wants to send a
+# message to, sent to them alone. The text is Slack mrkdwn, posted as is (chat.postEphemeral).
+SESSIONS_IDLE_TITLE = "Idle"
+SESSIONS_GROUP_ORDER: tuple[str, ...] = (
+    STATUS_TITLES[StatusState.WAITING],
+    STATUS_TITLES[StatusState.WORKING],
+    SESSIONS_IDLE_TITLE,
+    STATUS_TITLES[StatusState.FINISHED],
+    STATUS_TITLES[StatusState.STOPPED],
+)
+# Without words, sessions are picked in these tiers, the most recently used first within a
+# tier: finished and stopped sessions only fill the room left.
+_SESSIONS_TIER: dict[str, int] = {
+    STATUS_TITLES[StatusState.WAITING]: 0,
+    STATUS_TITLES[StatusState.WORKING]: 1,
+    SESSIONS_IDLE_TITLE: 2,
+    STATUS_TITLES[StatusState.FINISHED]: 3,
+    STATUS_TITLES[StatusState.STOPPED]: 3,
+}
+# A Herdr location's tab number ("jiracli-generate / 1"), which says nothing to a reader.
+_WHERE_TAB_NUMBER = re.compile(r" / \d+$")
+# Splits a field into the tokens a query word is matched against.
+_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
+SESSIONS_EMPTY_TEXT = "No sessions running."
+SESSIONS_HEADER = "*Your sessions*"
+
+_SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
+    AgentStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
+    AgentStatus.WORKING: STATUS_TITLES[StatusState.WORKING],
+    AgentStatus.IDLE: SESSIONS_IDLE_TITLE,
+    AgentStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
+    AgentStatus.ERROR: STATUS_TITLES[StatusState.STOPPED],
+}
+# For a live agent hc reports no known status for: what pan recorded. The terminal is live,
+# so never Stopped (as in _STATE_FOR_LIVE_RECORD): a recorded failure reads as idle.
+_SESSIONS_GROUP_FOR_PAN_STATUS: dict[WorkerStatus, str] = {
+    WorkerStatus.SPAWNING: STATUS_TITLES[StatusState.WORKING],
+    WorkerStatus.RUNNING: STATUS_TITLES[StatusState.WORKING],
+    WorkerStatus.BLOCKED: STATUS_TITLES[StatusState.WAITING],
+    WorkerStatus.IDLE: SESSIONS_IDLE_TITLE,
+    WorkerStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
+    WorkerStatus.FAILED: SESSIONS_IDLE_TITLE,
+}
+# Emphasis characters that would garble text shown inside **bold** or _italic_.
+_EMPHASIS_CHARACTERS = re.compile(r"[*~`]")
+# An underscore not inside a word (`snake_case` is safe), which Slack can read as italics.
+_LOOSE_UNDERSCORE = re.compile(r"(?<![^\W_])_|_(?![^\W_])")
+
+
+def session_group(summary: SessionSummary) -> str | None:
+    # The group a session is listed under; None for a plain shell (no status and not a Claude
+    # agent), unless it is a pan worker still booting. A Claude session reports no status
+    # until its first turn ends (see session_control._is_ready), so it and an unknown status
+    # fall back to pan's record. With no record, a Claude session with no status is most
+    # often one nobody has asked anything yet, so it counts as idle; an unknown status as
+    # working.
+    group = _SESSIONS_GROUP_FOR_AGENT.get(summary.agent_status)
+    if group is not None:
+        return group
+    plain_shell = (
+        summary.agent_status is AgentStatus.NONE and summary.agent not in CLAUDE_AGENT_NAMES
+    )
+    if plain_shell:
+        booting = summary.pan_status is WorkerStatus.SPAWNING
+        return STATUS_TITLES[StatusState.WORKING] if booting else None
+    if summary.pan_status is not None:
+        return _SESSIONS_GROUP_FOR_PAN_STATUS[summary.pan_status]
+    if summary.agent_status is AgentStatus.NONE:
+        return SESSIONS_IDLE_TITLE
+    return STATUS_TITLES[StatusState.WORKING]
+
+
+def listed_sessions(
+    summaries: list[SessionSummary], orchestrator_name: str
+) -> list[SessionSummary]:
+    # The sessions Slack lists: not pan's own orchestrator, not plain shells.
+    return [
+        summary
+        for summary in summaries
+        if summary.name != orchestrator_name and session_group(summary) is not None
+    ]
+
+
+def plain_mrkdwn(text: str) -> str:
+    # Free text made safe to wrap in **bold** or _italic_: control characters escaped and
+    # emphasis characters dropped.
+    without_emphasis = _EMPHASIS_CHARACTERS.sub("", escape_mrkdwn(text))
+    return " ".join(_LOOSE_UNDERSCORE.sub("", without_emphasis).split())
+
+
+def session_display_name(summary: SessionSummary) -> str:
+    # Words, never an address or a path: the task label, the Inbox thread, the terminal name,
+    # the Herdr location without its tab number, then the folder name.
+    where = _WHERE_TAB_NUMBER.sub("", summary.where) if summary.where else None
+    return summary.label or summary.inbox_thread_name or summary.name or where or summary.cwd.name
+
+
+def match_words(match_text: str | None) -> list[str]:
+    # The words of `@pan sessions <words>`, lowercased, each once, in order; a word shorter
+    # than SESSIONS_MATCH_MIN_WORD_LENGTH matches too much to be useful and is ignored.
+    words: list[str] = []
+    for word in (match_text or "").lower().split():
+        if len(word) >= SESSIONS_MATCH_MIN_WORD_LENGTH and word not in words:
+            words.append(word)
+    return words
+
+
+def _matched_word_count(summary: SessionSummary, words: list[str]) -> int:
+    # A word matches a token (a run of letters and digits) that starts with it, so "ocr"
+    # matches "ocr-action" and "api" does not match "rapid".
+    fields = [
+        session_display_name(summary),
+        summary.name,
+        summary.where,
+        summary.label,
+        summary.inbox_thread_name,
+        summary.last_ask,
+        summary.cwd.name,
+    ]
+    tokens = {
+        token
+        for field in fields
+        if field
+        for token in _NON_ALPHANUMERIC.split(field.lower())
+        if token
+    }
+    return sum(1 for word in words if any(token.startswith(word) for token in tokens))
+
+
+def _recency_key(summary: SessionSummary) -> float:
+    # Newest first; a session pan has no record for sorts after the ones it has.
+    return -summary.updated_at.timestamp() if summary.updated_at is not None else 0.0
+
+
+def select_sessions_for_slack(
+    summaries: list[SessionSummary],
+    orchestrator_name: str,
+    match_text: str | None = None,
+    *,
+    max_count: int = SESSIONS_SLACK_MAX_COUNT,
+) -> list[SessionSummary]:
+    # With words: the sessions matching any of them (case-insensitive, against the name,
+    # location, label, Inbox thread and last ask), most words matched first, then by state.
+    # Without: waiting for you, working, then the most recently used.
+    grouped = [
+        (summary, group)
+        for summary in listed_sessions(summaries, orchestrator_name)
+        if (group := session_group(summary)) is not None
+    ]
+    words = match_words(match_text)
+    if words:
+        matching = [
+            (summary, group, count)
+            for summary, group in grouped
+            if (count := _matched_word_count(summary, words))
+        ]
+        matching.sort(
+            key=lambda entry: (
+                -entry[2],
+                SESSIONS_GROUP_ORDER.index(entry[1]),
+                _recency_key(entry[0]),
+            )
+        )
+        return [summary for summary, _group, _count in matching[:max_count]]
+    grouped.sort(key=lambda entry: (_SESSIONS_TIER[entry[1]], _recency_key(entry[0])))
+    return [summary for summary, _group in grouped[:max_count]]
+
+
+def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
+    line = f"• *{plain_mrkdwn(session_display_name(summary))}* · {session_group(summary)}"
+    link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
+    return f"{line} · <{link}|thread>" if link else line
+
+
+def render_sessions_for_slack(
+    selected: list[SessionSummary], permalinks: dict[str, str], match_text: str | None = None
+) -> str:
+    # `selected` comes from select_sessions_for_slack. `permalinks` maps a session's
+    # thread_ts to its thread's link; a session without one is listed without a link.
+    words = match_words(match_text)
+    quoted_words = plain_mrkdwn(" ".join(words))
+    if not selected:
+        return f'No sessions match "{quoted_words}".' if words else SESSIONS_EMPTY_TEXT
+    header = f'*Sessions matching "{quoted_words}"*' if words else SESSIONS_HEADER
+    return "\n".join([header, *(_session_line(summary, permalinks) for summary in selected)])

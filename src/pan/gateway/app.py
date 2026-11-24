@@ -84,6 +84,23 @@ class BoltSlackAdapter:
         except SlackApiError as error:
             raise SlackPostError(f"failed to post ephemeral to thread {thread_ts}") from error
 
+    def permalink(self, channel: str, ts: str) -> str | None:
+        # Best effort: a message without a link is still listed, so a failure is only logged.
+        # Any failure, an API error or a transport one (timeout, connection reset), only loses
+        # the link, never the reply it would go in.
+        try:
+            response = self._client.chat_getPermalink(channel=channel, message_ts=ts)
+        except Exception as e:
+            logger.warning(
+                f"permalink unavailable channel={channel} ts={ts}: {type(e).__name__}: {e}"
+            )
+            return None
+        link = response.get("permalink")
+        if not isinstance(link, str) or not link:
+            logger.warning(f"Slack returned no permalink channel={channel} ts={ts}")
+            return None
+        return link
+
     def handle_event(self, event: dict[str, Any], event_id: str) -> None:
         slack_user = event.get("user", "")
         channel = event.get("channel", "")

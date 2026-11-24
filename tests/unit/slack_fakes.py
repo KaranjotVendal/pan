@@ -16,7 +16,8 @@ class StatusPost:
 class RecordingSlack:
     # Records every kind of Slack write. `posts` holds plain messages as (channel, thread, text);
     # status messages posted as blocks are in `status_posts`, edits in `status_updates`, and
-    # ephemeral messages in `ephemerals` as (channel, thread, user, text). Set `update_error`
+    # ephemeral messages in `ephemerals` as (channel, thread, user, text). `permalinks` holds
+    # the links `permalink` returns, by message ts. Set `update_error`
     # or `post_blocks_error` to make that call fail.
     def __init__(self) -> None:
         self.posts: list[tuple[str, str, str]] = []
@@ -26,6 +27,8 @@ class RecordingSlack:
         self.update_error: SlackPostError | None = None
         self.post_blocks_error: SlackPostError | None = None
         self.ephemeral_error: SlackPostError | None = None
+        # Message links by message ts; a ts not listed has no link.
+        self.permalinks: dict[str, str] = {}
         self._next_ts = 0
 
     def add_reaction(self, channel: str, ts: str, name: str) -> None:  # pragma: no cover
@@ -54,6 +57,9 @@ class RecordingSlack:
         if self.ephemeral_error is not None:
             raise self.ephemeral_error
         self.ephemerals.append((channel, thread_ts, user, text))
+
+    def permalink(self, channel: str, ts: str) -> str | None:
+        return self.permalinks.get(ts)
 
     def start(self) -> None:  # pragma: no cover
         raise NotImplementedError

@@ -40,6 +40,9 @@ class SlackAdapter(Protocol):
     # A message in the thread only `user` sees (chat.postEphemeral).
     def post_ephemeral(self, channel: str, thread_ts: str, user: str, text: str) -> None: ...
 
+    # A message's link (chat.getPermalink); None when Slack cannot give one.
+    def permalink(self, channel: str, ts: str) -> str | None: ...
+
     def start(self) -> None: ...
 
 

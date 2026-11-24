@@ -27,6 +27,7 @@ from pan.errors import (
     NoExactMatchError,
     NotPanSessionError,
     PanError,
+    PrivateMessageError,
     ServiceError,
     SessionBusyError,
     SlackPostError,
@@ -704,6 +705,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (UnsavedWorkError("x"), 29),
         (GitWorktreeError("x"), 30),
         (UnsafeWorktreeError("x"), 31),
+        (PrivateMessageError("x"), 32),
         (PanError("x"), 1),
     ],
 )
@@ -1023,24 +1025,150 @@ def _use_slack(monkeypatch: pytest.MonkeyPatch) -> _RecordingSlack:
     return slack
 
 
-def test_sessions_posts_the_table_to_a_thread(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def _threaded(
+    name: str, agent_status: AgentStatus, thread_ts: str, minutes_ago: int = 0
+) -> SessionSummary:
+    return _summary().model_copy(
+        update={
+            "address": f"t-{name}",
+            "name": name,
+            "agent_status": agent_status,
+            "thread_ts": thread_ts,
+            "thread_channel": "C000TEST",
+            "updated_at": datetime(2026, 7, 16, 10, 0, tzinfo=UTC) - timedelta(minutes=minutes_ago),
+        }
+    )
+
+
+_SESSIONS_IN_THREAD = ["sessions", "--thread", "1700000000.000100", "--channel", "C000TEST"]
+
+
+@pytest.mark.parametrize(
+    "match_args, expected_text",
+    [
+        (
+            [],
+            "*Your sessions*\n"
+            "• *pan-ocr* · Waiting for you · <https://example.slack.com/p2|thread>\n"
+            "• *pan-docs* · Idle",
+        ),
+        (
+            ["--match", "ocr"],
+            '*Sessions matching "ocr"*\n'
+            "• *pan-ocr* · Waiting for you · <https://example.slack.com/p2|thread>",
+        ),
+        (["--match", "billing"], 'No sessions match "billing".'),
+    ],
+    ids=["no-words", "words", "no-match"],
+)
+def test_sessions_sends_the_list_to_the_requester_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    match_args: list[str],
+    expected_text: str,
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    summary = _summary().model_copy(update={"last_ask": "fix the login page"})
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [summary])
+    summaries = [
+        _threaded("pan-docs", AgentStatus.IDLE, "1700000000.000300"),
+        _threaded("pan-ocr", AgentStatus.BLOCKED, "1700000000.000200"),
+        _threaded("pan-orchestrator", AgentStatus.BLOCKED, "1700000000.000400"),
+    ]
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
     slack = _use_slack(monkeypatch)
+    slack.permalinks["1700000000.000200"] = "https://example.slack.com/p2"
 
-    result = runner.invoke(
-        cli.app, ["sessions", "--thread", "1700000000.000100", "--channel", "C0TEST"]
-    )
+    result = runner.invoke(cli.app, [*_SESSIONS_IN_THREAD, "--requester", "U000TEST", *match_args])
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    ((channel, thread_ts, text),) = slack.posts
-    assert (channel, thread_ts) == ("C0TEST", "1700000000.000100")
-    assert text.startswith("```\nTERMINAL")
-    assert text.endswith("fix the login page\n```")
+    assert slack.posts == []
+    assert slack.ephemerals == [("C000TEST", "1700000000.000100", "U000TEST", expected_text)]
+
+
+def test_sessions_posts_nothing_publicly_when_the_private_list_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    slack = _use_slack(monkeypatch)
+    slack.ephemeral_error = SlackPostError("not delivered")
+
+    result = runner.invoke(cli.app, [*_SESSIONS_IN_THREAD, "--requester", "U000TEST"])
+
+    assert isinstance(result.exception, PrivateMessageError)
+    assert cli._exit_code_for(result.exception) == 32
+    assert slack.posts == []
+    assert slack.ephemerals == []
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["--match", "ocr"], ["--requester", "U000TEST"], ["--thread", "1700000000.000100"]],
+    ids=["match", "requester", "thread-without-channel"],
+)
+def test_sessions_rejects_slack_options_without_a_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra_args: list[str]
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, ["sessions", *extra_args])
+
+    assert result.exit_code != 0
+    assert slack.posts == []
+    assert slack.ephemerals == []
+
+
+def test_sessions_in_a_thread_needs_a_requester(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    slack = _use_slack(monkeypatch)
+
+    result = runner.invoke(cli.app, _SESSIONS_IN_THREAD)
+
+    assert result.exit_code != 0
+    assert slack.posts == []
+    assert slack.ephemerals == []
+
+
+class _CountingSlack(_RecordingSlack):
+    def __init__(self) -> None:
+        super().__init__()
+        self.permalink_requests: list[tuple[str, str]] = []
+
+    def permalink(self, channel: str, ts: str) -> str | None:
+        self.permalink_requests.append((channel, ts))
+        return super().permalink(channel, ts)
+
+
+def test_sessions_fetches_links_only_for_the_sessions_shown_and_each_thread_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    summaries = [
+        _threaded("pan-a", AgentStatus.BLOCKED, "1700000000.000200"),
+        _threaded("pan-b", AgentStatus.WORKING, "1700000000.000200"),
+        *[
+            _threaded(f"pan-idle-{index}", AgentStatus.IDLE, f"1700000000.000{index}00", index)
+            for index in range(3, 9)
+        ],
+    ]
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
+    slack = _CountingSlack()
+    monkeypatch.setattr(cli, "_slack_adapter", lambda config: slack)
+
+    result = runner.invoke(cli.app, [*_SESSIONS_IN_THREAD, "--requester", "U000TEST"])
+
+    assert result.exit_code == 0
+    assert slack.permalink_requests == [
+        ("C000TEST", "1700000000.000200"),
+        ("C000TEST", "1700000000.000300"),
+        ("C000TEST", "1700000000.000400"),
+        ("C000TEST", "1700000000.000500"),
+    ]
 
 
 def test_check_command_posts_through_the_thread_map(

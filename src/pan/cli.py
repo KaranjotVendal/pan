@@ -17,7 +17,7 @@ from pan.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.adapters.launchd import build_service_manager
 from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.adapters.terminal_host import build_terminal_host
-from pan.config import CODE_FENCE, READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
 from pan.confirmations import (
     FilePendingConfirmations,
     OpenQuestions,
@@ -43,6 +43,7 @@ from pan.errors import (
     NoExactMatchError,
     NotPanSessionError,
     PanError,
+    PrivateMessageError,
     ServiceError,
     SessionBusyError,
     SlackPostError,
@@ -59,7 +60,7 @@ from pan.errors import (
     UnsavedWorkError,
 )
 from pan.gateway.app import BoltSlackAdapter
-from pan.gateway.slack_post import slack_post, slack_post_parts
+from pan.gateway.slack_post import slack_post
 from pan.hooks.inbox_link import inbox_link_hook
 from pan.hooks.notification import notification_hook
 from pan.hooks.session_start import session_start_hook
@@ -93,6 +94,7 @@ from pan.session_control import (
     send_to_session,
 )
 from pan.sessions import collect_sessions, worker_status_for
+from pan.slack_render import render_sessions_for_slack, select_sessions_for_slack
 from pan.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.status_message import publish_status
 from pan.threadmap import FileThreadMap, tie_note
@@ -140,6 +142,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     UnsavedWorkError: 29,
     GitWorktreeError: 30,
     UnsafeWorktreeError: 31,
+    PrivateMessageError: 32,
 }
 
 
@@ -583,12 +586,20 @@ def _render_sessions_table(summaries: list[SessionSummary]) -> str:
 @app.command()
 def sessions(
     as_json: bool = typer.Option(False, "--json"),
-    thread: str | None = typer.Option(None, "--thread", help="post the list to this thread"),
+    thread: str | None = typer.Option(None, "--thread", help="the thread the list was asked in"),
     channel: str | None = typer.Option(None, "--channel", help="the thread's channel"),
+    requester: str | None = typer.Option(
+        None, "--requester", help="the sender's Slack user id, the only one who sees the list"
+    ),
+    match: str | None = typer.Option(
+        None, "--match", help="list only the sessions matching any of these words"
+    ),
 ) -> None:
     """List all live hc terminals with the last thing each was asked, reconciled against the
-    pan thread map, flagging status drift. --json emits the SessionSummary list; --thread and
-    --channel post the table to that Slack thread as is."""
+    pan thread map, flagging status drift. --json emits the SessionSummary list; --thread,
+    --channel and --requester send the requester alone up to 5 sessions to pick from: those
+    matching --match, else waiting for them, working, idle, then finished or stopped, the
+    most recently used first within each. Exit 32: the private message failed."""
     config = _config()
     summaries = collect_sessions(
         build_terminal_host(config.terminal_host),
@@ -597,13 +608,49 @@ def sessions(
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
-    table = _render_sessions_table(summaries)
     if thread is not None and channel is not None:
-        slack_post_parts(
-            _slack_adapter(config), channel, thread, f"{CODE_FENCE}\n{table}\n{CODE_FENCE}"
-        )
+        if requester is None:
+            # The list is private: without a requester to send it to, nothing is posted.
+            raise typer.BadParameter("--requester is required with --thread and --channel")
+        _send_sessions_privately(config, summaries, channel, thread, requester, match)
         return
-    typer.echo(table)
+    if any(option is not None for option in (thread, channel, requester, match)):
+        # The Slack options are used together; one alone is a mistake, not a terminal listing.
+        raise typer.BadParameter("--thread, --channel, --requester and --match go together")
+    typer.echo(_render_sessions_table(summaries))
+
+
+def _send_sessions_privately(
+    config: PanConfig,
+    summaries: list[SessionSummary],
+    channel: str,
+    thread_ts: str,
+    requester: str,
+    match: str | None,
+) -> None:
+    # An ephemeral message to the requester only; on failure nothing is posted to the thread.
+    slack = _slack_adapter(config)
+    selected = select_sessions_for_slack(summaries, config.orchestrator.terminal, match)
+    permalinks: dict[str, str] = {}
+    fetched_threads: set[str] = set()
+    for summary in selected:
+        if not summary.thread_ts or not summary.thread_channel:
+            continue
+        if summary.thread_ts in fetched_threads:
+            continue
+        fetched_threads.add(summary.thread_ts)
+        link = slack.permalink(summary.thread_channel, summary.thread_ts)
+        if link:
+            permalinks[summary.thread_ts] = link
+    text = render_sessions_for_slack(selected, permalinks, match)
+    try:
+        slack.post_ephemeral(channel, thread_ts, requester, text)
+    except SlackPostError as e:
+        logger.error(f"sessions list could not be sent privately thread={thread_ts}: {e}")
+        raise PrivateMessageError(
+            f"sessions list could not be sent privately to thread {thread_ts}"
+        ) from e
+    logger.info(f"sessions list sent privately thread={thread_ts} count={len(selected)}")
 
 
 def _slack_adapter(config: PanConfig) -> BoltSlackAdapter:
