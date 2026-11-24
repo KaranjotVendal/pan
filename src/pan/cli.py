@@ -1160,7 +1160,7 @@ def up() -> None:
 @app.command()
 def pause() -> None:
     """Toggle the pause flag. (Design intent: paused → new tasks acked 'paused' and dropped,
-    running work untouched. The gateway does not yet consult the flag — see TODOS.)"""
+    running work untouched. The gateway does not consult the flag yet.)"""
     config = _config()
     flag = config.paths.threads.parent / "paused.flag"
     if flag.exists():

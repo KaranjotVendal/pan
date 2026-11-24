@@ -3,7 +3,7 @@
 All notable changes to `pan` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 Semantic Versioning. The Night Shift build agent appends one entry per task under `## [Unreleased]`
-as it works (see `AGENT_LOOP.md` step 9).
+as it works.
 
 ## [Unreleased]
 
@@ -881,8 +881,8 @@ as it works (see `AGENT_LOOP.md` step 9).
   approve emits an allow decision; deny emits a deny decision to stdout (the sanctioned BR-5
   exception, via `stdout.write` + flush — never `print`) and raises `GatedOpDeniedError`. The gated-op
   log is value-free (the matched config pattern + the allow/deny bool, never the full command). The
-  decision-JSON format and the required fail-closed behavior on approval-infra failure are flagged in
-  TODOS.md for when the gate is activated.
+  decision-JSON format and the required fail-closed behavior on approval-infra failure are still open
+  for when the gate is activated.
 - Typer CLI toolbelt (`src/pan/cli.py`, `src/pan/__main__.py`): the `pan` console entry with sub-apps
   `config`/`inbox`/`threads` and commands `gateway`, `config set-token`, `config show`, `inbox drain
   --json`, `spawn`, `threads get`, `threads set`, `slack-post`, `status`, `stop`, `pause`. Each command
