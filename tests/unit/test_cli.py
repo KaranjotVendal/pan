@@ -25,7 +25,6 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     DiscardNotRequestedError,
-    GatedOpDeniedError,
     GitWorktreeError,
     InboxError,
     NoExactMatchError,
@@ -84,11 +83,9 @@ def _make_config(tmp_path: Path) -> PanConfig:
                 "worktree_base": str(tmp_path / "wt"),
                 "app_space": "sp42",
             },
-            "defaults": {},
             "paths": {
                 "inbox": str(tmp_path / "inbox"),
                 "threads": str(tmp_path / "threads.json"),
-                "logs": str(tmp_path / "logs"),
                 "credentials": str(tmp_path / "creds.json"),
             },
         }
@@ -719,7 +716,6 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (TerminalHostError("x"), 16),
         (HcError("x"), 16),
         (SlackPostError("x"), 17),
-        (GatedOpDeniedError("x"), 18),
         (TargetNotFoundError("x"), 20),
         (TargetAmbiguousError("x", []), 21),
         (TerminalGoneError("x"), 22),

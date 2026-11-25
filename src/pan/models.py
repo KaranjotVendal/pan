@@ -66,18 +66,6 @@ class TerminalHostKind(StrEnum):
     HC = "hc"
 
 
-class Autonomy(StrEnum):
-    FULL = "full"
-    GATED = "gated"
-    READONLY = "readonly"
-
-
-class Agent(StrEnum):
-    CLAUDE = "claude"
-    CODEX = "codex"
-    PI = "pi"
-
-
 class InboxItem(BaseModel, frozen=True):
     id: str
     slack_user: str
@@ -110,7 +98,6 @@ class ThreadRecord(BaseModel):
     # The repository pan created the worktree from (pan spawn's --repo), so `done` can delete
     # the branch after the worktree folder is gone. None on records written before it existed.
     repo_path: Path | None = None
-    agent: Agent = Agent.CLAUDE
     # Recorded by the worker's SessionStart hook; used by `pan read --full`.
     claude_session_id: str | None = None
     transcript_path: Path | None = None
@@ -310,9 +297,7 @@ class SlackConfig(BaseModel, frozen=True):
 
 
 class UserPolicy(BaseModel, frozen=True):
-    autonomy: Autonomy = Autonomy.FULL
     channels: list[str] = Field(default_factory=lambda: ["*"])
-    repos: list[str] = Field(default_factory=lambda: ["*"])
 
 
 class OrchestratorConfig(BaseModel, frozen=True):
@@ -329,16 +314,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
     app_space: str | None = None
 
 
-class Defaults(BaseModel, frozen=True):
-    agent: Agent = Agent.CLAUDE
-    permission_mode: str = "bypass"
-    repo_allowlist: list[str] = Field(default_factory=list)
-
-
 class PanPaths(BaseModel, frozen=True):
     inbox: Path
     threads: Path
-    logs: Path
     credentials: Path
 
 
@@ -346,7 +324,5 @@ class PanConfig(BaseModel, frozen=True):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     terminal_host: TerminalHostKind = TerminalHostKind.HC
     orchestrator: OrchestratorConfig
-    defaults: Defaults
     users: dict[str, UserPolicy] = Field(default_factory=dict)
-    gated_ops: list[str] = Field(default_factory=list)
     paths: PanPaths

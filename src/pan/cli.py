@@ -37,7 +37,6 @@ from pan.errors import (
     ConfigMissingError,
     CredentialsError,
     DiscardNotRequestedError,
-    GatedOpDeniedError,
     GitWorktreeError,
     InboxError,
     NoExactMatchError,
@@ -132,7 +131,6 @@ _EXIT_CODES: dict[type[PanError], int] = {
     SpawnError: 15,
     TerminalHostError: 16,
     SlackPostError: 17,
-    GatedOpDeniedError: 18,
     TargetNotFoundError: 20,
     TargetAmbiguousError: 21,
     TerminalGoneError: 22,
@@ -1155,21 +1153,6 @@ def up() -> None:
         )
     if not report.started and not report.woke:
         typer.echo("could not wake the orchestrator; it will drain on its next wake")
-
-
-@app.command()
-def pause() -> None:
-    """Toggle the pause flag. (Design intent: paused → new tasks acked 'paused' and dropped,
-    running work untouched. The gateway does not consult the flag yet.)"""
-    config = _config()
-    flag = config.paths.threads.parent / "paused.flag"
-    if flag.exists():
-        flag.unlink()
-        typer.echo("resumed")
-        return
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("")
-    typer.echo("paused")
 
 
 def _run() -> int:

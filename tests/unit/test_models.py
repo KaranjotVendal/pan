@@ -6,8 +6,6 @@ from pathlib import Path
 import pytest
 
 from pan.models import (
-    Agent,
-    Autonomy,
     InboxItem,
     PanConfig,
     SlackConfig,
@@ -25,23 +23,10 @@ def _full_config_dict() -> dict:
             "cwd": "/Users/me/dev/pan",
             "worktree_base": "/Users/me/dev/pan-worktrees",
         },
-        "defaults": {
-            "agent": "claude",
-            "permission_mode": "bypass",
-            "repo_allowlist": ["/Users/me/dev/pan"],
-        },
-        "users": {
-            "U12345": {
-                "autonomy": "full",
-                "channels": ["C0001", "C0002"],
-                "repos": ["*"],
-            }
-        },
-        "gated_ops": [],
+        "users": {"U12345": {"channels": ["C0001", "C0002"]}},
         "paths": {
             "inbox": "/Users/me/.pan/inbox",
             "threads": "/Users/me/.pan/threads.json",
-            "logs": "/Users/me/.pan/logs",
             "credentials": "/Users/me/.pan/credentials.json",
         },
     }
@@ -52,9 +37,7 @@ def test_pan_config_composition_resolves_nested_fields() -> None:
 
     assert config.orchestrator.terminal == "pan-orchestrator"
     assert config.orchestrator.cwd == Path("/Users/me/dev/pan")
-    assert config.defaults.agent is Agent.CLAUDE
     assert config.users["U12345"].channels == ["C0001", "C0002"]
-    assert config.users["U12345"].repos == ["*"]
     assert config.paths.inbox == Path("/Users/me/.pan/inbox")
     assert config.paths.threads == Path("/Users/me/.pan/threads.json")
 
@@ -88,7 +71,6 @@ def test_thread_record_defaults_to_spawning() -> None:
     )
 
     assert record.status is WorkerStatus.SPAWNING
-    assert record.agent is Agent.CLAUDE
     assert record.terminal_address == ""
     assert record.claude_session_id is None
     assert record.transcript_path is None
@@ -149,9 +131,6 @@ def test_herdr_era_record_loads_as_lost(legacy_status: str, expected_status: Wor
         (WorkerStatus.BLOCKED, "blocked"),
         (WorkerStatus.DONE, "done"),
         (WorkerStatus.FAILED, "failed"),
-        (Agent.CLAUDE, "claude"),
-        (Agent.CODEX, "codex"),
-        (Agent.PI, "pi"),
     ],
 )
 def test_str_enum_values(enum_member: str, value: str) -> None:
@@ -161,9 +140,7 @@ def test_str_enum_values(enum_member: str, value: str) -> None:
 def test_user_policy_defaults_are_permissive_wildcards() -> None:
     policy = UserPolicy()
 
-    assert policy.autonomy is Autonomy.FULL
     assert policy.channels == ["*"]
-    assert policy.repos == ["*"]
 
 
 def test_slack_config_defaults_socket_mode_on() -> None:

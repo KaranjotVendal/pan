@@ -10,7 +10,7 @@ import pytest
 from slack_fakes import RecordingSlack
 
 from pan.errors import ThreadNotFoundError
-from pan.hooks.inbox_link import InboxLink, inbox_link_hook, parse_inbox_link
+from pan.hooks.inbox_link import InboxLink, inbox_link_hook
 from pan.hooks.notification import notification_hook
 from pan.hooks.session_start import session_start_hook
 from pan.hooks.stop import stop_hook
@@ -412,6 +412,17 @@ def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the
     )
 
 
+def _recorded_link(raw_payload: str) -> InboxLink | None:
+    # Run the inbox-link hook on a record with no link yet; the link it records, if any.
+    thread_map = FakeThreadMap()
+    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(raw_payload))
+    if not thread_map.inbox_threads:
+        return None
+    ((_, thread_id, url),) = thread_map.inbox_threads
+    assert url is not None
+    return InboxLink(thread_id=thread_id, url=url)
+
+
 @pytest.mark.parametrize(
     "tool_response",
     [
@@ -439,8 +450,8 @@ def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the
         "real-text-after-a-bracket",
     ],
 )
-def test_parse_inbox_link_finds_thread_id_and_url(tool_response: object) -> None:
-    link = parse_inbox_link(_post_tool_use(tool_response))
+def test_inbox_link_hook_finds_thread_id_and_url(tool_response: object) -> None:
+    link = _recorded_link(_post_tool_use(tool_response))
 
     assert link == InboxLink(thread_id="thr_1", url="https://inbox.example/t/thr_1")
 
@@ -450,7 +461,7 @@ def test_parse_inbox_link_finds_thread_id_and_url(tool_response: object) -> None
     [
         "not json",
         json.dumps(["a", "list"]),
-        json.dumps({"tool_name": "x"}),
+        json.dumps({"tool_name": "mcp__plannotator__plannotator_inbox", "tool_input": {}}),
         _post_tool_use(None),
         _post_tool_use("plain text result"),
         _post_tool_use({"thread_id": "thr_1"}),
@@ -470,8 +481,8 @@ def test_parse_inbox_link_finds_thread_id_and_url(tool_response: object) -> None
         "broken-json-block",
     ],
 )
-def test_parse_inbox_link_returns_none_without_a_link(raw_payload: str) -> None:
-    assert parse_inbox_link(raw_payload) is None
+def test_inbox_link_hook_returns_none_without_a_link(raw_payload: str) -> None:
+    assert _recorded_link(raw_payload) is None
 
 
 def test_inbox_link_hook_records_the_first_link_and_posts_nothing() -> None:
@@ -570,10 +581,10 @@ def _repl_post_tool_use(tool_response: object, code: str = _REPL_INBOX_CODE) -> 
     [_repl_post_tool_use, _post_tool_use],
     ids=["repl-call", "inbox-tool-call"],
 )
-def test_parse_inbox_link_reads_the_prose_send_line(
+def test_inbox_link_hook_reads_the_prose_send_line(
     prose: str, wrap: Callable[[str], object], build_payload: Callable[[object], str]
 ) -> None:
-    link = parse_inbox_link(build_payload(wrap(prose + _PROSE_REPLY_NOTE)))
+    link = _recorded_link(build_payload(wrap(prose + _PROSE_REPLY_NOTE)))
 
     assert link == _PROSE_LINK
 
@@ -587,10 +598,10 @@ def test_parse_inbox_link_reads_the_prose_send_line(
     ],
     ids=["mid-line-quote", "quoted-in-a-message-body", "wrong-case"],
 )
-def test_parse_inbox_link_ignores_a_prose_line_that_is_not_at_a_line_start(
+def test_inbox_link_hook_ignores_a_prose_line_that_is_not_at_a_line_start(
     tool_response: object,
 ) -> None:
-    assert parse_inbox_link(_repl_post_tool_use(tool_response)) is None
+    assert _recorded_link(_repl_post_tool_use(tool_response)) is None
 
 
 @pytest.mark.parametrize(
@@ -602,9 +613,9 @@ def test_parse_inbox_link_ignores_a_prose_line_that_is_not_at_a_line_start(
     ],
     ids=["json-result", "json-content-block", "thread-listing"],
 )
-def test_parse_inbox_link_takes_no_json_link_from_a_repl_call(tool_response: object) -> None:
+def test_inbox_link_hook_takes_no_json_link_from_a_repl_call(tool_response: object) -> None:
     # A REPL call may read or list threads; only its prose send line is a link to record.
-    assert parse_inbox_link(_repl_post_tool_use(tool_response)) is None
+    assert _recorded_link(_repl_post_tool_use(tool_response)) is None
 
 
 @pytest.mark.parametrize(
@@ -617,10 +628,10 @@ def test_parse_inbox_link_takes_no_json_link_from_a_repl_call(tool_response: obj
     ],
     ids=["same-thread-twice", "same-thread-twice-one-text", "two-threads", "two-threads-one-text"],
 )
-def test_parse_inbox_link_needs_one_thread_among_the_send_lines(
+def test_inbox_link_hook_needs_one_thread_among_the_send_lines(
     tool_response: object, expected_link: InboxLink | None
 ) -> None:
-    assert parse_inbox_link(_repl_post_tool_use(tool_response)) == expected_link
+    assert _recorded_link(_repl_post_tool_use(tool_response)) == expected_link
 
 
 @pytest.mark.parametrize(
@@ -633,13 +644,13 @@ def test_parse_inbox_link_needs_one_thread_among_the_send_lines(
     ],
     ids=["message-body", "nested-result-object", "nested-blocks", "json-in-a-block"],
 )
-def test_parse_inbox_link_searches_only_the_top_level_text(tool_response: object) -> None:
-    assert parse_inbox_link(_repl_post_tool_use(tool_response)) is None
+def test_inbox_link_hook_searches_only_the_top_level_text(tool_response: object) -> None:
+    assert _recorded_link(_repl_post_tool_use(tool_response)) is None
 
 
-def test_parse_inbox_link_prefers_the_json_result_over_the_prose_line() -> None:
+def test_inbox_link_hook_prefers_the_json_result_over_the_prose_line() -> None:
     # The direct tool's real send result has both; the JSON result is read first.
-    assert parse_inbox_link(_post_tool_use(_INBOX_RESULT_TEXT)) == InboxLink(
+    assert _recorded_link(_post_tool_use(_INBOX_RESULT_TEXT)) == InboxLink(
         thread_id="thr_1", url="https://inbox.example/t/thr_1"
     )
 

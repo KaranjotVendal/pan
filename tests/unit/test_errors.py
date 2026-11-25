@@ -5,7 +5,6 @@ import pytest
 from pan.errors import (
     ConfigMissingError,
     CredentialsError,
-    GatedOpDeniedError,
     InboxError,
     PanError,
     ServiceError,
@@ -35,7 +34,6 @@ def test_pan_error_is_exception_subclass() -> None:
         SpawnError,
         TerminalHostError,
         SlackPostError,
-        GatedOpDeniedError,
         ServiceError,
     ],
 )
