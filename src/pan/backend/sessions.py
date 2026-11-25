@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pan.core.errors import PrivateMessageError, SlackPostError
 from pan.core.models import (
     AgentStatus,
     SessionSummary,
@@ -8,7 +9,7 @@ from pan.core.models import (
     ThreadRecord,
     WorkerStatus,
 )
-from pan.core.seams import TerminalHost, ThreadMap
+from pan.core.seams import SlackAdapter, TerminalHost, ThreadMap
 from pan.data.transcript import last_user_text
 from pan.utils.config import SESSION_LAST_ASK_MAX_LENGTH, WORKER_BRIEF_TASK_MARKER
 from pan.utils.logging import initialise_logger
@@ -186,3 +187,41 @@ def collect_sessions(terminal_host: TerminalHost, thread_map: ThreadMap) -> list
         )
     logger.info(f"sessions collected count={len(summaries)}")
     return summaries
+
+
+def thread_permalinks(slack: SlackAdapter, sessions: list[SessionSummary]) -> dict[str, str]:
+    """Each session's thread link by thread ts, asked of Slack once per thread; a thread Slack
+    gives no link for is left out."""
+    permalinks: dict[str, str] = {}
+    fetched_threads: set[str] = set()
+    for summary in sessions:
+        if not summary.thread_ts or not summary.thread_channel:
+            continue
+        if summary.thread_ts in fetched_threads:
+            continue
+        fetched_threads.add(summary.thread_ts)
+        link = slack.permalink(summary.thread_channel, summary.thread_ts)
+        if link:
+            permalinks[summary.thread_ts] = link
+    return permalinks
+
+
+def send_sessions_privately(
+    slack: SlackAdapter,
+    *,
+    channel: str,
+    thread_ts: str,
+    requester: str,
+    text: str,
+    session_count: int,
+) -> None:
+    """Send the sessions list to the requester alone (an ephemeral message); on failure nothing
+    is posted to the thread and PrivateMessageError (exit 32) is raised."""
+    try:
+        slack.post_ephemeral(channel, thread_ts, requester, text)
+    except SlackPostError as e:
+        logger.error(f"sessions list could not be sent privately thread={thread_ts}: {e}")
+        raise PrivateMessageError(
+            f"sessions list could not be sent privately to thread {thread_ts}"
+        ) from e
+    logger.info(f"sessions list sent privately thread={thread_ts} count={session_count}")

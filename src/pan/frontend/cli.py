@@ -4,9 +4,7 @@ import io
 import json
 import sys
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
-from typing import NoReturn
 
 import typer
 from pydantic import SecretStr
@@ -15,16 +13,19 @@ from pydantic import SecretStr
 from typer._click.exceptions import ClickException
 
 from pan.backend.confirmations import (
-    FilePendingConfirmations,
     cancel_confirmation,
     confirm_session,
-    confirmations_path,
-    is_answer,
-    live_pending,
     normalize_choice,
     propose_sessions,
 )
-from pan.backend.directive import asks_to_discard, clean_message, names_selector
+from pan.backend.drain import DrainedEntry, drain_inbox
+from pan.backend.gates import (
+    newest_drained_item,
+    refuse_x_source,
+    require_discard_request,
+    require_named_target,
+    require_requesters_message,
+)
 from pan.backend.interface import read_session, relay_to_session
 from pan.backend.lifecycle import bring_up
 from pan.backend.service import (
@@ -39,10 +40,15 @@ from pan.backend.session_control import (
     follow_up_to_session,
     forget_thread,
     send_to_session,
+    stop_thread,
 )
-from pan.backend.sessions import collect_sessions, worker_status_for
+from pan.backend.sessions import (
+    collect_sessions,
+    send_sessions_privately,
+    thread_permalinks,
+    worker_status_for,
+)
 from pan.backend.spawn import ClaudeLauncher, reopen_worker, spawn_worker
-from pan.backend.status_message import publish_status
 from pan.core.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -70,26 +76,9 @@ from pan.core.errors import (
     UnsavedWorkError,
     XSourceRefusedError,
 )
-from pan.core.models import (
-    InboxItem,
-    PanConfig,
-    PendingConfirmation,
-    SessionSummary,
-    SlackCredentials,
-    StatusState,
-    ThreadRecord,
-    ThreadSource,
-    WorkerStatus,
-)
+from pan.core.models import SessionSummary, SlackCredentials, WorkerStatus
 from pan.core.seams import SlackAdapter, ThreadMap
-from pan.data.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.data.adapters.launchd import build_service_manager
-from pan.data.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
-from pan.data.adapters.terminal_host import build_terminal_host
-from pan.data.drained import FileDrainedLog, drained_log_path
-from pan.data.inbox import FileInboxStore
-from pan.data.threadmap import FileThreadMap, tie_note
-from pan.frontend.gateway.app import BoltSlackAdapter
 from pan.frontend.gateway.slack_post import slack_post
 from pan.frontend.hooks.inbox_link import inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
@@ -97,8 +86,9 @@ from pan.frontend.hooks.session_start import session_start_hook
 from pan.frontend.hooks.stop import stop_hook
 from pan.frontend.slack_render import listed_sessions, render_sessions_for_slack, sessions_to_show
 from pan.frontend.watcher import WatchdogInboxWatcher
-from pan.utils.clock import SystemClock, UuidGen
-from pan.utils.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES, load_config
+from pan.frontend.wiring import Wiring, load_wiring
+from pan.utils.clock import UuidGen
+from pan.utils.config import READ_FULL_HISTORY_LINES, READ_RECENT_LINES
 from pan.utils.credentials import load_credentials, save_credentials
 from pan.utils.logging import initialise_logger
 
@@ -149,10 +139,6 @@ _EXIT_CODES: dict[type[PanError], int] = {
     XSourceRefusedError: 35,
 }
 
-# Text from X is someone else's text, so it must never steer a session that already exists:
-# until the X safety gate (MOB-87) is in place, X may only start new sessions.
-X_TO_ROUTE_NOTICE = "messages from X cannot use to <name>: yet; they can only start new sessions"
-
 
 def _exit_code_for(error: PanError) -> int:
     # The most specific documented class wins, so an adapter's own subclass (the hc
@@ -164,32 +150,18 @@ def _exit_code_for(error: PanError) -> int:
     return 1
 
 
-def _config() -> PanConfig:
-    return load_config()
-
-
 @app.command()
 def gateway() -> None:
     """Run the always-on Bolt Socket Mode gateway (blocking; launchd-supervised)."""
-    config = _config()
-    credentials = load_credentials(config.paths.credentials)
-    clock = SystemClock()
-    adapter = BoltSlackAdapter(
-        credentials,
-        config,
-        FileInboxStore(config.paths.inbox),
-        clock,
-        thread_map=FileThreadMap(config.paths.threads, clock),
-    )
-    adapter.start()
+    load_wiring().gateway_slack_adapter().start()
 
 
 @app.command()
 def watcher() -> None:
     """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
-    config = _config()
+    wiring = load_wiring()
     WatchdogInboxWatcher(
-        build_terminal_host(config.terminal_host), config.orchestrator.terminal, config.paths.inbox
+        wiring.terminal_host, wiring.config.orchestrator.terminal, wiring.config.paths.inbox
     ).start()
 
 
@@ -233,7 +205,7 @@ def config_set_token(
     app_token: str = typer.Option(..., prompt=True, hide_input=True),
 ) -> None:
     """Write ~/.pan/credentials.json at mode 0600."""
-    config = _config()
+    config = load_wiring().config
     save_credentials(
         SlackCredentials(bot_token=SecretStr(bot_token), app_token=SecretStr(app_token)),
         config.paths.credentials,
@@ -244,7 +216,7 @@ def config_set_token(
 @config_app.command("show")
 def config_show() -> None:
     """Print the resolved config (credentials masked)."""
-    config = _config()
+    config = load_wiring().config
     typer.echo(config.model_dump_json(indent=2))
     try:
         credentials = load_credentials(config.paths.credentials)
@@ -255,174 +227,35 @@ def config_show() -> None:
     typer.echo(credentials.model_dump_json())
 
 
-def _confirmations(config: PanConfig) -> FilePendingConfirmations:
-    return FilePendingConfirmations(confirmations_path(config.paths.threads))
-
-
-def _open_question_fact(pending: PendingConfirmation, answered: bool) -> dict[str, object]:
-    return {
-        "selector": pending.selector,
-        "task": pending.task,
-        "requester": pending.requester,
-        "asked_at": pending.last_asked_at().isoformat(),
-        "candidates": [
-            {"number": number, "label": candidate.label, "address": candidate.address}
-            for number, candidate in enumerate(pending.candidates, start=1)
-        ],
-        "answered_by_requester": answered,
-        "answer_text": pending.answer_text if answered else None,
-    }
-
-
-def _mark_answered(
-    confirmations: FilePendingConfirmations, pending: PendingConfirmation, item: InboxItem
-) -> bool:
-    # Runs after the drain, so a failed write must not cost the drained items: it is logged
-    # and the question stays unanswered (`pan confirm --choice` then refuses).
-    try:
-        confirmations.mark_answered(
-            pending.source, pending.thread_ts, item.received_at, clean_message(item.raw_text)
-        )
-    except OSError as e:
-        logger.warning(
-            f"could not mark the question answered thread={pending.thread_ts}: {type(e).__name__}"
-        )
-        return False
-    return True
-
-
-def _drained_log(config: PanConfig) -> FileDrainedLog:
-    return FileDrainedLog(drained_log_path(config.paths.threads))
-
-
-def _record_drained(config: PanConfig, items: list[InboxItem], now: datetime) -> None:
-    # A failed write must not cost the drained items: the gates that read the log then refuse.
-    try:
-        _drained_log(config).record(items, now)
-    except OSError as e:
-        logger.warning(f"could not record the drained items: {type(e).__name__}")
-
-
-# Posted when an action is refused because the message it rests on (--item) cannot be used:
-# unknown, not the sender's newest in the thread, or not from the requester. No session names
-# or paths, so it is safe in any thread.
-UNUSABLE_ITEM_REPLY = "I couldn't act on that message; please send the request again."
-
-
-def _drained_item(
-    config: PanConfig, item_id: str | None, thread: str, channel: str
-) -> InboxItem | None:
-    # The item as pan drained it, only when it was sent in this thread and channel and is the
-    # newest message pan drained there from the same sender: an older message cannot authorize
-    # what the sender's later one may have changed, while someone else's "+1" changes nothing.
-    if item_id is None:
-        return None
-    drained_log = _drained_log(config)
-    item = drained_log.get(item_id)
-    if item is None or item.thread_ts != thread or item.channel != channel:
-        logger.info(f"no drained item id={item_id} in thread={thread}")
-        return None
-    newest = drained_log.newest_in(thread, channel, item.slack_user)
-    if newest is None or newest.id != item.id:
-        logger.info(f"drained item id={item_id} is not its sender's newest in thread={thread}")
-        return None
-    return item
-
-
-def _refuse_unusable_item(
-    config: PanConfig, thread: str, channel: str, error: PanError
-) -> NoReturn:
-    # Says so in the thread, so a refusal is never silent, then raises `error`. A failed post
-    # is only logged: the refusal and its exit code stand either way.
-    try:
-        slack_post(_slack_adapter(config), channel, thread, UNUSABLE_ITEM_REPLY)
-    except (CredentialsError, SlackPostError) as e:
-        logger.warning(f"could not post the refusal thread={thread}: {type(e).__name__}")
-    raise error
-
-
-def _refuse_x(thread_map: ThreadMap, thread: str, item: InboxItem | None) -> None:
-    # TODO(MOB-87): replace with the X safety gate; until then X may only start new sessions.
-    record = thread_map.get(thread)
-    from_x = (item is not None and item.source is ThreadSource.X) or (
-        record is not None and record.source is ThreadSource.X
-    )
-    if from_x:
-        logger.info(f"refused a thread from X thread={thread}")
-        raise XSourceRefusedError(X_TO_ROUTE_NOTICE)
-
-
 @inbox_app.command("drain")
 def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
     """Atomically drain and clear the inbox; emit each item with its cleaned text, its thread's
     tie and pan's open question in the thread (JSON for the orchestrator). A reply from the
     requester after the question marks it answered, which pan confirm --choice needs."""
-    config = _config()
-    confirmations = _confirmations(config)
-    # The open questions are read before the drain, and reading them never fails, so a bad
-    # confirmations file can never cost drained items.
-    open_questions = {
-        (pending.source, pending.thread_ts): pending for pending in confirmations.all_pending()
-    }
-    clock = SystemClock()
-    items = FileInboxStore(config.paths.inbox).drain()
-    thread_map = FileThreadMap(config.paths.threads, clock)
-    now = clock.now()
-    _record_drained(config, items, now)
-
-    # Facts only: what the person typed (mention, signature and phone punctuation cleaned), the
-    # thread's tie read now (it can change after the gateway wrote the item), and the open
-    # question. What the message means is the orchestrator's call.
-    def open_question_for(item: InboxItem) -> dict[str, object] | None:
-        pending = live_pending(open_questions.get((item.source, item.thread_ts)), now)
-        if pending is None:
-            return None
-        if is_answer(pending, item.slack_user, item.received_at) and _mark_answered(
-            confirmations, pending, item
-        ):
-            # The latest reply from the requester is the answer.
-            pending = pending.model_copy(
-                update={
-                    "answered_at": item.received_at,
-                    "answer_text": clean_message(item.raw_text),
-                }
-            )
-            open_questions[(item.source, item.thread_ts)] = pending
-        return _open_question_fact(pending, pending.answered_at is not None)
-
+    wiring = load_wiring()
+    entries = drain_inbox(
+        inbox_store=wiring.inbox_store,
+        thread_map=wiring.thread_map,
+        confirmations=wiring.confirmations,
+        drained_log=wiring.drained_log,
+        clock=wiring.clock,
+    )
     if as_json:
-        payload = []
-        for item in items:
-            record = thread_map.get(item.thread_ts)
-            note = tie_note(record)
-            tie = None
-            if record is not None and note is not None:
-                tie = {
-                    "session": record.terminal_name,
-                    "terminal_address": record.terminal_address,
-                    "status": record.status.value,
-                    "note": note,
-                }
-            payload.append(
-                {
-                    "item": item.model_dump(mode="json"),
-                    "text": clean_message(item.raw_text),
-                    "tie": tie,
-                    "open_question": open_question_for(item),
-                }
-            )
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps([entry.model_dump(mode="json") for entry in entries]))
         return
-    for item in items:
-        typer.echo(f"{item.id} {item.channel} {item.thread_ts} {item.slack_user}")
-        typer.echo(f"  {clean_message(item.raw_text)}")
-        question = open_question_for(item)
-        if question is not None:
-            answered = "answered" if question["answered_by_requester"] else "not answered"
-            typer.echo(f"  open question in this thread ({answered} by the requester)")
-        note = tie_note(thread_map.get(item.thread_ts))
-        if note is not None:
-            typer.echo(f"  {note}")
+    for entry in entries:
+        typer.echo(_drained_entry_text(entry))
+
+
+def _drained_entry_text(entry: DrainedEntry) -> str:
+    item = entry.item
+    lines = [f"{item.id} {item.channel} {item.thread_ts} {item.slack_user}", f"  {entry.text}"]
+    if entry.open_question is not None:
+        answered = "answered" if entry.open_question.answered_by_requester else "not answered"
+        lines.append(f"  open question in this thread ({answered} by the requester)")
+    if entry.tie is not None:
+        lines.append(f"  {entry.tie.note}")
+    return "\n".join(lines)
 
 
 @app.command()
@@ -448,10 +281,10 @@ def spawn(
     """Create worktree + hc terminal + worker session; tie the thread to it; post the start
     notice naming its Inbox thread. With --thread-reply the brief tells the session to read the
     Slack thread first with its own Slack read-thread tool."""
-    config = _config()
-    credentials = load_credentials(config.paths.credentials)
-    clock = SystemClock()
-    terminal_host = build_terminal_host(config.terminal_host)
+    wiring = load_wiring()
+    config = wiring.config
+    slack = wiring.slack
+    terminal_host = wiring.terminal_host
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
     spawn_worker(
@@ -462,12 +295,12 @@ def spawn(
         base=config.orchestrator.worktree_base,
         stream=stream,
         app_space=config.orchestrator.app_space,
-        git=ShellGitWorktreeAdapter(),
+        git=wiring.git,
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
-        thread_map=FileThreadMap(config.paths.threads, clock),
-        slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
-        clock=clock,
+        thread_map=wiring.thread_map,
+        slack=slack,
+        clock=wiring.clock,
         id_gen=UuidGen(),
         requester=requester,
         request_text=request_text,
@@ -493,26 +326,28 @@ def reopen(
     last Claude conversation with the follow-up task; post the ack. --reply-in-slack switches
     the thread to posting answers in Slack (never back). A thread from X (its record, or the
     --item pan drained) exits 35: X may only start new sessions."""
-    config = _config()
-    clock = SystemClock()
-    thread_map = FileThreadMap(config.paths.threads, clock)
-    record = thread_map.get(thread)
+    wiring = load_wiring()
+    record = wiring.thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    _refuse_x(thread_map, thread, _drained_item(config, item, thread, record.channel))
-    credentials = load_credentials(config.paths.credentials)
-    terminal_host = build_terminal_host(config.terminal_host)
+    refuse_x_source(
+        wiring.thread_map,
+        thread,
+        newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=record.channel),
+    )
+    slack = wiring.slack
+    terminal_host = wiring.terminal_host
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
     # only maps the exit code.
     reopen_worker(
         record=record,
         task=task,
-        app_space=config.orchestrator.app_space,
+        app_space=wiring.config.orchestrator.app_space,
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
-        thread_map=thread_map,
-        slack=BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), clock),
-        clock=clock,
+        thread_map=wiring.thread_map,
+        slack=slack,
+        clock=wiring.clock,
         reply_in_slack=reply_in_slack,
     )
 
@@ -520,8 +355,7 @@ def reopen(
 @threads_app.command("get")
 def threads_get(thread: str = typer.Option(..., "--thread")) -> None:
     """Print the ThreadRecord for a thread_ts as JSON."""
-    config = _config()
-    record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
+    record = load_wiring().thread_map.get(thread)
     typer.echo(record.model_dump_json() if record is not None else "null")
 
 
@@ -531,8 +365,7 @@ def threads_set(
     status: WorkerStatus = typer.Option(..., "--status"),
 ) -> None:
     """Update a ThreadRecord's status."""
-    config = _config()
-    FileThreadMap(config.paths.threads, SystemClock()).update_status(thread, status)
+    load_wiring().thread_map.update_status(thread, status)
     typer.echo(f"{thread} -> {status.value}")
 
 
@@ -543,12 +376,7 @@ def slack_post_command(
     text: str = typer.Option(..., "--text"),
 ) -> None:
     """Post text to a Slack thread via the one egress path (INV-4)."""
-    config = _config()
-    credentials = load_credentials(config.paths.credentials)
-    adapter = BoltSlackAdapter(
-        credentials, config, FileInboxStore(config.paths.inbox), SystemClock()
-    )
-    slack_post(adapter, channel, thread, text)
+    slack_post(load_wiring().slack, channel, thread, text)
 
 
 def _extract_cwd(raw_stdin: str) -> str | None:
@@ -589,19 +417,16 @@ def _dispatch_completion_hook(
 
 def _run_completion_hook(hook_fn: Callable[..., None]) -> None:
     raw_stdin = sys.stdin.read()
-    config = _config()
-    thread_map = FileThreadMap(config.paths.threads, SystemClock())
-    credentials = load_credentials(config.paths.credentials)
-    slack = BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), SystemClock())
-    _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, slack)
+    wiring = load_wiring()
+    thread_map = wiring.thread_map
+    _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, wiring.slack)
 
 
 @hook_app.command("session-start")
 def hook_session_start() -> None:
     """Claude Code SessionStart hook: record the worker's session id and transcript path."""
     raw_stdin = sys.stdin.read()
-    config = _config()
-    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    thread_map = load_wiring().thread_map
     cwd = _extract_cwd(raw_stdin)
     if cwd is None:
         logger.warning("session-start hook: the payload carries no cwd")
@@ -654,8 +479,7 @@ def hook_inbox_link() -> None:
     # and swallowed here (exit 0), defects included. It never posts to Slack.
     try:
         raw_stdin = sys.stdin.read()
-        config = _config()
-        _dispatch_inbox_link_hook(raw_stdin, FileThreadMap(config.paths.threads, SystemClock()))
+        _dispatch_inbox_link_hook(raw_stdin, load_wiring().thread_map)
     except Exception as e:
         logger.warning(f"inbox-link hook failed: {type(e).__name__}")
 
@@ -663,14 +487,14 @@ def hook_inbox_link() -> None:
 @app.command()
 def status(thread: str = typer.Option(..., "--thread")) -> None:
     """Report a worker's live status from its hc terminal (resolved via its thread record)."""
-    config = _config()
-    record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
+    wiring = load_wiring()
+    record = wiring.thread_map.get(thread)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
     terminal = None
     if record.terminal_address:
         try:
-            terminal = build_terminal_host(config.terminal_host).get(record.terminal_address)
+            terminal = wiring.terminal_host.get(record.terminal_address)
         except TerminalGoneError:
             terminal = None
     typer.echo(worker_status_for(terminal, record.status).value)
@@ -718,17 +542,14 @@ def sessions(
     --thread, --channel and --requester sends the requester alone the sessions at those
     addresses (up to 5, in the order given), each with its state and a link to its thread.
     Exit 32: the private message failed."""
-    config = _config()
-    summaries = collect_sessions(
-        build_terminal_host(config.terminal_host),
-        FileThreadMap(config.paths.threads, SystemClock()),
-    )
+    wiring = load_wiring()
+    summaries = collect_sessions(wiring.terminal_host, wiring.thread_map)
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
     if show is not None and thread is not None and channel is not None and requester is not None:
         addresses = [address.strip() for address in show.split(",") if address.strip()]
-        _send_sessions_privately(config, summaries, channel, thread, requester, addresses)
+        _send_sessions_privately(wiring, summaries, channel, thread, requester, addresses)
         return
     if any(option is not None for option in (show, thread, channel, requester)):
         # The list is private and sent only with all four; one alone is a mistake.
@@ -737,42 +558,29 @@ def sessions(
 
 
 def _send_sessions_privately(
-    config: PanConfig,
+    wiring: Wiring,
     summaries: list[SessionSummary],
     channel: str,
     thread_ts: str,
     requester: str,
     addresses: list[str],
 ) -> None:
-    # An ephemeral message to the requester only; on failure nothing is posted to the thread.
-    slack = _slack_adapter(config)
-    selected = sessions_to_show(summaries, config.orchestrator.terminal, addresses)
-    permalinks: dict[str, str] = {}
-    fetched_threads: set[str] = set()
-    for summary in selected:
-        if not summary.thread_ts or not summary.thread_channel:
-            continue
-        if summary.thread_ts in fetched_threads:
-            continue
-        fetched_threads.add(summary.thread_ts)
-        link = slack.permalink(summary.thread_channel, summary.thread_ts)
-        if link:
-            permalinks[summary.thread_ts] = link
-    any_running = bool(listed_sessions(summaries, config.orchestrator.terminal))
-    text = render_sessions_for_slack(selected, permalinks, any_running=any_running)
-    try:
-        slack.post_ephemeral(channel, thread_ts, requester, text)
-    except SlackPostError as e:
-        logger.error(f"sessions list could not be sent privately thread={thread_ts}: {e}")
-        raise PrivateMessageError(
-            f"sessions list could not be sent privately to thread {thread_ts}"
-        ) from e
-    logger.info(f"sessions list sent privately thread={thread_ts} count={len(selected)}")
-
-
-def _slack_adapter(config: PanConfig) -> BoltSlackAdapter:
-    credentials = load_credentials(config.paths.credentials)
-    return BoltSlackAdapter(credentials, config, FileInboxStore(config.paths.inbox), SystemClock())
+    slack = wiring.slack
+    orchestrator_terminal = wiring.config.orchestrator.terminal
+    selected = sessions_to_show(summaries, orchestrator_terminal, addresses)
+    text = render_sessions_for_slack(
+        selected,
+        thread_permalinks(slack, selected),
+        any_running=bool(listed_sessions(summaries, orchestrator_terminal)),
+    )
+    send_sessions_privately(
+        slack,
+        channel=channel,
+        thread_ts=thread_ts,
+        requester=requester,
+        text=text,
+        session_count=len(selected),
+    )
 
 
 @app.command()
@@ -783,15 +591,15 @@ def check(
     """Post the thread's tied session's latest answer to the thread, as is: the last answer in
     its transcript, or its recent screen lines. Names its Inbox thread (looked up by name for a
     session pan did not start) and says if it is still working or waiting on a prompt."""
-    config = _config()
+    wiring = load_wiring()
     check_thread(
         thread_ts=thread,
         channel=channel,
-        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
-        terminal_host=build_terminal_host(config.terminal_host),
-        inbox_directory=ShellPlannotatorInboxAdapter(),
-        slack=_slack_adapter(config),
-        clock=SystemClock(),
+        thread_map=wiring.thread_map,
+        terminal_host=wiring.terminal_host,
+        inbox_directory=wiring.inbox_directory,
+        slack=wiring.slack,
+        clock=wiring.clock,
         screen_lines=READ_RECENT_LINES,
     )
 
@@ -802,12 +610,9 @@ def forget(
     channel: str = typer.Option(..., "--channel"),
 ) -> None:
     """Untie the thread from its session and say so in the thread. Never stops the session."""
-    config = _config()
+    wiring = load_wiring()
     forget_thread(
-        thread_ts=thread,
-        channel=channel,
-        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
-        slack=_slack_adapter(config),
+        thread_ts=thread, channel=channel, thread_map=wiring.thread_map, slack=wiring.slack
     )
 
 
@@ -836,33 +641,25 @@ def done(
     --discard needs --item: the thread requester's newest message pan drained in this thread,
     exactly done --discard; otherwise nothing is touched and it exits 33 (an unusable item also
     gets a one-line reply asking to send the request again)."""
-    config = _config()
+    wiring = load_wiring()
     if discard:
-        drained = _drained_item(config, item, thread, channel)
-        record = FileThreadMap(config.paths.threads, SystemClock()).get(thread)
-        refusal = DiscardNotRequestedError(
-            f"--discard refused for thread {thread}: its requester did not send done --discard"
+        require_discard_request(
+            newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel),
+            wiring.thread_map.get(thread),
+            thread_ts=thread,
+            reply=wiring.thread_reply(channel, thread),
         )
-        if (
-            drained is None
-            or record is None
-            or record.requester is None
-            or drained.slack_user != record.requester
-        ):
-            _refuse_unusable_item(config, thread, channel, refusal)
-        if not asks_to_discard(drained.raw_text):
-            raise refusal
     done_thread(
         thread_ts=thread,
         channel=channel,
         discard=discard,
-        worktree_base=config.orchestrator.worktree_base,
-        fallback_repo=config.orchestrator.cwd,
-        thread_map=FileThreadMap(config.paths.threads, SystemClock()),
-        terminal_host=build_terminal_host(config.terminal_host),
-        git=ShellGitWorktreeAdapter(),
-        slack=_slack_adapter(config),
-        clock=SystemClock(),
+        worktree_base=wiring.config.orchestrator.worktree_base,
+        fallback_repo=wiring.config.orchestrator.cwd,
+        thread_map=wiring.thread_map,
+        terminal_host=wiring.terminal_host,
+        git=wiring.git,
+        slack=wiring.slack,
+        clock=wiring.clock,
     )
 
 
@@ -897,45 +694,42 @@ def send(
     nothing is typed; a session pan did not start gets one line on top saying the text came
     from Slack and which Inbox thread to use. A thread from X exits 35: X may only start new
     sessions."""
-    config = _config()
-    clock = SystemClock()
-    thread_map = FileThreadMap(config.paths.threads, clock)
-    drained = _drained_item(config, item, thread, channel)
-    _refuse_x(thread_map, thread, drained)
-    if to is not None:
-        if drained is None or (requester is not None and drained.slack_user != requester):
-            _refuse_unusable_item(
-                config, thread, channel, NoExactMatchError(f"item {item} cannot be used")
-            )
-        if not names_selector(drained.raw_text, to):
-            logger.info(f"selector not in the person's drained message thread={thread}")
-            raise NoExactMatchError(f"'{to}' is not named in the person's message")
-        requester = drained.slack_user
-    terminal_host = build_terminal_host(config.terminal_host)
+    wiring = load_wiring()
+    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
+    refuse_x_source(wiring.thread_map, thread, drained)
     if to is None:
         follow_up_to_session(
             thread_ts=thread,
             channel=channel,
             text=task,
-            terminal_host=terminal_host,
-            thread_map=thread_map,
-            slack=_slack_adapter(config),
-            clock=clock,
+            terminal_host=wiring.terminal_host,
+            thread_map=wiring.thread_map,
+            slack=wiring.slack,
+            clock=wiring.clock,
             reply_in_slack=reply_in_slack,
         )
         return
+    named_in = require_named_target(
+        drained,
+        action="send",
+        item_id=item,
+        target=to,
+        requester=requester,
+        thread_ts=thread,
+        reply=wiring.thread_reply(channel, thread),
+    )
     send_to_session(
         thread_ts=thread,
         channel=channel,
         selector=to,
         text=task,
-        requester=requester,
+        requester=named_in.slack_user,
         reply_in_slack=reply_in_slack,
-        terminal_host=terminal_host,
-        thread_map=thread_map,
-        inbox_directory=ShellPlannotatorInboxAdapter(),
-        slack=_slack_adapter(config),
-        clock=clock,
+        terminal_host=wiring.terminal_host,
+        thread_map=wiring.thread_map,
+        inbox_directory=wiring.inbox_directory,
+        slack=wiring.slack,
+        clock=wiring.clock,
     )
 
 
@@ -966,16 +760,12 @@ def propose(
     are not live terminal addresses are dropped; with none left it says no session matches.
     --item must be --requester's newest message pan drained in this thread; otherwise nothing
     is asked, a one-line reply asks to send the request again, and it exits 28. A thread from X exits 35: X may only start new sessions."""
-    config = _config()
-    drained = _drained_item(config, item, thread, channel)
-    _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), thread, drained)
-    if drained is None or drained.slack_user != requester:
-        _refuse_unusable_item(
-            config,
-            thread,
-            channel,
-            NoExactMatchError(f"no message from {requester} to propose for in thread {thread}"),
-        )
+    wiring = load_wiring()
+    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
+    refuse_x_source(wiring.thread_map, thread, drained)
+    require_requesters_message(
+        drained, requester=requester, thread_ts=thread, reply=wiring.thread_reply(channel, thread)
+    )
     propose_sessions(
         thread_ts=thread,
         channel=channel,
@@ -984,10 +774,10 @@ def propose(
         requester=requester,
         reply_in_slack=reply_in_slack,
         candidate_addresses=candidate,
-        terminal_host=build_terminal_host(config.terminal_host),
-        confirmations=_confirmations(config),
-        slack=_slack_adapter(config),
-        clock=SystemClock(),
+        terminal_host=wiring.terminal_host,
+        confirmations=wiring.confirmations,
+        slack=wiring.slack,
+        clock=wiring.clock,
     )
 
 
@@ -1011,26 +801,25 @@ def confirm(
     normalized_choice = normalize_choice(choice) if choice is not None else None
     if choice is not None and normalized_choice is None:
         raise typer.BadParameter("--choice must be yes, y or a number from 1 to 3")
-    config = _config()
-    clock = SystemClock()
+    wiring = load_wiring()
     if normalized_choice is None:
         cancel_confirmation(
             thread_ts=thread,
             channel=channel,
-            confirmations=_confirmations(config),
-            slack=_slack_adapter(config),
+            confirmations=wiring.confirmations,
+            slack=wiring.slack,
         )
         return
     confirm_session(
         thread_ts=thread,
         channel=channel,
         choice=normalized_choice,
-        terminal_host=build_terminal_host(config.terminal_host),
-        thread_map=FileThreadMap(config.paths.threads, clock),
-        inbox_directory=ShellPlannotatorInboxAdapter(),
-        confirmations=_confirmations(config),
-        slack=_slack_adapter(config),
-        clock=clock,
+        terminal_host=wiring.terminal_host,
+        thread_map=wiring.thread_map,
+        inbox_directory=wiring.inbox_directory,
+        confirmations=wiring.confirmations,
+        slack=wiring.slack,
+        clock=wiring.clock,
     )
 
 
@@ -1051,17 +840,19 @@ def relay(
     sender's newest message pan drained in this thread (otherwise a one-line reply asks to send
     the request again) and hold the target as a whole word or phrase; otherwise nothing is sent
     and it exits 28. A thread from X exits 35."""
-    config = _config()
-    drained = _drained_item(config, item, thread, channel)
-    _refuse_x(FileThreadMap(config.paths.threads, SystemClock()), thread, drained)
-    if drained is None:
-        _refuse_unusable_item(
-            config, thread, channel, NoExactMatchError(f"item {item} cannot be used")
-        )
-    if not names_selector(drained.raw_text, target):
-        logger.info(f"relay target not in the person's drained message item={item}")
-        raise NoExactMatchError(f"'{target}' is not named in the person's message")
-    terminal_host = build_terminal_host(config.terminal_host)
+    wiring = load_wiring()
+    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
+    refuse_x_source(wiring.thread_map, thread, drained)
+    require_named_target(
+        drained,
+        action="relay",
+        item_id=item,
+        target=target,
+        requester=None,
+        thread_ts=thread,
+        reply=wiring.thread_reply(channel, thread),
+    )
+    terminal_host = wiring.terminal_host
     resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
     typer.echo(
         f"relayed into {resolved.name or resolved.where or resolved.address} terminal {resolved.address}"
@@ -1074,9 +865,9 @@ def read(
     full: bool = typer.Option(False, "--full", help="full transcript instead of recent lines"),
 ) -> None:
     """Print a live session's raw output: recent lines, or the full transcript with --full."""
-    config = _config()
-    terminal_host = build_terminal_host(config.terminal_host)
-    records = FileThreadMap(config.paths.threads, SystemClock()).records()
+    wiring = load_wiring()
+    terminal_host = wiring.terminal_host
+    records = wiring.thread_map.records()
     raw = read_session(
         terminal_host,
         records,
@@ -1096,49 +887,26 @@ def stop(thread: str = typer.Option(..., "--thread")) -> None:
     """Kill switch: kill and remove the worker's terminal and mark the ThreadRecord FAILED;
     the thread's status message says Stopped. Refuses for a session pan did not start: it only
     unties the thread and never stops it."""
-    config = _config()
-    clock = SystemClock()
-    thread_map = FileThreadMap(config.paths.threads, clock)
-    record = thread_map.get(thread)
-    if record is None:
-        raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    if not record.started_by_pan:
-        if record.tied:
-            thread_map.untie(thread)
-        raise NotPanSessionError(
-            f"{record.terminal_name} was not started by pan, so pan never stops it; "
-            "this thread is untied from it"
-        )
-    if record.terminal_address:
-        build_terminal_host(config.terminal_host).remove(record.terminal_address)
-    thread_map.update_status(thread, WorkerStatus.FAILED, session_name=record.terminal_name)
-    if record.tied:
-        _publish_stopped(config, thread_map, record, clock)
-    typer.echo(f"stopped {thread}")
-
-
-def _publish_stopped(
-    config: PanConfig, thread_map: ThreadMap, record: ThreadRecord, clock: SystemClock
-) -> None:
-    # Best effort: the kill switch has done its work whether or not Slack can be reached.
-    try:
-        slack = _slack_adapter(config)
-    except CredentialsError as e:
-        logger.warning(f"stop could not update the status message: {type(e).__name__}")
-        return
-    publish_status(
-        slack=slack, thread_map=thread_map, record=record, state=StatusState.STOPPED, clock=clock
+    wiring = load_wiring()
+    stop_thread(
+        thread_ts=thread,
+        thread_map=wiring.thread_map,
+        terminal_host=wiring.terminal_host,
+        open_slack=lambda: wiring.slack,
+        clock=wiring.clock,
     )
+    typer.echo(f"stopped {thread}")
 
 
 @app.command()
 def up() -> None:
     """Ensure the orchestrator runs in its hc terminal, mark workers lost while pan was down
     FAILED, and wake an already-running orchestrator once. Safe to run any time."""
-    config = _config()
+    wiring = load_wiring()
+    config = wiring.config
     report = bring_up(
-        build_terminal_host(config.terminal_host),
-        FileThreadMap(config.paths.threads, SystemClock()),
+        wiring.terminal_host,
+        wiring.thread_map,
         terminal=config.orchestrator.terminal,
         cwd=config.orchestrator.cwd,
         command=config.orchestrator.command,

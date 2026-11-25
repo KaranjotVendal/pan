@@ -9,6 +9,17 @@ as it works.
 
 ### Changed
 
+- `pan.frontend.cli` now only parses options, calls the backend and maps errors to exit codes.
+  The checks on the message an action rests on (`--item`: the sender's newest drained message,
+  the `--to`/relay target named in it, the requester's own message for `propose`, `done
+  --discard` authorization, and the X refusal) move to `pan.backend.gates`; building the
+  `inbox drain` entries (cleaned text, tie, open question, marking it answered) to
+  `pan.backend.drain`; the `sessions --show` links and private send to `pan.backend.sessions`;
+  and the kill switch to `session_control.stop_thread`. The adapters and stores every command
+  built for itself are built in one place, `pan.frontend.wiring`. No change to exit codes,
+  Slack posts or output.
+- Text-mode `pan inbox drain` now prints its items only after every item has been handled, as
+  `--json` always did, so an error part-way through prints none of them instead of the ones before it.
 - `src/pan` is split into five layer packages, with imports allowed only downward:
   `frontend` (`cli`, `gateway/`, `help`, `hooks/`, `watcher`, `slack_format`, `slack_render`)
   -> `backend` (`spawn`, `session_control`, `sessions`, `lifecycle`, `interface`,

@@ -17,8 +17,10 @@ from terminal_host_fakes import FakeTerminalHost, make_terminal
 from typer.testing import CliRunner
 
 import pan.frontend.cli as cli
+import pan.frontend.wiring as wiring
 from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
 from pan.backend.directive import asks_to_discard
+from pan.backend.gates import UNUSABLE_ITEM_REPLY
 from pan.core.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -68,6 +70,7 @@ from pan.data.inbox import FileInboxStore
 from pan.data.threadmap import FileThreadMap
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.stop import stop_hook
+from pan.utils.clock import SystemClock
 
 runner = CliRunner()
 
@@ -132,7 +135,7 @@ def test_inbox_drain_json_emits_the_item_its_text_tie_and_question(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw_text: str, expected_text: str
 ) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     FileInboxStore(config.paths.inbox).append(
         _item("Ev1").model_copy(update={"raw_text": raw_text})
     )
@@ -156,7 +159,7 @@ def test_inbox_drain_reads_an_item_an_older_gateway_wrote_with_a_route(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     raw_item = _item("Ev1").model_dump(mode="json") | {"route": {"kind": "check"}}
     config.paths.inbox.mkdir(parents=True)
     (config.paths.inbox / "Ev1.json").write_text(json.dumps(raw_item))
@@ -172,9 +175,9 @@ def test_inbox_drain_names_the_tied_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     FileInboxStore(config.paths.inbox).append(_item("Ev1"))
-    FileThreadMap(config.paths.threads, cli.SystemClock()).tie(
+    FileThreadMap(config.paths.threads, SystemClock()).tie(
         _record("1718000000.000200").model_copy(update={"status": WorkerStatus.IDLE})
     )
 
@@ -193,14 +196,59 @@ def test_inbox_drain_names_the_tied_session(
     }
 
 
+class _FixedClock:
+    def now(self) -> datetime:
+        return datetime(2026, 7, 16, 10, 2, tzinfo=UTC)
+
+
+def test_inbox_drain_json_emits_the_open_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "SystemClock", _FixedClock)
+    FilePendingConfirmations(confirmations_path(config.paths.threads)).put(
+        PendingConfirmation(
+            thread_ts="1718000000.000200",
+            channel="C1",
+            selector="pan docs",
+            task="add the tests",
+            requester="U1",
+            candidates=[
+                ConfirmationCandidate(address="t3", cwd=Path("/tmp/pan"), label="t3 (folder pan)")
+            ],
+            created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+        )
+    )
+    FileInboxStore(config.paths.inbox).append(
+        _item("Ev1").model_copy(
+            update={"raw_text": "yes", "received_at": datetime(2026, 7, 16, 10, 1, tzinfo=UTC)}
+        )
+    )
+
+    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+
+    assert result.exit_code == 0
+    (entry,) = json.loads(result.stdout)
+    assert entry["open_question"] == {
+        "selector": "pan docs",
+        "task": "add the tests",
+        "requester": "U1",
+        "asked_at": "2026-07-16T10:00:00+00:00",
+        "candidates": [{"number": 1, "label": "t3 (folder pan)", "address": "t3"}],
+        "answered_by_requester": True,
+        "answer_text": "yes",
+    }
+
+
 @pytest.mark.parametrize("tied", [True, False], ids=["tied", "untied"])
 def test_inbox_drain_text_adds_the_tie_line_only_for_a_tied_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tied: bool
 ) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     FileInboxStore(config.paths.inbox).append(_item("Ev1"))
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.tie(_record("1718000000.000200"))
     if not tied:
         thread_map.untie("1718000000.000200")
@@ -215,8 +263,8 @@ def test_inbox_drain_text_adds_the_tie_line_only_for_a_tied_thread(
 
 def test_threads_get_prints_record_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(_record("t-1"))
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
+    FileThreadMap(config.paths.threads, SystemClock()).put(_record("t-1"))
 
     result = runner.invoke(cli.app, ["threads", "get", "--thread", "t-1"])
 
@@ -228,7 +276,7 @@ def test_threads_get_prints_record_json(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 def test_threads_get_unknown_prints_null(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
 
     result = runner.invoke(cli.app, ["threads", "get", "--thread", "missing"])
 
@@ -238,9 +286,9 @@ def test_threads_get_unknown_prints_null(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     monkeypatch.setattr(
-        cli,
+        wiring,
         "load_credentials",
         lambda path: SlackCredentials(
             bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
@@ -297,9 +345,9 @@ def test_spawn_passes_thread_reply_flag(
     extra_arguments: list[str],
     expected_from_thread_reply: bool,
 ) -> None:
-    monkeypatch.setattr(cli, "load_config", lambda: _make_config(tmp_path))
+    monkeypatch.setattr(wiring, "load_config", lambda: _make_config(tmp_path))
     monkeypatch.setattr(
-        cli,
+        wiring,
         "load_credentials",
         lambda path: SlackCredentials(
             bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
@@ -321,9 +369,9 @@ def test_watcher_builds_from_config_and_starts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     terminal_host_sentinel = object()
-    monkeypatch.setattr(cli, "build_terminal_host", lambda kind: terminal_host_sentinel)
+    monkeypatch.setattr(wiring, "build_terminal_host", lambda kind: terminal_host_sentinel)
     captured: dict[str, Any] = {}
 
     class FakeWatcher:
@@ -345,7 +393,7 @@ def test_watcher_builds_from_config_and_starts(
 
 def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     monkeypatch.setattr(
         cli,
         "load_credentials",
@@ -365,13 +413,13 @@ def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path
 def _use_terminal_host(
     monkeypatch: pytest.MonkeyPatch, terminal_host: FakeTerminalHost
 ) -> FakeTerminalHost:
-    monkeypatch.setattr(cli, "build_terminal_host", lambda kind: terminal_host)
+    monkeypatch.setattr(wiring, "build_terminal_host", lambda kind: terminal_host)
     return terminal_host
 
 
 def _use_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> PanConfig:
     config = _make_config(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(wiring, "load_config", lambda: config)
     return config
 
 
@@ -395,7 +443,7 @@ def test_status_reads_the_recorded_terminal(
     config = _use_config(monkeypatch, tmp_path)
     record = _record("t-1", terminal_address=terminal_address)
     record.status = WorkerStatus.RUNNING
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
+    FileThreadMap(config.paths.threads, SystemClock()).put(record)
     terminal_host = FakeTerminalHost()
     for terminal in terminals:
         terminal_host.add(terminal)
@@ -547,7 +595,6 @@ def test_relay_failures_propagate_typed_errors(
         (["<@U000BOT> relay pan-backend hi"], [], None, False),
         (["<@U000BOT> relay pan-backend hi"], ["--item", "Ev9"], NoExactMatchError, True),
         (["<@U000BOT> relay pan-backen hi"], ["--item", "Ev1"], NoExactMatchError, False),
-        (["<@U000BOT> tell the backend one hi"], ["--item", "Ev1"], NoExactMatchError, False),
         (
             ["<@U000BOT> relay pan-backend hi", "<@U000BOT> actually, wait"],
             ["--item", "Ev1"],
@@ -555,7 +602,7 @@ def test_relay_failures_propagate_typed_errors(
             True,
         ),
     ],
-    ids=["no-item", "unknown-item", "typo", "described-not-named", "not-the-newest"],
+    ids=["no-item", "unknown-item", "typo", "not-the-newest"],
 )
 def test_relay_sends_only_to_a_session_the_person_named(
     monkeypatch: pytest.MonkeyPatch,
@@ -565,7 +612,7 @@ def test_relay_sends_only_to_a_session_the_person_named(
     expected_error: type[PanError] | None,
     item_unusable: bool,
 ) -> None:
-    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if item_unusable else []
+    expected_posts = [UNUSABLE_ITEM_REPLY] if item_unusable else []
     config = _use_config(monkeypatch, tmp_path)
     for index, text in enumerate(drained_texts, start=1):
         _drained(config, text, event_id=f"Ev{index}")
@@ -611,7 +658,7 @@ def test_read_full_echoes_the_transcript_only_of_the_same_terminal(
     record = _record("t-1", terminal_address="t5")
     record.terminal_name = recorded_name
     record.transcript_path = transcript
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(record)
+    FileThreadMap(config.paths.threads, SystemClock()).put(record)
     terminal_host = _use_terminal_host(monkeypatch, _live_terminal_host())
 
     result = runner.invoke(cli.app, ["read", "pan-backend", "--full"])
@@ -638,13 +685,14 @@ def test_stop_removes_the_terminal_and_marks_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_address: str
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.put(_record("t-1", terminal_address=terminal_address))
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
 
     result = runner.invoke(cli.app, ["stop", "--thread", "t-1"])
 
     assert result.exit_code == 0
+    assert result.stdout == "stopped t-1\n"
     assert terminal_host.removed == ([terminal_address] if terminal_address else [])
     stopped = thread_map.get("t-1")
     assert stopped is not None
@@ -655,7 +703,7 @@ def test_stop_edits_the_threads_status_message_to_stopped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.put(
         _record("t-1", terminal_address="t12").model_copy(
             update={"status_message_ts": "1718000000.000900", "status_label": "fix the bug"}
@@ -677,7 +725,7 @@ def test_stop_never_stops_a_session_pan_did_not_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     desk_record = _record("t-1", terminal_address="t9").model_copy(
         update={"terminal_name": "desk-api", "started_by_pan": False, "status": WorkerStatus.IDLE}
     )
@@ -866,7 +914,7 @@ def test_hook_inbox_link_records_the_link_on_the_cwd_record(
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
     worktree = tmp_path / "wt" / "pan-task"
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.tie(_record("t-1", worktree_path=worktree))
 
     result = runner.invoke(cli.app, ["hook", "inbox-link"], input=_inbox_link_payload(worktree))
@@ -892,7 +940,7 @@ def test_hook_inbox_link_never_fails_the_tool(
         def missing_config() -> PanConfig:
             raise ConfigMissingError("no config")
 
-        monkeypatch.setattr(cli, "load_config", missing_config)
+        monkeypatch.setattr(wiring, "load_config", missing_config)
 
     result = runner.invoke(cli.app, ["hook", "inbox-link"], input=raw_stdin)
 
@@ -905,7 +953,7 @@ def test_hook_inbox_link_records_the_link_from_the_real_inbox_text(
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
     worktree = tmp_path / "wt" / "pan-task"
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.tie(_record("t-1", worktree_path=worktree))
     result_json = json.dumps({"thread_id": "thr_1", "url": "https://inbox.example/t/thr_1"})
     text = f"Sent to the Plannotator Inbox (thread thr_1, https://inbox.example/t/thr_1).\n\n{result_json}"
@@ -957,7 +1005,7 @@ def test_hook_session_start_records_the_session_on_the_cwd_record(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.put(_record("t-1", worktree_path=tmp_path / "wt" / "pan-task"))
     payload = json.dumps(
         {
@@ -981,9 +1029,7 @@ def test_up_starts_the_orchestrator_from_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(
-        _record("t-1", terminal_address="t9")
-    )
+    FileThreadMap(config.paths.threads, SystemClock()).put(_record("t-1", terminal_address="t9"))
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
 
     result = runner.invoke(cli.app, ["up"])
@@ -1011,9 +1057,9 @@ def test_reopen_wires_the_record_to_reopen_worker(
     expected_reply_in_slack: bool,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    FileThreadMap(config.paths.threads, cli.SystemClock()).put(_record("t-1"))
+    FileThreadMap(config.paths.threads, SystemClock()).put(_record("t-1"))
     monkeypatch.setattr(
-        cli,
+        wiring,
         "load_credentials",
         lambda path: SlackCredentials(
             bot_token=SecretStr(FAKE_BOT_TOKEN), app_token=SecretStr(FAKE_APP_TOKEN)
@@ -1047,7 +1093,7 @@ class _RecordingSlack(RecordingSlack):
 
 def _use_slack(monkeypatch: pytest.MonkeyPatch) -> _RecordingSlack:
     slack = _RecordingSlack()
-    monkeypatch.setattr(cli, "_slack_adapter", lambda config: slack)
+    monkeypatch.setattr(wiring, "build_slack_adapter", lambda config, clock: slack)
     return slack
 
 
@@ -1202,7 +1248,7 @@ def test_sessions_fetches_links_only_for_the_sessions_shown_and_each_thread_once
     ]
     monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
     slack = _CountingSlack()
-    monkeypatch.setattr(cli, "_slack_adapter", lambda config: slack)
+    monkeypatch.setattr(wiring, "build_slack_adapter", lambda config, clock: slack)
 
     show = ",".join(summary.address for summary in summaries)
     result = runner.invoke(cli.app, [*_SESSIONS_FOR_REQUESTER, "--show", show])
@@ -1233,7 +1279,7 @@ def test_check_command_posts_through_the_thread_map(
 
 def test_forget_command_unties_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.tie(_record("t-1"))
     slack = _use_slack(monkeypatch)
 
@@ -1276,7 +1322,7 @@ def _drained(
 
 
 def _tie_gate_thread(config: PanConfig, **updates: object) -> None:
-    FileThreadMap(config.paths.threads, cli.SystemClock()).tie(
+    FileThreadMap(config.paths.threads, SystemClock()).tie(
         _record(_GATE_THREAD).model_copy(
             update={"channel": "C000TEST", "requester": "U000TEST", **updates}
         )
@@ -1321,87 +1367,26 @@ def test_done_command_wires_to_done_thread(
 
 
 @pytest.mark.parametrize(
-    "drained_text, drained_thread, item_args, drained_by, thread_requester, later_text",
+    "drained_text, drained_kwargs, item_args, later_text",
     [
-        ("<@U000BOT> done --discard", _GATE_THREAD, [], "U000TEST", "U000TEST", None),
-        (
-            "<@U000BOT> done --discard",
-            _GATE_THREAD,
-            ["--item", "Ev9"],
-            "U000TEST",
-            "U000TEST",
-            None,
-        ),
-        (
-            "<@U000BOT> done --discard",
-            "1700000000.000999",
-            ["--item", "Ev1"],
-            "U000TEST",
-            "U000TEST",
-            None,
-        ),
-        ("<@U000BOT> done", _GATE_THREAD, ["--item", "Ev1"], "U000TEST", "U000TEST", None),
-        (
-            "<@U000BOT> just close it, throw the changes away",
-            _GATE_THREAD,
-            ["--item", "Ev1"],
-            "U000TEST",
-            "U000TEST",
-            None,
-        ),
-        ("<@U000BOT> done discard", _GATE_THREAD, ["--item", "Ev1"], "U000TEST", "U000TEST", None),
-        (
-            "<@U000BOT> close pan-7 with --discard",
-            _GATE_THREAD,
-            ["--item", "Ev1"],
-            "U000TEST",
-            "U000TEST",
-            None,
-        ),
-        (
-            "<@U000BOT> done --discard",
-            _GATE_THREAD,
-            ["--item", "Ev1"],
-            "U000OTHER",
-            "U000TEST",
-            None,
-        ),
-        ("<@U000BOT> done --discard", _GATE_THREAD, ["--item", "Ev1"], "U000TEST", None, None),
-        (
-            "<@U000BOT> done --discard",
-            _GATE_THREAD,
-            ["--item", "Ev1"],
-            "U000TEST",
-            "U000TEST",
-            "<@U000BOT> wait, keep it",
-        ),
+        ("<@U000BOT> done --discard", {}, ["--item", "Ev9"], None),
+        ("<@U000BOT> done --discard", {"channel": "C000OTHER"}, ["--item", "Ev1"], None),
+        ("<@U000BOT> done --discard", {}, ["--item", "Ev1"], "<@U000BOT> wait, keep it"),
+        ("<@U000BOT> done", {}, ["--item", "Ev1"], None),
     ],
-    ids=[
-        "no-item",
-        "unknown-item",
-        "item-from-another-thread",
-        "plain-done",
-        "by-meaning",
-        "no-dashes",
-        "discard-inside-a-sentence",
-        "not-the-requester",
-        "thread-without-requester",
-        "not-the-newest",
-    ],
+    ids=["unknown-item", "other-channel", "not-the-newest", "plain-done"],
 )
 def test_done_command_refuses_discard_the_person_did_not_send(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     drained_text: str,
-    drained_thread: str,
+    drained_kwargs: dict[str, Any],
     item_args: list[str],
-    drained_by: str,
-    thread_requester: str | None,
     later_text: str | None,
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    _tie_gate_thread(config, requester=thread_requester)
-    _drained(config, drained_text, thread_ts=drained_thread, slack_user=drained_by)
+    _tie_gate_thread(config)
+    _drained(config, drained_text, **drained_kwargs)
     if later_text is not None:
         _drained(config, later_text, event_id="Ev2")
     terminal_host = _use_terminal_host(monkeypatch, FakeTerminalHost())
@@ -1418,7 +1403,7 @@ def test_done_command_refuses_discard_the_person_did_not_send(
     assert terminal_host.removed == []
     # An unusable item gets a one-line reply; a message that is not `done --discard` gets none.
     unusable = asks_to_discard(drained_text)
-    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if unusable else []
+    expected_posts = [UNUSABLE_ITEM_REPLY] if unusable else []
     assert [text for _channel, _thread, text in slack.posts] == expected_posts
 
 
@@ -1428,7 +1413,7 @@ def test_done_command_keeps_a_worktree_with_unsaved_work(
     config = _use_config(monkeypatch, tmp_path)
     worktree_path = config.orchestrator.worktree_base / "pan-task"
     worktree_path.mkdir(parents=True)
-    thread_map = FileThreadMap(config.paths.threads, cli.SystemClock())
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
     thread_map.tie(_record("t-1", worktree_path=worktree_path))
     terminal_host = _use_terminal_host(
         monkeypatch, _terminal_host_with(make_terminal("t12", name="pan-task"))
@@ -1442,7 +1427,7 @@ def test_done_command_keeps_a_worktree_with_unsaved_work(
         ),
         branches={tmp_path / "repo": BranchStatus()},
     )
-    monkeypatch.setattr(cli, "ShellGitWorktreeAdapter", lambda: git)
+    monkeypatch.setattr(wiring, "ShellGitWorktreeAdapter", lambda: git)
     slack = _use_slack(monkeypatch)
 
     result = runner.invoke(cli.app, ["done", "--thread", "t-1", "--channel", "C0TEST"])
@@ -1521,22 +1506,9 @@ def test_send_command_wires_to_send_to_session(
     "selector, drained_text, expected_sent",
     [
         ("pan-7", "<@U000BOT> to pan-7: add the tests", True),
-        ("PAN-7", "<@U000BOT> ask pan-7 to add the tests", True),
-        ("work / 1", "<@U000BOT> send to work / 1: add the tests", True),
-        ("pan-7", "<@U000BOT> to pan-77: add the tests", False),
-        ("pan-7", "<@U000BOT> to pan: add the tests", False),
         ("ocr", "<@U000BOT> to ocrr: rerun it", False),
-        ("pan-7", "<@U000BOT> the session from this morning: add the tests", False),
     ],
-    ids=[
-        "named",
-        "any-case",
-        "phrase",
-        "longer-name-typed",
-        "shorter-name-typed",
-        "typo",
-        "described-not-named",
-    ],
+    ids=["named", "typo"],
 )
 def test_send_command_sends_only_to_a_session_the_person_named(
     monkeypatch: pytest.MonkeyPatch,
@@ -1564,14 +1536,12 @@ def test_send_command_sends_only_to_a_session_the_person_named(
 @pytest.mark.parametrize(
     "drained_kwargs, extra_args",
     [
-        ({}, []),
         ({}, ["--item", "Ev9"]),
-        ({"thread_ts": "1700000000.000999"}, ["--item", "Ev1"]),
         ({"channel": "C000OTHER"}, ["--item", "Ev1"]),
         ({"slack_user": "U000OTHER"}, ["--item", "Ev1", "--requester", "U000TEST"]),
         ({"later_text": "<@U000BOT> never mind"}, ["--item", "Ev1"]),
     ],
-    ids=["no-item", "unknown-item", "other-thread", "other-channel", "other-sender", "not-newest"],
+    ids=["unknown-item", "other-channel", "other-sender", "not-newest"],
 )
 def test_send_command_to_a_session_refuses_without_the_persons_recorded_message(
     monkeypatch: pytest.MonkeyPatch,
@@ -1711,122 +1681,10 @@ def _store_question(
     )
 
 
-def _stored_question(config: PanConfig) -> PendingConfirmation | None:
-    return FilePendingConfirmations(confirmations_path(config.paths.threads)).get(
-        ThreadSource.SLACK, "1718000000.000200"
-    )
-
-
 def _reply(event_id: str, slack_user: str, raw_text: str = "yes") -> InboxItem:
     return _item(event_id).model_copy(
         update={"slack_user": slack_user, "raw_text": raw_text, "received_at": datetime.now(tz=UTC)}
     )
-
-
-@pytest.mark.parametrize(
-    "slack_user, requester, raw_text, expected_answer",
-    [
-        ("U1", "U1", "yes", "yes"),
-        ("U1", "U1", "<@U000BOT> the second one please", "the second one please"),
-        ("U1", "U1", "no wait, start something new", "no wait, start something new"),
-        ("U000OTHER", "U1", "yes", None),
-        ("U000OTHER", None, "<@U000BOT> 1", None),
-    ],
-    ids=[
-        "requester-yes",
-        "requester-by-meaning",
-        "requester-other-text",
-        "another-user",
-        "stored-without-requester",
-    ],
-)
-def test_inbox_drain_marks_the_question_answered_only_by_the_requester(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    slack_user: str,
-    requester: str | None,
-    raw_text: str,
-    expected_answer: str | None,
-) -> None:
-    config = _use_config(monkeypatch, tmp_path)
-    _store_question(config, asked_minutes_ago=1, requester=requester)
-    expected_answered = expected_answer is not None
-    FileInboxStore(config.paths.inbox).append(_reply("Ev1", slack_user, raw_text))
-
-    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
-
-    assert result.exit_code == 0
-    (entry,) = json.loads(result.stdout)
-    question = entry["open_question"]
-    assert question["selector"] == "pan docs"
-    assert question["task"] == "add the tests"
-    assert question["candidates"] == [{"number": 1, "label": "t3 (folder pan)", "address": "t3"}]
-    assert question["answered_by_requester"] is expected_answered
-    assert question["answer_text"] == expected_answer
-    stored = _stored_question(config)
-    assert stored is not None
-    assert (stored.answered_at is not None) is expected_answered
-    assert stored.answer_text == expected_answer
-
-
-def test_inbox_drain_shows_no_question_once_it_expired(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _use_config(monkeypatch, tmp_path)
-    _store_question(config, asked_minutes_ago=31)
-    FileInboxStore(config.paths.inbox).append(_reply("Ev1", "U1"))
-
-    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
-
-    (entry,) = json.loads(result.stdout)
-    assert entry["open_question"] is None
-
-
-def test_inbox_drain_keeps_the_answer_for_later_items_in_the_batch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _use_config(monkeypatch, tmp_path)
-    _store_question(config, asked_minutes_ago=1)
-    store = FileInboxStore(config.paths.inbox)
-    store.append(_reply("Ev1", "U1"))
-    store.append(_reply("Ev2", "U000OTHER"))
-
-    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
-
-    answers = [
-        (entry["open_question"]["answered_by_requester"], entry["open_question"]["answer_text"])
-        for entry in json.loads(result.stdout)
-    ]
-    assert answers == [(True, "yes"), (True, "yes")]
-
-
-def test_inbox_drain_keeps_the_latest_reply_from_the_requester(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _use_config(monkeypatch, tmp_path)
-    _store_question(config, asked_minutes_ago=1)
-    store = FileInboxStore(config.paths.inbox)
-    store.append(_reply("Ev1", "U1", "yes"))
-    store.append(_reply("Ev2", "U1", "no wait, not that one"))
-
-    runner.invoke(cli.app, ["inbox", "drain", "--json"])
-
-    stored = _stored_question(config)
-    assert stored is not None
-    assert stored.answer_text == "no wait, not that one"
-
-
-def test_inbox_drain_records_the_items_for_the_gates(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config = _use_config(monkeypatch, tmp_path)
-    FileInboxStore(config.paths.inbox).append(_reply("Ev1", "U1", "<@U000BOT> done --discard"))
-
-    runner.invoke(cli.app, ["inbox", "drain", "--json"])
-
-    recorded = FileDrainedLog(drained_log_path(config.paths.threads)).get("Ev1")
-    assert recorded is not None
-    assert recorded.raw_text == "<@U000BOT> done --discard"
 
 
 @pytest.mark.parametrize("mentioned", [True, False], ids=["mention", "untagged-reply"])
@@ -1844,36 +1702,34 @@ def test_inbox_drain_emits_whether_the_message_mentioned_pan(
 
 
 @pytest.mark.parametrize(
-    "contents",
-    [b"{not json", b"[1, 2]", b"\xff\xfe"],
-    ids=["not-json", "not-an-object", "not-text"],
+    "slack_user, expected_line",
+    [
+        ("U1", "  open question in this thread (answered by the requester)"),
+        ("U000OTHER", "  open question in this thread (not answered by the requester)"),
+    ],
+    ids=["requester", "someone-else"],
 )
-def test_inbox_drain_with_a_damaged_confirmations_file_still_emits_every_item(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+def test_inbox_drain_text_says_whether_the_open_question_was_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, slack_user: str, expected_line: str
 ) -> None:
     config = _use_config(monkeypatch, tmp_path)
-    confirmations_path(config.paths.threads).write_bytes(contents)
-    store = FileInboxStore(config.paths.inbox)
-    store.append(_item("Ev1").model_copy(update={"raw_text": "yes"}))
-    store.append(_item("Ev2"))
+    _store_question(config, asked_minutes_ago=1)
+    FileInboxStore(config.paths.inbox).append(_reply("Ev1", slack_user))
 
-    result = runner.invoke(cli.app, ["inbox", "drain", "--json"])
+    result = runner.invoke(cli.app, ["inbox", "drain"])
 
     assert result.exit_code == 0
-    emitted = json.loads(result.stdout)
-    assert sorted(entry["item"]["id"] for entry in emitted) == ["Ev1", "Ev2"]
-    assert all(entry["open_question"] is None for entry in emitted)
+    assert result.stdout.splitlines()[2:] == [expected_line]
 
 
 @pytest.mark.parametrize(
     "drained_kwargs, item_args, later_text",
     [
         ({}, [], None),
-        ({}, ["--item", "Ev9"], None),
         ({"slack_user": "U000OTHER"}, ["--item", "Ev1"], None),
         ({}, ["--item", "Ev1"], "<@U000BOT> never mind"),
     ],
-    ids=["no-item", "unknown-item", "other-sender", "not-newest"],
+    ids=["no-item", "other-sender", "not-newest"],
 )
 def test_propose_command_refuses_without_the_requesters_newest_message(
     monkeypatch: pytest.MonkeyPatch,
@@ -1895,7 +1751,7 @@ def test_propose_command_refuses_without_the_requesters_newest_message(
     assert result.exit_code != 0
     if item_args:
         assert isinstance(result.exception, NoExactMatchError)
-    expected_posts = [cli.UNUSABLE_ITEM_REPLY] if item_args else []
+    expected_posts = [UNUSABLE_ITEM_REPLY] if item_args else []
     assert [text for _channel, _thread, text in slack.posts] == expected_posts
 
 
@@ -2087,7 +1943,7 @@ def test_confirm_command_sends_only_on_the_requesters_own_answer(
         monkeypatch, _terminal_host_with(make_terminal("t3", cwd=Path("/tmp/pan")))
     )
     slack = _use_slack(monkeypatch)
-    monkeypatch.setattr(cli, "ShellPlannotatorInboxAdapter", FakeInboxDirectory)
+    monkeypatch.setattr(wiring, "ShellPlannotatorInboxAdapter", FakeInboxDirectory)
 
     result = runner.invoke(
         cli.app,

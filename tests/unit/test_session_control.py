@@ -22,12 +22,15 @@ from pan.backend.session_control import (
     forget_thread,
     from_slack_text,
     send_to_session,
+    stop_thread,
 )
 from pan.backend.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
 from pan.backend.status_message import answer_digest
 from pan.core.errors import (
+    CredentialsError,
     GitWorktreeError,
     NoExactMatchError,
+    NotPanSessionError,
     PanError,
     SessionBusyError,
     SlackPostError,
@@ -1712,3 +1715,88 @@ def test_check_posts_a_newer_answer_than_the_one_already_posted(tmp_path: Path) 
     stored = thread_map.get(_OLD_THREAD)
     assert stored is not None
     assert stored.last_answer_digest == answer_digest("Second answer.")
+
+
+def _stop(
+    thread_map: FileThreadMap, terminal_host: FakeTerminalHost, slack: RecordingSlack
+) -> None:
+    stop_thread(
+        thread_ts=_OLD_THREAD,
+        thread_map=thread_map,
+        terminal_host=terminal_host,
+        open_slack=lambda: slack,
+        clock=FixedClock(),
+    )
+
+
+@pytest.mark.parametrize("terminal_address", ["t7", ""], ids=["recorded", "never-launched"])
+def test_stop_thread_removes_the_terminal_and_marks_failed(
+    tmp_path: Path, terminal_address: str
+) -> None:
+    thread_map = _thread_map(tmp_path, _record(terminal_address=terminal_address))
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+
+    _stop(thread_map, terminal_host, RecordingSlack())
+
+    assert terminal_host.removed == ([terminal_address] if terminal_address else [])
+    stopped = thread_map.get(_OLD_THREAD)
+    assert stopped is not None
+    assert stopped.status is WorkerStatus.FAILED
+
+
+def test_stop_thread_edits_the_threads_status_message_to_stopped(tmp_path: Path) -> None:
+    thread_map = _thread_map(
+        tmp_path,
+        _record(status_message_ts="1700000000.000900", status_label="fix the bug"),
+    )
+    slack = RecordingSlack()
+
+    _stop(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+
+    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
+        ("1700000000.000900", "Stopped: fix the bug")
+    ]
+    assert slack.posts == []
+
+
+def test_stop_thread_still_stops_when_slack_cannot_be_reached(tmp_path: Path) -> None:
+    thread_map = _thread_map(tmp_path, _record())
+    terminal_host = _host(make_terminal("t7", name="pan-7"))
+
+    def no_credentials() -> RecordingSlack:
+        raise CredentialsError("no credentials")
+
+    stop_thread(
+        thread_ts=_OLD_THREAD,
+        thread_map=thread_map,
+        terminal_host=terminal_host,
+        open_slack=no_credentials,
+        clock=FixedClock(),
+    )
+
+    assert terminal_host.removed == ["t7"]
+    stopped = thread_map.get(_OLD_THREAD)
+    assert stopped is not None
+    assert stopped.status is WorkerStatus.FAILED
+
+
+def test_stop_thread_never_stops_a_session_pan_did_not_start(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(tmp_path / "threads.json", FixedClock())
+    thread_map.tie(_record(terminal_name="desk-api", terminal_address="t9", started_by_pan=False))
+    terminal_host = _host(make_terminal("t9", name="desk-api"))
+    slack = RecordingSlack()
+
+    with pytest.raises(NotPanSessionError):
+        _stop(thread_map, terminal_host, slack)
+
+    assert terminal_host.removed == []
+    kept = thread_map.get(_OLD_THREAD)
+    assert kept is not None
+    assert kept.tied is False
+    assert kept.status is WorkerStatus.IDLE
+    assert slack.status_updates == []
+
+
+def test_stop_thread_without_a_record_raises(tmp_path: Path) -> None:
+    with pytest.raises(ThreadNotFoundError):
+        _stop(_thread_map(tmp_path), _host(), RecordingSlack())
