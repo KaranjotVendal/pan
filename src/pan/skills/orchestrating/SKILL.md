@@ -66,7 +66,8 @@ You pick the repo and write a clear brief from `text`. Pass `--stream <name>` on
 gave the session a name ("--stream login", "call it login"). Pass `--thread-reply` when
 `item.is_thread_reply` is true: the brief then tells the session to read the whole Slack thread
 first with its own read-thread tool, so it has the earlier messages; never read or summarize the
-thread yourself. Exit 15: the start failed and pan said so in the thread.
+thread yourself. Exit 15: the start failed and pan said so in the thread. Exit 36: pan can't brief
+a session for this source yet; tell the person in the thread that nothing was started.
 
 **Follow-up to the tied session** (`tie` set, status `spawning`, `running`, `idle` or `blocked`):
 

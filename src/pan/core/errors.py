@@ -27,6 +27,11 @@ class ThreadNotFoundError(PanError): ...
 class SpawnError(PanError): ...
 
 
+# pan has no worker brief worded for the request's source yet (only Slack has one; the X brief
+# arrives with MOB-87). Raised before anything is created, so nothing is left behind.
+class BriefUnavailableError(PanError): ...
+
+
 # Any failure from the terminal host behind the TerminalHost seam. Callers outside the
 # adapters catch this; a host adapter may raise its own subclass for host-specific failures
 # (the hc adapter raises HcError) and raises the typed kinds below for the cases pan handles.

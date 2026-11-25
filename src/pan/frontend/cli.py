@@ -49,6 +49,7 @@ from pan.backend.sessions import (
 )
 from pan.backend.spawn import ClaudeLauncher, reopen_worker, spawn_worker
 from pan.core.errors import (
+    BriefUnavailableError,
     ConfigMissingError,
     CredentialsError,
     DiscardNotRequestedError,
@@ -75,7 +76,13 @@ from pan.core.errors import (
     UnsavedWorkError,
     XSourceRefusedError,
 )
-from pan.core.models import Conversation, SessionSummary, SlackCredentials, WorkerStatus
+from pan.core.models import (
+    Conversation,
+    RequestOrigin,
+    SessionSummary,
+    SlackCredentials,
+    WorkerStatus,
+)
 from pan.core.seams import Reporter, ThreadMap
 from pan.data.adapters.launchd import build_service_manager
 from pan.data.threadmap import conversation_for_id
@@ -137,6 +144,7 @@ _EXIT_CODES: dict[type[PanError], int] = {
     DiscardNotRequestedError: 33,
     UnansweredQuestionError: 34,
     XSourceRefusedError: 35,
+    BriefUnavailableError: 36,
 }
 
 
@@ -288,8 +296,14 @@ def spawn(
     terminal_host = wiring.terminal_host
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
+    # BriefUnavailableError (no brief for the request's source yet) is raised before anything
+    # is created or posted.
     spawn_worker(
-        conversation=Conversation.slack(thread, channel),
+        origin=RequestOrigin(
+            conversation=Conversation.slack(thread, channel),
+            from_thread_reply=thread_reply,
+            requester=requester,
+        ),
         task=task,
         repo=repo if repo is not None else Path.cwd(),
         base=config.orchestrator.worktree_base,
@@ -302,10 +316,8 @@ def spawn(
         reporter=reporter,
         clock=wiring.clock,
         id_gen=UuidGen(),
-        requester=requester,
         request_text=request_text,
         reply_in_slack=reply_in_slack,
-        from_thread_reply=thread_reply,
     )
 
 

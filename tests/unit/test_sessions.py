@@ -21,6 +21,7 @@ from pan.core.models import (
     AgentStatus,
     Conversation,
     ReplyMode,
+    RequestOrigin,
     SessionSummary,
     TerminalState,
     ThreadRecord,
@@ -277,12 +278,29 @@ def _transcript_asking(tmp_path: Path, ask: str) -> Path:
     [
         ("add the tests", "add the tests"),
         (
-            worker_brief("pan-a: fix the login page", "fix the\nlogin page", ReplyMode.ON_DEMAND),
+            worker_brief(
+                RequestOrigin(conversation=Conversation.slack("t-1", "C1")),
+                "pan-a: fix the login page",
+                "fix the\nlogin page",
+                ReplyMode.ON_DEMAND,
+            ),
+            "fix the login page",
+        ),
+        (
+            worker_brief(
+                RequestOrigin(
+                    conversation=Conversation.slack("t-1", "C1"),
+                    outside_context="OUTSIDE CONTEXT PLACEHOLDER",
+                ),
+                "pan-a: fix the login page",
+                "fix the login page",
+                ReplyMode.ON_DEMAND,
+            ),
             "fix the login page",
         ),
         ("x" * 100, "x" * 77 + "..."),
     ],
-    ids=["plain", "brief-cut-to-its-task", "truncated"],
+    ids=["plain", "brief-cut-to-its-task", "brief-with-outside-context", "truncated"],
 )
 def test_collect_sessions_shows_the_last_ask(tmp_path: Path, ask: str, expected: str) -> None:
     record = _record("t-1", "pan-a", "t5", "/tmp/worktree")

@@ -229,7 +229,7 @@ target not found, 21 target ambiguous, 22 terminal gone, 23 waiting on a prompt,
 taken, 25 not a pan session, 26 busy, 27 service, 28 no exact match (propose instead), 29 unsaved
 work, 30 git cleanup failed, 31 unsafe worktree, 32 private message failed, 33 `--discard` not typed
 by the person, 34 open question not answered by the requester, 35 a thread from X may only start new
-sessions.
+sessions, 36 pan has no brief for the request's source yet (nothing was started).
 
 ## What to say in Slack
 

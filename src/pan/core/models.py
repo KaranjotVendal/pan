@@ -51,6 +51,17 @@ class Conversation(BaseModel, frozen=True):
         return self.place
 
 
+class RequestOrigin(BaseModel, frozen=True):
+    # Where a request that starts a session came from, which the worker brief is worded for:
+    # the conversation, whether the request was a reply inside a thread there, who asked, and
+    # text from outside pan to show the session before its task. Outside context may come with
+    # a request from any source (an X link pasted in Slack, say); None when there is none.
+    conversation: Conversation
+    from_thread_reply: bool = False
+    requester: str | None = None
+    outside_context: str | None = None
+
+
 def _lift_flat_conversation(raw: Any, *, author_key: str | None = None) -> Any:
     # Files written before Conversation existed hold the identity flat: thread_ts, channel and
     # an optional source (and an InboxItem's sender as slack_user). They load into the new
