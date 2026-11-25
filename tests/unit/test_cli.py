@@ -21,6 +21,7 @@ import pan.frontend.wiring as wiring
 from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
 from pan.backend.directive import asks_to_discard
 from pan.core.errors import (
+    BriefUnavailableError,
     ConfigMissingError,
     CredentialsError,
     DiscardNotRequestedError,
@@ -58,6 +59,7 @@ from pan.core.models import (
     PanConfig,
     PendingConfirmation,
     ReplyMode,
+    RequestOrigin,
     SessionSummary,
     SlackCredentials,
     ThreadRecord,
@@ -400,16 +402,16 @@ def test_spawn_wires_to_spawn_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     )
 
     assert result.exit_code == 0
-    assert captured["requester"] == "U0TEST"
+    assert captured["origin"] == RequestOrigin(
+        conversation=Conversation.slack("t-1", "C1"), requester="U0TEST"
+    )
     assert captured["request_text"] == "build it, reply in slack"
     assert captured["reply_in_slack"] is False
-    assert captured["conversation"] == Conversation.slack("t-1", "C1")
     assert captured["task"] == "build it"
     assert captured["stream"] == "backend"
     assert captured["base"] == config.orchestrator.worktree_base
     assert captured["app_space"] == "sp42"
     assert isinstance(captured["terminal_host"], ShellHcAdapter)
-    assert captured["from_thread_reply"] is False
 
 
 @pytest.mark.parametrize(
@@ -440,7 +442,7 @@ def test_spawn_passes_thread_reply_flag(
     )
 
     assert result.exit_code == 0
-    assert captured["from_thread_reply"] is expected_from_thread_reply
+    assert captured["origin"].from_thread_reply is expected_from_thread_reply
 
 
 def test_watcher_builds_from_config_and_starts(
@@ -923,6 +925,7 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (DiscardNotRequestedError("x"), 33),
         (UnansweredQuestionError("x"), 34),
         (XSourceRefusedError("x"), 35),
+        (BriefUnavailableError("x"), 36),
         (PanError("x"), 1),
     ],
 )
