@@ -66,6 +66,14 @@ replacing the direct calls with serialisable events that the frontend delivers:
 
 The list only shrinks. A new entry needs a new decision record.
 
+Update 2026-11-25: the list is empty. Step 4 (typed events) replaced the seven imports with
+events the backend reports through a `Reporter` (decisions/0002-typed-events.md), so the
+boundary now holds without exceptions: `grep -rn "noqa: TID251" src` finds nothing. The step adds
+`events` to `core`, `text` to `utils` and `slack_reporter` to `frontend`, and moves
+`thread_permalinks` from `backend/sessions` to `frontend/slack_reporter`, `check_state` from
+`frontend/slack_render` to `backend/status_message`, and `status_label` from
+`frontend/slack_render` to `utils/text`.
+
 ## Options considered
 
 - Keep the flat package as it is. No cost now, but nothing stops new upward imports, and the

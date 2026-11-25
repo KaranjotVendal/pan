@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from pan.backend.status_message import post_answer, publish_status
 from pan.core.errors import ThreadNotFoundError
 from pan.core.models import Conversation, ReplyMode, StatusState, WorkerStatus
-from pan.core.seams import Clock, SlackAdapter, ThreadMap
+from pan.core.seams import Clock, Reporter, ThreadMap
 from pan.data.transcript import last_assistant_text
 from pan.utils.clock import SystemClock
 from pan.utils.logging import initialise_logger
@@ -26,7 +26,7 @@ class StopHookPayload(BaseModel, frozen=True):
 def stop_hook(
     conversation: Conversation,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
     *,
     stdin: TextIO = sys.stdin,
     session_name: str | None = None,
@@ -46,7 +46,7 @@ def stop_hook(
     thread_map.update_status(conversation, WorkerStatus.IDLE, session_name=record.terminal_name)
     if record.tied:
         publish_status(
-            slack=slack,
+            reporter=reporter,
             thread_map=thread_map,
             record=record,
             state=StatusState.FINISHED,
@@ -59,7 +59,7 @@ def stop_hook(
             else None
         )
         if answer:
-            post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
+            post_answer(reporter=reporter, thread_map=thread_map, record=record, answer=answer)
         else:
             logger.info(f"stop hook found no answer to post conversation={conversation.key}")
     logger.info(

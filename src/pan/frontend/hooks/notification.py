@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pan.backend.status_message import publish_status
 from pan.core.errors import ThreadNotFoundError
 from pan.core.models import Conversation, StatusState, WorkerStatus
-from pan.core.seams import Clock, SlackAdapter, ThreadMap
+from pan.core.seams import Clock, Reporter, ThreadMap
 from pan.utils.clock import SystemClock
 from pan.utils.logging import initialise_logger
 
@@ -42,7 +42,7 @@ def is_blocking_notification(payload: NotificationHookPayload) -> bool:
 def notification_hook(
     conversation: Conversation,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
     *,
     stdin: TextIO = sys.stdin,
     session_name: str | None = None,
@@ -67,7 +67,7 @@ def notification_hook(
     thread_map.update_status(conversation, WorkerStatus.BLOCKED, session_name=record.terminal_name)
     if record.tied:
         publish_status(
-            slack=slack,
+            reporter=reporter,
             thread_map=thread_map,
             record=record,
             state=StatusState.WAITING,

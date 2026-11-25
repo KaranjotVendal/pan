@@ -9,6 +9,21 @@ as it works.
 
 ### Changed
 
+- The backend no longer writes Slack wording or calls Slack posting code: it reports typed
+  events (`pan.core.events`) through a `Reporter` (`pan.core.seams`), and
+  `pan.frontend.slack_reporter.SlackReporter` renders each one into the same Slack text and
+  blocks as before and posts, edits or sends it privately. The status message, answers, screen
+  text, private details, the private sessions list, pan's question and every notice (busy,
+  waiting on a prompt, not sent, no session matches, couldn't act on that message, the `done`
+  replies and the rest) are events; notices are typed reasons, not text. The seven
+  `# noqa: TID251` backend imports of `frontend` are gone, so the layer boundary holds without
+  exceptions. `check_state` moves from `pan.frontend.slack_render` to
+  `pan.backend.status_message`, `status_label` to the new `pan.utils.text`, and
+  `thread_permalinks` from `pan.backend.sessions` to `pan.frontend.slack_reporter`. The design is recorded in `decisions/0002-typed-events.md`, and
+  `decisions/0001-layers.md` notes the empty allow-list. Slack posts, CLI options and exit codes
+  do not change; the warning when a status message cannot be edited is now logged under
+  `pan.frontend.slack_reporter` instead of `pan.backend.status_message`, and a new status that
+  comes back without a message id to store is logged as a warning.
 - A conversation pan acts in is now one value, `Conversation` in `pan.core.models` (`source`,
   `id`: the Slack thread ts, `place`: the Slack channel). `InboxItem`, `ThreadRecord` and
   `PendingConfirmation` store it in place of their `thread_ts`, `channel` and `source` fields,

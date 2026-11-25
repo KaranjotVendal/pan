@@ -5,18 +5,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from slack_fakes import RecordingSlack
+from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.backend.sessions import (
     collect_sessions,
     send_sessions_privately,
     session_drift,
-    thread_permalinks,
     worker_status_for,
 )
 from pan.backend.spawn import worker_brief
 from pan.core.errors import PrivateMessageError, SlackPostError
+from pan.core.events import SessionsListed
 from pan.core.models import (
     AgentStatus,
     Conversation,
@@ -359,62 +359,34 @@ def test_collect_sessions_leaves_the_thread_channel_and_label_blank_without_a_re
     assert summary.updated_at is None
 
 
-class _CountingSlack(RecordingSlack):
-    def __init__(self) -> None:
-        super().__init__()
-        self.permalink_requests: list[tuple[str, str]] = []
-
-    def permalink(self, channel: str, ts: str) -> str | None:
-        self.permalink_requests.append((channel, ts))
-        return super().permalink(channel, ts)
+_LISTED_SESSIONS = [
+    SessionSummary(address="t1", cwd=Path("/tmp/x"), agent_status=AgentStatus.IDLE),
+]
 
 
-def _summary_in(address: str, thread_ts: str | None) -> SessionSummary:
-    return SessionSummary(
-        address=address,
-        cwd=Path("/tmp/x"),
-        agent_status=AgentStatus.IDLE,
-        is_pan_owned=True,
-        thread_ts=thread_ts,
-        thread_channel="C000TEST" if thread_ts is not None else None,
-    )
-
-
-def test_thread_permalinks_asks_once_per_thread_and_drops_threads_without_a_link() -> None:
-    slack = _CountingSlack()
-    slack.permalinks["1700000000.000200"] = "https://example.slack.com/p2"
-    sessions = [
-        _summary_in("t1", "1700000000.000200"),
-        _summary_in("t2", "1700000000.000200"),
-        _summary_in("t3", None),
-        _summary_in("t4", "1700000000.000300"),
-    ]
-
-    permalinks = thread_permalinks(slack, sessions)
-
-    assert permalinks == {"1700000000.000200": "https://example.slack.com/p2"}
-    assert slack.permalink_requests == [
-        ("C000TEST", "1700000000.000200"),
-        ("C000TEST", "1700000000.000300"),
-    ]
-
-
-def _send_privately(slack: RecordingSlack) -> None:
+def _send_privately(reporter: RecordingReporter) -> None:
     send_sessions_privately(
-        slack,
+        reporter,
         conversation=Conversation.slack("1700000000.000100", "C000TEST"),
         requester="U000TEST",
-        text="*Your sessions*",
-        session_count=1,
+        sessions=_LISTED_SESSIONS,
+        any_running=True,
     )
 
 
-def test_send_sessions_privately_posts_nothing_publicly_when_it_fails() -> None:
-    slack = RecordingSlack()
-    slack.ephemeral_error = SlackPostError("not delivered")
+def test_send_sessions_privately_reports_the_list_for_the_requester() -> None:
+    reporter = RecordingReporter()
+
+    _send_privately(reporter)
+
+    assert reporter.events() == [
+        SessionsListed(requester="U000TEST", sessions=_LISTED_SESSIONS, any_running=True)
+    ]
+
+
+def test_send_sessions_privately_raises_when_it_fails() -> None:
+    reporter = RecordingReporter()
+    reporter.error = SlackPostError("not delivered")
 
     with pytest.raises(PrivateMessageError):
-        _send_privately(slack)
-
-    assert slack.posts == []
-    assert slack.ephemerals == []
+        _send_privately(reporter)

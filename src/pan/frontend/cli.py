@@ -45,7 +45,6 @@ from pan.backend.session_control import (
 from pan.backend.sessions import (
     collect_sessions,
     send_sessions_privately,
-    thread_permalinks,
     worker_status_for,
 )
 from pan.backend.spawn import ClaudeLauncher, reopen_worker, spawn_worker
@@ -77,7 +76,7 @@ from pan.core.errors import (
     XSourceRefusedError,
 )
 from pan.core.models import Conversation, SessionSummary, SlackCredentials, WorkerStatus
-from pan.core.seams import SlackAdapter, ThreadMap
+from pan.core.seams import Reporter, ThreadMap
 from pan.data.adapters.launchd import build_service_manager
 from pan.data.threadmap import conversation_for_id
 from pan.frontend.gateway.slack_post import slack_post
@@ -85,7 +84,7 @@ from pan.frontend.hooks.inbox_link import inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.session_start import session_start_hook
 from pan.frontend.hooks.stop import stop_hook
-from pan.frontend.slack_render import listed_sessions, render_sessions_for_slack, sessions_to_show
+from pan.frontend.slack_render import listed_sessions, sessions_to_show
 from pan.frontend.watcher import WatchdogInboxWatcher
 from pan.frontend.wiring import Wiring, load_wiring
 from pan.utils.clock import UuidGen
@@ -285,7 +284,7 @@ def spawn(
     Slack thread first with its own Slack read-thread tool."""
     wiring = load_wiring()
     config = wiring.config
-    slack = wiring.slack
+    reporter = wiring.reporter
     terminal_host = wiring.terminal_host
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
@@ -300,7 +299,7 @@ def spawn(
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
         thread_map=wiring.thread_map,
-        slack=slack,
+        reporter=reporter,
         clock=wiring.clock,
         id_gen=UuidGen(),
         requester=requester,
@@ -332,7 +331,7 @@ def reopen(
     record = wiring.thread_map.get(conversation_for_id(wiring.thread_map, thread))
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    slack = wiring.slack
+    reporter = wiring.reporter
     terminal_host = wiring.terminal_host
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
     # only maps the exit code.
@@ -343,7 +342,7 @@ def reopen(
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
         thread_map=wiring.thread_map,
-        slack=slack,
+        reporter=reporter,
         clock=wiring.clock,
         reply_in_slack=reply_in_slack,
     )
@@ -391,7 +390,7 @@ def _dispatch_completion_hook(
     hook_fn: Callable[..., None],
     raw_stdin: str,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
 ) -> None:
     # Resolve the worker's thread from its cwd via the thread map (INV-7), then hand
     # the already-read stdin to the existing hook function. If no record matches the
@@ -407,7 +406,7 @@ def _dispatch_completion_hook(
     hook_fn(
         record.conversation,
         thread_map,
-        slack,
+        reporter,
         stdin=io.StringIO(raw_stdin),
         session_name=record.terminal_name,
     )
@@ -417,7 +416,7 @@ def _run_completion_hook(hook_fn: Callable[..., None]) -> None:
     raw_stdin = sys.stdin.read()
     wiring = load_wiring()
     thread_map = wiring.thread_map
-    _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, wiring.slack)
+    _dispatch_completion_hook(hook_fn, raw_stdin, thread_map, wiring.reporter)
 
 
 @hook_app.command("session-start")
@@ -564,20 +563,13 @@ def _send_sessions_privately(
     requester: str,
     addresses: list[str],
 ) -> None:
-    slack = wiring.slack
     orchestrator_terminal = wiring.config.orchestrator.terminal
-    selected = sessions_to_show(summaries, orchestrator_terminal, addresses)
-    text = render_sessions_for_slack(
-        selected,
-        thread_permalinks(slack, selected),
-        any_running=bool(listed_sessions(summaries, orchestrator_terminal)),
-    )
     send_sessions_privately(
-        slack,
+        wiring.reporter,
         conversation=conversation,
         requester=requester,
-        text=text,
-        session_count=len(selected),
+        sessions=sessions_to_show(summaries, orchestrator_terminal, addresses),
+        any_running=bool(listed_sessions(summaries, orchestrator_terminal)),
     )
 
 
@@ -595,7 +587,7 @@ def check(
         thread_map=wiring.thread_map,
         terminal_host=wiring.terminal_host,
         inbox_directory=wiring.inbox_directory,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
         clock=wiring.clock,
         screen_lines=READ_RECENT_LINES,
     )
@@ -611,7 +603,7 @@ def forget(
     forget_thread(
         conversation=Conversation.slack(thread, channel),
         thread_map=wiring.thread_map,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
     )
 
 
@@ -647,7 +639,7 @@ def done(
             newest_drained_item(wiring.drained_log, item, conversation),
             wiring.thread_map.get(conversation),
             conversation=conversation,
-            reply=wiring.thread_reply(conversation),
+            open_reporter=lambda: wiring.reporter,
         )
     done_thread(
         conversation=conversation,
@@ -657,7 +649,7 @@ def done(
         thread_map=wiring.thread_map,
         terminal_host=wiring.terminal_host,
         git=wiring.git,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
         clock=wiring.clock,
     )
 
@@ -702,7 +694,7 @@ def send(
             text=task,
             terminal_host=wiring.terminal_host,
             thread_map=wiring.thread_map,
-            slack=wiring.slack,
+            reporter=wiring.reporter,
             clock=wiring.clock,
             reply_in_slack=reply_in_slack,
         )
@@ -714,7 +706,7 @@ def send(
         target=to,
         requester=requester,
         conversation=conversation,
-        reply=wiring.thread_reply(conversation),
+        open_reporter=lambda: wiring.reporter,
     )
     send_to_session(
         conversation=conversation,
@@ -725,7 +717,7 @@ def send(
         terminal_host=wiring.terminal_host,
         thread_map=wiring.thread_map,
         inbox_directory=wiring.inbox_directory,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
         clock=wiring.clock,
     )
 
@@ -764,7 +756,7 @@ def propose(
         newest_drained_item(wiring.drained_log, item, conversation),
         requester=requester,
         conversation=conversation,
-        reply=wiring.thread_reply(conversation),
+        open_reporter=lambda: wiring.reporter,
     )
     propose_sessions(
         conversation=conversation,
@@ -775,7 +767,7 @@ def propose(
         candidate_addresses=candidate,
         terminal_host=wiring.terminal_host,
         confirmations=wiring.confirmations,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
         clock=wiring.clock,
     )
 
@@ -805,7 +797,7 @@ def confirm(
         cancel_confirmation(
             conversation=Conversation.slack(thread, channel),
             confirmations=wiring.confirmations,
-            slack=wiring.slack,
+            reporter=wiring.reporter,
         )
         return
     confirm_session(
@@ -815,7 +807,7 @@ def confirm(
         thread_map=wiring.thread_map,
         inbox_directory=wiring.inbox_directory,
         confirmations=wiring.confirmations,
-        slack=wiring.slack,
+        reporter=wiring.reporter,
         clock=wiring.clock,
     )
 
@@ -847,7 +839,7 @@ def relay(
         target=target,
         requester=None,
         conversation=conversation,
-        reply=wiring.thread_reply(conversation),
+        open_reporter=lambda: wiring.reporter,
     )
     terminal_host = wiring.terminal_host
     resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
@@ -889,7 +881,7 @@ def stop(thread: str = typer.Option(..., "--thread")) -> None:
         conversation=conversation_for_id(wiring.thread_map, thread),
         thread_map=wiring.thread_map,
         terminal_host=wiring.terminal_host,
-        open_slack=lambda: wiring.slack,
+        open_reporter=lambda: wiring.reporter,
         clock=wiring.clock,
     )
     typer.echo(f"stopped {thread}")

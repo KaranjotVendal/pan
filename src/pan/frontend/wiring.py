@@ -3,9 +3,15 @@ from __future__ import annotations
 from functools import cached_property
 
 from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
-from pan.backend.gates import ThreadReply
-from pan.core.models import Conversation, PanConfig
-from pan.core.seams import Clock, GitWorktreeAdapter, InboxDirectory, SlackAdapter, TerminalHost
+from pan.core.models import PanConfig
+from pan.core.seams import (
+    Clock,
+    GitWorktreeAdapter,
+    InboxDirectory,
+    Reporter,
+    SlackAdapter,
+    TerminalHost,
+)
 from pan.data.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.data.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter
 from pan.data.adapters.terminal_host import build_terminal_host
@@ -13,7 +19,7 @@ from pan.data.drained import FileDrainedLog, drained_log_path
 from pan.data.inbox import FileInboxStore
 from pan.data.threadmap import FileThreadMap
 from pan.frontend.gateway.app import BoltSlackAdapter
-from pan.frontend.gateway.slack_post import slack_post
+from pan.frontend.slack_reporter import SlackReporter
 from pan.utils.clock import SystemClock
 from pan.utils.config import load_config
 from pan.utils.credentials import load_credentials
@@ -50,6 +56,11 @@ class Wiring:
         return build_slack_adapter(self.config, self.clock)
 
     @cached_property
+    def reporter(self) -> Reporter:
+        # What the backend reports, shown in Slack; built (with the Slack adapter) on first use.
+        return SlackReporter(self.slack)
+
+    @cached_property
     def inbox_store(self) -> FileInboxStore:
         return FileInboxStore(self.config.paths.inbox)
 
@@ -72,14 +83,6 @@ class Wiring:
     def gateway_slack_adapter(self) -> SlackAdapter:
         # Only the gateway's adapter reads the thread map (to forward follow-ups in tied threads).
         return build_slack_adapter(self.config, self.clock, thread_map=self.thread_map)
-
-    def thread_reply(self, conversation: Conversation) -> ThreadReply:
-        # Posts one line in the thread through the one egress path (INV-4); the Slack adapter
-        # is built only when a line is posted.
-        def post_line(text: str) -> None:
-            slack_post(self.slack, conversation, text)
-
-        return post_line
 
 
 def load_wiring() -> Wiring:

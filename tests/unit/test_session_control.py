@@ -8,13 +8,11 @@ from pathlib import Path
 import pytest
 from git_worktree_fakes import FakeGitWorktree
 from inbox_fakes import FakeInboxDirectory
-from slack_fakes import RecordingSlack
+from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.backend.interface import INCOMPLETE_READ_NOTICE
 from pan.backend.session_control import (
-    NO_SESSION_REPLY,
-    UNTIED_THREAD_REPLY,
     check_thread,
     clean_screen_text,
     done_thread,
@@ -24,7 +22,7 @@ from pan.backend.session_control import (
     send_to_session,
     stop_thread,
 )
-from pan.backend.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
+from pan.backend.spawn import RELAYED_FOLLOW_UP_SENTENCE
 from pan.backend.status_message import answer_digest
 from pan.core.errors import (
     CredentialsError,
@@ -33,12 +31,27 @@ from pan.core.errors import (
     NotPanSessionError,
     PanError,
     SessionBusyError,
-    SlackPostError,
     TargetBlockedError,
     TerminalGoneError,
     ThreadNotFoundError,
     UnsafeWorktreeError,
     UnsavedWorkError,
+)
+from pan.core.events import (
+    AnswerReady,
+    CleanupFailed,
+    Event,
+    NotDelivered,
+    NotDeliveredReason,
+    PrivateDetails,
+    ScreenCaptured,
+    SessionClosed,
+    SessionNotice,
+    SessionNoticeReason,
+    StatusChanged,
+    ThreadNotice,
+    ThreadNoticeReason,
+    WorkKept,
 )
 from pan.core.models import (
     AgentStatus,
@@ -46,6 +59,7 @@ from pan.core.models import (
     Conversation,
     InboxThread,
     ReplyMode,
+    StatusState,
     TerminalRead,
     ThreadRecord,
     WorkerStatus,
@@ -53,13 +67,22 @@ from pan.core.models import (
 )
 from pan.data.threadmap import FileThreadMap
 from pan.frontend.hooks.stop import stop_hook
-from pan.frontend.slack_format import to_slack_mrkdwn
 
 _FIXED_NOW = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
 _OLD_THREAD = "1700000000.000100"
 _NEW_THREAD = "1700000000.000200"
 _OLD_CONVERSATION = Conversation.slack(_OLD_THREAD, "C0TEST")
 _NEW_CONVERSATION = Conversation.slack(_NEW_THREAD, "C0TEST")
+_NOT_TIED = ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED)
+
+
+def _line_events(reporter: RecordingReporter) -> list[Event]:
+    # What was reported besides the status and the private details: answers and notices.
+    return [
+        event
+        for event in reporter.events()
+        if not isinstance(event, StatusChanged | PrivateDetails)
+    ]
 
 
 class FixedClock:
@@ -106,7 +129,7 @@ def _host(*terminals: object) -> FakeTerminalHost:
 def _send(
     terminal_host: FakeTerminalHost,
     thread_map: FileThreadMap,
-    slack: RecordingSlack,
+    reporter: RecordingReporter,
     selector: str = "pan-7",
     *,
     reply_in_slack: bool = False,
@@ -121,31 +144,24 @@ def _send(
         terminal_host=terminal_host,
         thread_map=thread_map,
         inbox_directory=inbox_directory if inbox_directory is not None else FakeInboxDirectory(),
-        slack=slack,
+        reporter=reporter,
         clock=FixedClock(),
     )
 
 
 @pytest.mark.parametrize(
-    "reply_in_slack, inbox_url, expected_inbox_line",
-    [
-        (False, None, 'Inbox thread: "pan-7: fix the login page"'),
-        (
-            True,
-            "http://localhost:19441/#thread=abc",
-            "Inbox thread: <http://localhost:19441/#thread=abc|pan-7: fix the login page>",
-        ),
-    ],
+    "reply_in_slack, inbox_url",
+    [(False, None), (True, "http://localhost:19441/#thread=abc")],
     ids=["inbox-name", "inbox-link-and-slack-replies"],
 )
-def test_send_to_session_sends_ties_and_posts_a_status(
-    tmp_path: Path, reply_in_slack: bool, inbox_url: str | None, expected_inbox_line: str
+def test_send_to_session_sends_ties_and_reports_a_status(
+    tmp_path: Path, reply_in_slack: bool, inbox_url: str | None
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(inbox_thread_url=inbox_url))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _send(terminal_host, thread_map, slack, reply_in_slack=reply_in_slack)
+    _send(terminal_host, thread_map, reporter, reply_in_slack=reply_in_slack)
 
     assert terminal_host.sent == [
         (
@@ -166,22 +182,34 @@ def test_send_to_session_sends_ties_and_posts_a_status(
     old = thread_map.get(_OLD_CONVERSATION)
     assert old is not None
     assert old.tied is False
-    # One status message in the new thread, nothing else in it; the Inbox link (on this
-    # machine) and the terminal go only to the requester.
-    assert slack.posts == []
-    (status_post,) = slack.status_posts
-    assert (status_post.thread_ts, status_post.text) == (_NEW_THREAD, "Working: add the tests")
-    assert "localhost" not in str(status_post.blocks)
+    # One status in the new thread, nothing else in it; the Inbox link (on this machine) and
+    # the terminal go only to the requester.
+    assert reporter.reports == [
+        (
+            _NEW_CONVERSATION,
+            StatusChanged(
+                state=StatusState.WORKING,
+                session_name="pan-7",
+                label="add the tests",
+                task_started_at=_FIXED_NOW,
+                updated_at=_FIXED_NOW,
+                replies_in_thread=reply_in_slack,
+            ),
+        ),
+        (
+            _NEW_CONVERSATION,
+            PrivateDetails(
+                requester="U0TEST",
+                session_name="pan-7",
+                terminal_address="t7",
+                inbox_thread_name="pan-7: fix the login page",
+                inbox_thread_url=inbox_url,
+                inbox_thread_known=True,
+            ),
+        ),
+    ]
     assert tied.status_message_ts == "status-1"
     assert tied.status_label == "add the tests"
-    assert slack.ephemerals == [
-        (
-            "C0TEST",
-            _NEW_THREAD,
-            "U0TEST",
-            f"Details for pan-7 (only visible to you)\n{expected_inbox_line}\nTerminal: t7",
-        )
-    ]
 
 
 def test_send_to_a_session_from_another_thread_never_edits_that_threads_status(
@@ -189,38 +217,42 @@ def test_send_to_a_session_from_another_thread_never_edits_that_threads_status(
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(status_message_ts="1700000000.000900"))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    tied = _send(terminal_host, thread_map, slack)
+    tied = _send(terminal_host, thread_map, reporter)
 
-    assert slack.status_updates == []
-    assert [post.thread_ts for post in slack.status_posts] == [_NEW_THREAD]
+    # A new status in the new thread: the old thread's message is never named.
+    assert [
+        (conversation, event.status_message_id)
+        for conversation, event in reporter.reports
+        if isinstance(event, StatusChanged)
+    ] == [(_NEW_CONVERSATION, None)]
     assert tied.status_message_ts == "status-1"
 
 
 @pytest.mark.parametrize(
-    "selector, terminals, records, expected_error, expected_reply",
+    "selector, terminals, records, expected_error, expected_event",
     [
         (
             "pan-7",
             [make_terminal("t7", name="pan-7", agent_status=AgentStatus.WORKING)],
             [_record()],
             SessionBusyError,
-            "pan-7 is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="pan-7"),
         ),
         (
             "desk-api",
             [make_terminal("t9", name="desk-api", agent_status=AgentStatus.WORKING)],
             [],
             SessionBusyError,
-            "desk-api is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="desk-api"),
         ),
         (
             "desk-api",
             [make_terminal("t9", name="desk-api", agent_status=AgentStatus.NONE, turn=4)],
             [],
             SessionBusyError,
-            "desk-api is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="desk-api"),
         ),
         (
             "desk-api",
@@ -231,28 +263,28 @@ def test_send_to_a_session_from_another_thread_never_edits_that_threads_status(
             ],
             [],
             SessionBusyError,
-            "desk-api is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="desk-api"),
         ),
         (
             "desk-api",
             [make_terminal("t9", name="desk-api", agent=None, agent_status=AgentStatus.NONE)],
             [],
             SessionBusyError,
-            "desk-api is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="desk-api"),
         ),
         (
             "desk-api",
             [make_terminal("t9", name="desk-api", agent_status=AgentStatus.UNKNOWN)],
             [],
             SessionBusyError,
-            "desk-api is busy; try again, or @pan check",
+            NotDelivered(reason=NotDeliveredReason.BUSY, session_name="desk-api"),
         ),
         (
             "desk-api",
             [make_terminal("t9", name="desk-api", agent_status=AgentStatus.BLOCKED)],
             [],
             TargetBlockedError,
-            "desk-api is waiting on a prompt at the terminal; nothing was sent",
+            NotDelivered(reason=NotDeliveredReason.WAITING_ON_PROMPT, session_name="desk-api"),
         ),
     ],
     ids=[
@@ -271,18 +303,18 @@ def test_send_to_session_refuses_and_sends_nothing(
     terminals: list[object],
     records: list[ThreadRecord],
     expected_error: type[PanError],
-    expected_reply: str,
+    expected_event: NotDelivered,
 ) -> None:
     thread_map = _thread_map(tmp_path, *records)
     terminal_host = _host(*terminals)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(expected_error):
-        _send(terminal_host, thread_map, slack, selector)
+        _send(terminal_host, thread_map, reporter, selector)
 
     assert terminal_host.sent == []
     assert thread_map.get(_NEW_CONVERSATION) is None
-    assert slack.texts() == [expected_reply]
+    assert reporter.events() == [expected_event]
 
 
 @pytest.mark.parametrize(
@@ -297,9 +329,9 @@ def test_send_to_a_brand_new_claude_session_with_no_status_types_the_task(
     terminal_host = _host(
         make_terminal("t9", name="desk-api", agent=agent, agent_status=AgentStatus.NONE, turn=turn)
     )
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _send(terminal_host, thread_map, slack, "desk-api")
+    _send(terminal_host, thread_map, reporter, "desk-api")
 
     assert [address for address, _ in terminal_host.sent] == ["t9"]
 
@@ -308,9 +340,9 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     thread_map = _thread_map(tmp_path)
     desk_folder = Path("/tmp/desk/api")
     terminal_host = _host(make_terminal("t9", name="desk-api", cwd=desk_folder))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _send(terminal_host, thread_map, slack, "desk-api")
+    _send(terminal_host, thread_map, reporter, "desk-api")
 
     assert terminal_host.sent == [
         (
@@ -333,10 +365,12 @@ def test_send_to_a_desk_session_ties_it_with_a_from_slack_line(tmp_path: Path) -
     assert tied.terminal_address == "t9"
     assert tied.worktree_path == desk_folder
     assert tied.inbox_thread_name == "desk-api: add the tests"
-    assert slack.texts() == []
-    assert slack.status_texts() == ["Working: add the tests"]
-    assert slack.ephemerals[0][3].split("\n")[1] == (
-        'Inbox thread: its existing one, or "desk-api: add the tests"'
+    assert _line_events(reporter) == []
+    assert reporter.states() == [StatusState.WORKING]
+    ((details),) = reporter.of_type(PrivateDetails)
+    assert (details.inbox_thread_name, details.inbox_thread_known) == (
+        "desk-api: add the tests",
+        False,
     )
 
 
@@ -361,7 +395,7 @@ def test_send_to_a_session_whose_record_has_no_thread_name_uses_the_shared_known
     thread_map = _thread_map(tmp_path, earlier)
     terminal_host = _host(make_terminal("t9", name="desk-api"))
 
-    _send(terminal_host, thread_map, RecordingSlack(), "desk-api")
+    _send(terminal_host, thread_map, RecordingReporter(), "desk-api")
 
     assert terminal_host.sent == [
         (
@@ -398,9 +432,9 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
             )
         }
     )
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _send(terminal_host, thread_map, slack, "desk-api", inbox_directory=inbox_directory)
+    _send(terminal_host, thread_map, reporter, "desk-api", inbox_directory=inbox_directory)
 
     assert terminal_host.sent == [
         ("t9", from_slack_text("desk-api: fix the build", "add the tests", ReplyMode.ON_DEMAND))
@@ -412,9 +446,12 @@ def test_send_to_a_desk_session_again_keeps_its_inbox_thread_and_shows_the_found
     old = thread_map.get(_OLD_CONVERSATION)
     assert old is not None
     assert old.tied is False
-    assert slack.texts() == []
-    assert slack.ephemerals[0][3].split("\n")[1] == (
-        "Inbox thread: <https://inbox.example/threads/thr_9|desk-api: fix the build>"
+    assert _line_events(reporter) == []
+    ((details),) = reporter.of_type(PrivateDetails)
+    assert (details.inbox_thread_name, details.inbox_thread_url, details.inbox_thread_known) == (
+        "desk-api: fix the build",
+        "https://inbox.example/threads/thr_9",
+        True,
     )
 
 
@@ -478,7 +515,7 @@ def test_send_joins_a_session_record_only_to_its_own_terminal(
     thread_map = _thread_map(tmp_path, earlier)
     terminal_host = _host(terminal)
 
-    _send(terminal_host, thread_map, RecordingSlack(), "desk-test")
+    _send(terminal_host, thread_map, RecordingReporter(), "desk-test")
 
     assert terminal_host.sent == [
         (
@@ -501,37 +538,39 @@ def test_send_to_a_blocked_session_types_nothing_and_ties_nothing(tmp_path: Path
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     terminal_host.errors["send"] = TargetBlockedError("blocked")
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(TargetBlockedError):
-        _send(terminal_host, thread_map, slack)
+        _send(terminal_host, thread_map, reporter)
 
     assert thread_map.get(_NEW_CONVERSATION) is None
-    assert slack.texts() == ["pan-7 is waiting on a prompt at the terminal; nothing was sent"]
+    assert reporter.events() == [
+        NotDelivered(reason=NotDeliveredReason.WAITING_ON_PROMPT, session_name="pan-7")
+    ]
 
 
 @pytest.mark.parametrize(
-    "records, expected_reply, expect_untied",
+    "records, expected_event, expect_untied",
     [
         (
             [_record()],
-            "untied this thread from pan-7; the session was not stopped",
+            SessionNotice(reason=SessionNoticeReason.THREAD_UNTIED, session_name="pan-7"),
             True,
         ),
-        ([_record(tied=False)], UNTIED_THREAD_REPLY, True),
-        ([], UNTIED_THREAD_REPLY, False),
+        ([_record(tied=False)], _NOT_TIED, True),
+        ([], _NOT_TIED, False),
     ],
     ids=["tied", "already-untied", "no-record"],
 )
 def test_forget_thread(
-    tmp_path: Path, records: list[ThreadRecord], expected_reply: str, expect_untied: bool
+    tmp_path: Path, records: list[ThreadRecord], expected_event: Event, expect_untied: bool
 ) -> None:
     thread_map = _thread_map(tmp_path, *records)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    forget_thread(conversation=_OLD_CONVERSATION, thread_map=thread_map, slack=slack)
+    forget_thread(conversation=_OLD_CONVERSATION, thread_map=thread_map, reporter=reporter)
 
-    assert slack.posts == [("C0TEST", _OLD_THREAD, expected_reply)]
+    assert reporter.reports == [(_OLD_CONVERSATION, expected_event)]
     record = thread_map.get(_OLD_CONVERSATION)
     assert (record is not None and record.tied is False) is expect_untied
 
@@ -549,7 +588,7 @@ def _transcript_answering(tmp_path: Path, answer: str) -> Path:
 def _check(
     thread_map: FileThreadMap,
     terminal_host: FakeTerminalHost,
-    slack: RecordingSlack,
+    reporter: RecordingReporter,
     inbox_directory: FakeInboxDirectory | None = None,
 ) -> None:
     check_thread(
@@ -557,7 +596,7 @@ def _check(
         thread_map=thread_map,
         terminal_host=terminal_host,
         inbox_directory=inbox_directory if inbox_directory is not None else FakeInboxDirectory(),
-        slack=slack,
+        reporter=reporter,
         clock=FixedClock(),
         screen_lines=50,
     )
@@ -565,34 +604,34 @@ def _check(
 
 @pytest.mark.parametrize(
     "live_terminal_name, expected_state",
-    [("pan-7", "Finished"), ("pan-8", "Stopped")],
+    [("pan-7", StatusState.FINISHED), ("pan-8", StatusState.STOPPED)],
     ids=["same-terminal", "address-reused-by-another-name"],
 )
 def test_check_finds_the_session_terminal_by_address_only_when_names_agree(
-    tmp_path: Path, live_terminal_name: str, expected_state: str
+    tmp_path: Path, live_terminal_name: str, expected_state: StatusState
 ) -> None:
     thread_map = _thread_map(
         tmp_path, _record(transcript_path=_transcript_answering(tmp_path, "Done."))
     )
     terminal_host = _host(make_terminal("t7", name=live_terminal_name))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, reporter)
 
-    assert slack.status_texts() == [expected_state]
+    assert reporter.states() == [expected_state]
 
 
 @pytest.mark.parametrize(
     "agent_status, expected_state",
     [
-        (AgentStatus.IDLE, "Finished: fix the login page"),
-        (AgentStatus.WORKING, "Working: fix the login page"),
-        (AgentStatus.BLOCKED, "Waiting for you: fix the login page"),
+        (AgentStatus.IDLE, StatusState.FINISHED),
+        (AgentStatus.WORKING, StatusState.WORKING),
+        (AgentStatus.BLOCKED, StatusState.WAITING),
     ],
     ids=["idle", "working", "blocked"],
 )
-def test_check_edits_the_status_posts_the_clean_answer_and_sends_the_link_privately(
-    tmp_path: Path, agent_status: AgentStatus, expected_state: str
+def test_check_edits_the_status_reports_the_answer_and_the_link_privately(
+    tmp_path: Path, agent_status: AgentStatus, expected_state: StatusState
 ) -> None:
     record = _record(
         transcript_path=_transcript_answering(tmp_path, "Fixed the **login** page."),
@@ -603,51 +642,41 @@ def test_check_edits_the_status_posts_the_clean_answer_and_sends_the_link_privat
     )
     thread_map = _thread_map(tmp_path, record)
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, reporter)
 
-    # The answer alone, in mrkdwn: no session name, state line or Inbox link around it.
-    assert slack.posts == [("C0TEST", _OLD_THREAD, "Fixed the *login* page.")]
-    assert slack.status_posts == []
-    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
-        ("1700000000.000900", expected_state)
-    ]
-    assert slack.ephemerals == [
-        (
-            "C0TEST",
-            _OLD_THREAD,
-            "U0TEST",
-            "Details for pan-7 (only visible to you)\n"
-            "Inbox thread: <http://localhost:19441/#thread=abc|pan-7: fix the login page>\n"
-            "Terminal: t7",
-        )
+    # The answer alone, as the transcript has it: no session name, state or Inbox link.
+    assert reporter.events() == [
+        StatusChanged(
+            state=expected_state,
+            session_name="pan-7",
+            label="fix the login page",
+            updated_at=_FIXED_NOW,
+            status_message_id="1700000000.000900",
+        ),
+        AnswerReady(text="Fixed the **login** page."),
+        PrivateDetails(
+            requester="U0TEST",
+            session_name="pan-7",
+            terminal_address="t7",
+            inbox_thread_name="pan-7: fix the login page",
+            inbox_thread_url="http://localhost:19441/#thread=abc",
+            inbox_thread_known=True,
+        ),
     ]
     assert terminal_host.reads == []
-
-
-def test_check_posts_a_new_status_when_the_old_one_cannot_be_edited(tmp_path: Path) -> None:
-    thread_map = _thread_map(tmp_path, _record(status_message_ts="1700000000.000900"))
-    slack = RecordingSlack()
-    slack.update_error = SlackPostError("message_not_found")
-
-    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
-
-    assert slack.status_texts() == ["Finished"]
-    stored = thread_map.get(_OLD_CONVERSATION)
-    assert stored is not None
-    assert stored.status_message_ts == "status-1"
 
 
 def test_check_without_a_transcript_posts_screen_text(tmp_path: Path) -> None:
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     terminal_host.read_result = TerminalRead(text="last screen lines", complete=True)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, reporter)
 
-    assert slack.texts() == ["Screen text (no transcript yet):\n```\nlast screen lines\n```"]
+    assert _line_events(reporter) == [ScreenCaptured(text="last screen lines")]
     assert terminal_host.reads == [("t7", 50)]
 
 
@@ -655,29 +684,20 @@ def test_check_on_an_ended_session_with_no_answer_only_updates_the_status(
     tmp_path: Path,
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(inbox_thread_name=None, requester="U0TEST"))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, _host(), slack)
+    _check(thread_map, _host(), reporter)
 
-    assert slack.texts() == []
-    assert slack.status_texts() == ["Stopped"]
-    assert slack.ephemerals[0][3] == (
-        "Details for pan-7 (only visible to you)\nInbox thread: none yet\nTerminal: t7"
-    )
-
-
-def test_check_splits_a_long_answer_into_labelled_parts(tmp_path: Path) -> None:
-    long_answer = "\n".join(f"line {number} of the answer" for number in range(400))
-    record = _record(transcript_path=_transcript_answering(tmp_path, long_answer))
-    thread_map = _thread_map(tmp_path, record)
-    slack = RecordingSlack()
-
-    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
-
-    texts = slack.texts()
-    assert len(texts) > 1
-    assert texts[0].startswith(f"(1/{len(texts)})\nline 0 of the answer")
-    assert texts[-1].endswith("line 399 of the answer")
+    assert _line_events(reporter) == []
+    assert reporter.states() == [StatusState.STOPPED]
+    assert reporter.of_type(PrivateDetails) == [
+        PrivateDetails(
+            requester="U0TEST",
+            session_name="pan-7",
+            terminal_address="t7",
+            inbox_thread_known=True,
+        )
+    ]
 
 
 @pytest.mark.parametrize("records", [[], [_record(tied=False)]], ids=["no-record", "untied"])
@@ -685,36 +705,32 @@ def test_check_on_an_untied_thread_replies_one_line(
     tmp_path: Path, records: list[ThreadRecord]
 ) -> None:
     thread_map = _thread_map(tmp_path, *records)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+    _check(thread_map, _host(make_terminal("t7", name="pan-7")), reporter)
 
-    assert slack.posts == [("C0TEST", _OLD_THREAD, UNTIED_THREAD_REPLY)]
-    assert slack.status_posts == []
-    assert slack.ephemerals == []
+    assert reporter.reports == [(_OLD_CONVERSATION, _NOT_TIED)]
 
 
 @pytest.mark.parametrize(
-    "found, expected_inbox_line",
+    "found, expected_url, expected_known",
     [
-        (
-            InboxThread(thread_id="thr_9", name="desk-api: fix the build", url=None),
-            'Inbox thread: "desk-api: fix the build"',
-        ),
+        (InboxThread(thread_id="thr_9", name="desk-api: fix the build", url=None), None, True),
         (
             InboxThread(
                 thread_id="thr_9",
                 name="desk-api: fix the build",
                 url="https://inbox.example/threads/thr_9",
             ),
-            "Inbox thread: <https://inbox.example/threads/thr_9|desk-api: fix the build>",
+            "https://inbox.example/threads/thr_9",
+            True,
         ),
-        (None, 'Inbox thread: its existing one, or "desk-api: fix the build"'),
+        (None, None, False),
     ],
     ids=["found-without-link", "found-with-link", "not-found"],
 )
 def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
-    tmp_path: Path, found: InboxThread | None, expected_inbox_line: str
+    tmp_path: Path, found: InboxThread | None, expected_url: str | None, expected_known: bool
 ) -> None:
     desk_folder = Path("/tmp/desk/api")
     record = _record(
@@ -728,11 +744,12 @@ def test_check_on_a_desk_session_looks_its_inbox_thread_up_by_name(
     thread_map = _thread_map(tmp_path, record)
     known_threads = {(desk_folder, "desk-api: fix the build"): found} if found else {}
     inbox_directory = FakeInboxDirectory(known_threads)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, _host(make_terminal("t9", name="desk-api")), slack, inbox_directory)
+    _check(thread_map, _host(make_terminal("t9", name="desk-api")), reporter, inbox_directory)
 
-    assert slack.ephemerals[0][3].split("\n")[1] == expected_inbox_line
+    ((details),) = reporter.of_type(PrivateDetails)
+    assert (details.inbox_thread_url, details.inbox_thread_known) == (expected_url, expected_known)
     assert inbox_directory.lookups == [(desk_folder, "desk-api: fix the build")]
     stored = thread_map.get(_OLD_CONVERSATION)
     assert stored is not None
@@ -756,12 +773,12 @@ def test_check_looks_again_once_the_session_has_created_its_inbox_thread(
     thread_map = _thread_map(tmp_path, record)
     terminal_host = _host(make_terminal("t9", name="desk-test"))
 
-    _check(thread_map, terminal_host, RecordingSlack(), FakeInboxDirectory())
+    _check(thread_map, terminal_host, RecordingReporter(), FakeInboxDirectory())
     created = InboxThread(thread_id="msg_1", name=thread_name)
     _check(
         thread_map,
         terminal_host,
-        RecordingSlack(),
+        RecordingReporter(),
         FakeInboxDirectory({(desk_folder, thread_name): created}),
     )
 
@@ -775,7 +792,9 @@ def test_check_does_not_look_up_a_session_whose_inbox_thread_is_known(tmp_path: 
     thread_map = _thread_map(tmp_path, record)
     inbox_directory = FakeInboxDirectory()
 
-    _check(thread_map, _host(make_terminal("t7", name="pan-7")), RecordingSlack(), inbox_directory)
+    _check(
+        thread_map, _host(make_terminal("t7", name="pan-7")), RecordingReporter(), inbox_directory
+    )
 
     assert inbox_directory.lookups == []
 
@@ -783,7 +802,7 @@ def test_check_does_not_look_up_a_session_whose_inbox_thread_is_known(tmp_path: 
 def _follow_up(
     terminal_host: FakeTerminalHost,
     thread_map: FileThreadMap,
-    slack: RecordingSlack,
+    reporter: RecordingReporter,
     *,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
@@ -792,7 +811,7 @@ def _follow_up(
         text="and the docs",
         terminal_host=terminal_host,
         thread_map=thread_map,
-        slack=slack,
+        reporter=reporter,
         clock=FixedClock(),
         reply_in_slack=reply_in_slack,
     )
@@ -837,7 +856,7 @@ def test_follow_up_reply_in_slack_persists_the_mode_for_the_thread(
     terminal_host = _host(make_terminal(address, name=name, agent_status=agent_status))
 
     returned = _follow_up(
-        terminal_host, thread_map, RecordingSlack(), reply_in_slack=reply_in_slack
+        terminal_host, thread_map, RecordingReporter(), reply_in_slack=reply_in_slack
     )
 
     stored = thread_map.get(_OLD_CONVERSATION)
@@ -879,14 +898,16 @@ def test_follow_up_types_into_the_tied_idle_session(
 ) -> None:
     thread_map = _thread_map(tmp_path, record)
     terminal_host = _host(terminal)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _follow_up(terminal_host, thread_map, slack)
+    _follow_up(terminal_host, thread_map, reporter)
 
     assert terminal_host.sent == [(record.terminal_address, expected_text)]
-    assert slack.posts == []
+    assert _line_events(reporter) == []
     # The follow-up is the thread's task now, and its status message says Working.
-    assert slack.status_texts() == ["Working: and the docs"]
+    assert [(status.state, status.label) for status in reporter.of_type(StatusChanged)] == [
+        (StatusState.WORKING, "and the docs")
+    ]
     stored = thread_map.get(_OLD_CONVERSATION)
     assert stored is not None
     assert stored.status_label == "and the docs"
@@ -894,15 +915,11 @@ def test_follow_up_types_into_the_tied_idle_session(
 
 
 @pytest.mark.parametrize(
-    "agent_status, expected_error, expected_reply",
+    "agent_status, expected_error, expected_reason",
     [
-        (AgentStatus.WORKING, SessionBusyError, "pan-7 is busy; try again, or @pan check"),
-        (AgentStatus.ERROR, SessionBusyError, "pan-7 is busy; try again, or @pan check"),
-        (
-            AgentStatus.BLOCKED,
-            TargetBlockedError,
-            "pan-7 is waiting on a prompt at the terminal; nothing was sent",
-        ),
+        (AgentStatus.WORKING, SessionBusyError, NotDeliveredReason.BUSY),
+        (AgentStatus.ERROR, SessionBusyError, NotDeliveredReason.BUSY),
+        (AgentStatus.BLOCKED, TargetBlockedError, NotDeliveredReason.WAITING_ON_PROMPT),
     ],
     ids=["working", "error-counts-as-busy", "blocked"],
 )
@@ -910,48 +927,52 @@ def test_follow_up_to_a_session_not_ready_types_nothing(
     tmp_path: Path,
     agent_status: AgentStatus,
     expected_error: type[PanError],
-    expected_reply: str,
+    expected_reason: NotDeliveredReason,
 ) -> None:
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(expected_error):
-        _follow_up(terminal_host, thread_map, slack)
+        _follow_up(terminal_host, thread_map, reporter)
 
     assert terminal_host.sent == []
-    assert slack.texts() == [expected_reply]
-    assert slack.status_posts == []
+    assert reporter.events() == [NotDelivered(reason=expected_reason, session_name="pan-7")]
 
 
 @pytest.mark.parametrize(
-    "started_by_pan, expected_replies",
-    # Slack egress escapes the reply's angle brackets (to_slack_mrkdwn); Slack shows them.
-    [(True, []), (False, [to_slack_mrkdwn(desk_session_ended_reply("pan-7"))])],
+    "started_by_pan, expected_events",
+    [
+        (True, []),
+        (
+            False,
+            [SessionNotice(reason=SessionNoticeReason.DESK_SESSION_ENDED, session_name="pan-7")],
+        ),
+    ],
     ids=["pan-session-left-to-reopen", "desk-session-never-reopened"],
 )
 def test_follow_up_to_an_ended_session(
-    tmp_path: Path, started_by_pan: bool, expected_replies: list[str]
+    tmp_path: Path, started_by_pan: bool, expected_events: list[Event]
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(started_by_pan=started_by_pan))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(TerminalGoneError):
-        _follow_up(_host(), thread_map, slack)
+        _follow_up(_host(), thread_map, reporter)
 
-    assert slack.texts() == expected_replies
+    assert reporter.events() == expected_events
 
 
 def test_follow_up_in_an_untied_thread_replies_one_line(tmp_path: Path) -> None:
     thread_map = _thread_map(tmp_path, _record(tied=False))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(ThreadNotFoundError):
-        _follow_up(terminal_host, thread_map, slack)
+        _follow_up(terminal_host, thread_map, reporter)
 
     assert terminal_host.sent == []
-    assert slack.texts() == [UNTIED_THREAD_REPLY]
+    assert reporter.events() == [_NOT_TIED]
 
 
 @pytest.mark.parametrize(
@@ -999,7 +1020,7 @@ def test_follow_up_to_a_desk_session_in_slack_mode_says_pan_posts_the_answer(
         text="and the docs",
         terminal_host=terminal_host,
         thread_map=thread_map,
-        slack=RecordingSlack(),
+        reporter=RecordingReporter(),
         clock=FixedClock(),
     )
 
@@ -1058,12 +1079,12 @@ def test_check_without_a_transcript_posts_cleaned_screen_text(tmp_path: Path) ->
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     screen = f"{_DIVIDER}\n\n\nlast screen lines\n\n{_DIVIDER}"
     terminal_host.read_result = TerminalRead(text=screen, complete=False)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, reporter)
 
-    assert slack.texts() == [
-        f"Screen text (no transcript yet):\n```\n{INCOMPLETE_READ_NOTICE}\nlast screen lines\n```"
+    assert _line_events(reporter) == [
+        ScreenCaptured(text=f"{INCOMPLETE_READ_NOTICE}\nlast screen lines")
     ]
 
 
@@ -1083,7 +1104,7 @@ def test_send_to_a_desk_session_whose_suggested_thread_exists_names_it(tmp_path:
     _send(
         terminal_host,
         thread_map,
-        RecordingSlack(),
+        RecordingReporter(),
         "desk-api",
         inbox_directory=FakeInboxDirectory({(desk_folder, "desk-api: fix the build"): found}),
     )
@@ -1110,15 +1131,15 @@ def test_send_without_an_exact_match_sends_and_posts_nothing(
 ) -> None:
     thread_map = _thread_map(tmp_path)
     terminal_host = _host(*terminals)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(NoExactMatchError):
-        _send(terminal_host, thread_map, slack, selector)
+        _send(terminal_host, thread_map, reporter, selector)
 
     assert terminal_host.sent == []
     assert terminal_host.runs == []
     assert thread_map.get(_NEW_CONVERSATION) is None
-    assert slack.texts() == []
+    assert reporter.events() == []
 
 
 def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
@@ -1136,7 +1157,7 @@ def test_send_looks_a_suggested_thread_up_only_once(tmp_path: Path) -> None:
     _send(
         _host(make_terminal("t9", name="desk-api", cwd=desk_folder)),
         thread_map,
-        RecordingSlack(),
+        RecordingReporter(),
         "desk-api",
         inbox_directory=inbox_directory,
     )
@@ -1162,7 +1183,7 @@ def test_refused_follow_up_with_reply_in_slack_leaves_the_mode_unchanged(
     terminal_host = _host(make_terminal(address, name=name, agent_status=agent_status))
 
     with pytest.raises(expected_error):
-        _follow_up(terminal_host, thread_map, RecordingSlack(), reply_in_slack=True)
+        _follow_up(terminal_host, thread_map, RecordingReporter(), reply_in_slack=True)
 
     stored = thread_map.get(_OLD_CONVERSATION)
     assert stored is not None
@@ -1172,7 +1193,17 @@ def test_refused_follow_up_with_reply_in_slack_leaves_the_mode_unchanged(
 
 _MAIN_REPO = Path("/repos/app")
 _PAN_SETTINGS = ".claude/settings.json"
-_KEPT_HINT = "Push or commit them, or send `@pan done --discard`."
+
+
+def _closed(
+    *, worktree_removed: bool, branch_deleted: bool, repo_known: bool = True
+) -> SessionClosed:
+    return SessionClosed(
+        session_name="pan-7",
+        worktree_removed=worktree_removed,
+        branch_deleted=branch_deleted,
+        repo_known=repo_known,
+    )
 
 
 def _worktree_status(**updates: object) -> WorktreeStatus:
@@ -1208,7 +1239,7 @@ def _done(
     thread_map: FileThreadMap,
     terminal_host: FakeTerminalHost,
     git: FakeGitWorktree,
-    slack: RecordingSlack,
+    reporter: RecordingReporter,
     *,
     discard: bool = False,
 ) -> None:
@@ -1220,7 +1251,7 @@ def _done(
         thread_map=thread_map,
         terminal_host=terminal_host,
         git=git,
-        slack=slack,
+        reporter=reporter,
         clock=FixedClock(),
     )
 
@@ -1237,11 +1268,11 @@ def test_done_in_a_thread_with_no_session_does_nothing(
 ) -> None:
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     git = _git_with()
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, _thread_map(tmp_path, *records), terminal_host, git, slack)
+    _done(tmp_path, _thread_map(tmp_path, *records), terminal_host, git, reporter)
 
-    assert slack.texts() == [NO_SESSION_REPLY]
+    assert reporter.events() == [ThreadNotice(reason=ThreadNoticeReason.NO_SESSION)]
     assert terminal_host.removed == []
     assert git.calls == []
 
@@ -1254,12 +1285,12 @@ def test_done_only_unties_a_session_pan_did_not_start(tmp_path: Path) -> None:
     )
     terminal_host = _host(make_terminal("t7", name="desk-x"))
     git = _git_with()
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, terminal_host, git, slack, discard=True)
+    _done(tmp_path, thread_map, terminal_host, git, reporter, discard=True)
 
-    assert slack.texts() == [
-        "Untied this thread from desk-x; pan never closes sessions it didn't start."
+    assert reporter.events() == [
+        SessionNotice(reason=SessionNoticeReason.DESK_SESSION_UNTIED, session_name="desk-x")
     ]
     record = _tied_record(thread_map)
     assert record.tied is False
@@ -1269,19 +1300,13 @@ def test_done_only_unties_a_session_pan_did_not_start(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "agent_status, expected_error, expected_reply",
+    "agent_status, expected_error, expected_reason",
     [
-        (
-            AgentStatus.WORKING,
-            SessionBusyError,
-            "pan-7 is still working; send `@pan done` when it finishes, "
-            "or `@pan done --discard` to stop it now.",
-        ),
+        (AgentStatus.WORKING, SessionBusyError, SessionNoticeReason.NOT_CLOSED_WORKING),
         (
             AgentStatus.BLOCKED,
             TargetBlockedError,
-            "pan-7 is waiting on a prompt; answer it at the terminal and send `@pan done` "
-            "again, or `@pan done --discard` to stop it now.",
+            SessionNoticeReason.NOT_CLOSED_WAITING_ON_PROMPT,
         ),
     ],
     ids=["working", "waiting-on-a-prompt"],
@@ -1290,42 +1315,45 @@ def test_done_refuses_a_session_that_is_not_finished(
     tmp_path: Path,
     agent_status: AgentStatus,
     expected_error: type[Exception],
-    expected_reply: str,
+    expected_reason: SessionNoticeReason,
 ) -> None:
     thread_map = _thread_map(tmp_path, _record(worktree_path=_pan_worktree(tmp_path)))
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
     git = _git_with()
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(expected_error):
-        _done(tmp_path, thread_map, terminal_host, git, slack)
+        _done(tmp_path, thread_map, terminal_host, git, reporter)
 
-    assert slack.texts() == [expected_reply]
+    assert reporter.events() == [SessionNotice(reason=expected_reason, session_name="pan-7")]
     assert _tied_record(thread_map).tied is True
     assert terminal_host.removed == []
     assert git.calls == []
 
 
 @pytest.mark.parametrize(
-    "status, branch, expected_counts",
+    "status, branch, expected_uncommitted, expected_unpushed",
     [
-        (_worktree_status(modified_paths=["README.md"]), BranchStatus(), "1 uncommitted file"),
+        (_worktree_status(modified_paths=["README.md"]), BranchStatus(), 1, 0),
         (
             _worktree_status(untracked_paths=[], modified_paths=[_PAN_SETTINGS]),
             BranchStatus(),
-            "1 uncommitted file",
+            1,
+            0,
         ),
         (
             _worktree_status(untracked_paths=[_PAN_SETTINGS, "notes.txt"], modified_paths=["a"]),
             BranchStatus(commits_not_in_base=1),
-            "2 uncommitted files and 1 unpushed commit",
+            2,
+            1,
         ),
         (
             _worktree_status(),
             BranchStatus(upstream="origin/pan-7", commits_not_on_upstream=2, commits_not_in_base=3),
-            "2 unpushed commits",
+            0,
+            2,
         ),
-        (_worktree_status(branch=None, detached_commits=1), BranchStatus(), "1 unpushed commit"),
+        (_worktree_status(branch=None, detached_commits=1), BranchStatus(), 0, 1),
     ],
     ids=[
         "modified-file",
@@ -1336,18 +1364,28 @@ def test_done_refuses_a_session_that_is_not_finished(
     ],
 )
 def test_done_keeps_a_session_whose_work_would_be_lost(
-    tmp_path: Path, status: WorktreeStatus, branch: BranchStatus, expected_counts: str
+    tmp_path: Path,
+    status: WorktreeStatus,
+    branch: BranchStatus,
+    expected_uncommitted: int,
+    expected_unpushed: int,
 ) -> None:
     worktree_path = _pan_worktree(tmp_path)
     thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     git = _git_with(status, branch)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(UnsavedWorkError):
-        _done(tmp_path, thread_map, terminal_host, git, slack)
+        _done(tmp_path, thread_map, terminal_host, git, reporter)
 
-    assert slack.texts() == [f"pan-7 has {expected_counts}; kept it. {_KEPT_HINT}"]
+    assert reporter.events() == [
+        WorkKept(
+            session_name="pan-7",
+            uncommitted_files=expected_uncommitted,
+            unpushed_commits=expected_unpushed,
+        )
+    ]
     assert git.calls == [("status", worktree_path), ("branch_status", _MAIN_REPO, "pan-7")]
     assert terminal_host.removed == []
     record = _tied_record(thread_map)
@@ -1417,9 +1455,9 @@ def test_done_closes_the_session_and_removes_its_worktree_and_branch(
     thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=agent_status))
     git = _git_with(status, branch)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, terminal_host, git, slack, discard=discard)
+    _done(tmp_path, thread_map, terminal_host, git, reporter, discard=discard)
 
     assert terminal_host.removed == ["t7"]
     assert git.calls == [
@@ -1428,8 +1466,9 @@ def test_done_closes_the_session_and_removes_its_worktree_and_branch(
         ("remove", worktree_path, expected_remove_force),
         ("delete_branch", _MAIN_REPO, "pan-7", expected_delete_force),
     ]
-    assert slack.texts() == ["Closed pan-7 and removed its worktree and branch."]
-    assert slack.status_texts() == ["Closed"]
+    # The status says Closed, then one line says what was removed.
+    assert reporter.states() == [StatusState.CLOSED]
+    assert reporter.events()[1:] == [_closed(worktree_removed=True, branch_deleted=True)]
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
@@ -1447,53 +1486,38 @@ def test_done_cleans_the_worktree_when_the_terminal_is_gone(
     thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
     terminal_host = _host(*terminals)
     git = _git_with()
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, terminal_host, git, slack)
+    _done(tmp_path, thread_map, terminal_host, git, reporter)
 
     assert terminal_host.removed == []
     assert ("remove", worktree_path, True) in git.calls
-    assert slack.texts() == ["Closed pan-7 and removed its worktree and branch."]
+    assert _line_events(reporter) == [_closed(worktree_removed=True, branch_deleted=True)]
 
 
 def test_done_removes_the_worktree_when_its_branch_is_already_gone(tmp_path: Path) -> None:
     worktree_path = _pan_worktree(tmp_path)
     thread_map = _thread_map(tmp_path, _record(worktree_path=worktree_path))
     git = FakeGitWorktree(status=_worktree_status(branch=None))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, _host(), git, slack)
+    _done(tmp_path, thread_map, _host(), git, reporter)
 
     assert git.calls == [
         ("status", worktree_path),
         ("branch_status", _MAIN_REPO, "pan-7"),
         ("remove", worktree_path, True),
     ]
-    assert slack.texts() == ["Closed pan-7 and removed its worktree."]
+    assert _line_events(reporter) == [_closed(worktree_removed=True, branch_deleted=False)]
 
 
 @pytest.mark.parametrize(
-    "recorded_repo, repo_with_branch, expected_repo, expected_reply",
+    "recorded_repo, repo_with_branch, expected_repo",
     [
-        (
-            "repos/app",
-            "repos/app",
-            "repos/app",
-            "Closed pan-7 and removed its branch; its worktree was already gone.",
-        ),
-        (
-            None,
-            "orchestrator",
-            "orchestrator",
-            "Closed pan-7 and removed its branch; its worktree was already gone.",
-        ),
-        (
-            "repos/app",
-            None,
-            "repos/app",
-            "Closed pan-7; its worktree and branch were already gone.",
-        ),
-        (None, None, None, "Closed pan-7; its worktree was already gone."),
+        ("repos/app", "repos/app", "repos/app"),
+        (None, "orchestrator", "orchestrator"),
+        ("repos/app", None, "repos/app"),
+        (None, None, None),
     ],
     ids=[
         "recorded-repo",
@@ -1507,7 +1531,6 @@ def test_done_with_the_worktree_folder_gone_cleans_up_from_the_repo(
     recorded_repo: str | None,
     repo_with_branch: str | None,
     expected_repo: str | None,
-    expected_reply: str,
 ) -> None:
     for folder in ("repos/app", "orchestrator"):
         (tmp_path / folder).mkdir(parents=True)
@@ -1519,9 +1542,9 @@ def test_done_with_the_worktree_folder_gone_cleans_up_from_the_repo(
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     branches = {tmp_path / repo_with_branch: BranchStatus()} if repo_with_branch else {}
     git = FakeGitWorktree(branches=branches)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, terminal_host, git, slack)
+    _done(tmp_path, thread_map, terminal_host, git, reporter)
 
     writes = [call for call in git.calls if call[0] in ("prune", "delete_branch")]
     if expected_repo is None:
@@ -1532,7 +1555,13 @@ def test_done_with_the_worktree_folder_gone_cleans_up_from_the_repo(
             expected_writes.append(("delete_branch", tmp_path / expected_repo, "pan-7", True))
         assert writes == expected_writes
     assert terminal_host.removed == ["t7"]
-    assert slack.texts() == [expected_reply]
+    assert _line_events(reporter) == [
+        _closed(
+            worktree_removed=False,
+            branch_deleted=repo_with_branch is not None,
+            repo_known=expected_repo is not None,
+        )
+    ]
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
@@ -1545,38 +1574,40 @@ def test_done_with_the_worktree_folder_gone_judges_the_branch_commits(tmp_path: 
         tmp_path, _record(worktree_path=tmp_path / "wt" / "pan-7", repo_path=repo)
     )
     git = FakeGitWorktree(branches={repo: BranchStatus(commits_not_in_base=1)})
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(UnsavedWorkError):
-        _done(tmp_path, thread_map, _host(), git, slack)
+        _done(tmp_path, thread_map, _host(), git, reporter)
 
-    assert slack.texts() == [f"pan-7 has 1 unpushed commit; kept it. {_KEPT_HINT}"]
+    assert reporter.events() == [
+        WorkKept(session_name="pan-7", uncommitted_files=0, unpushed_commits=1)
+    ]
     assert git.calls == [("branch_status", repo, "pan-7")]
 
 
 @pytest.mark.parametrize(
-    "folder_name, status, git_errors, expected_error, expected_reply",
+    "folder_name, status, git_errors, expected_error, expected_reason",
     [
         (
             "outside",
             _worktree_status(),
             {},
             UnsafeWorktreeError,
-            "pan-7's folder is not in pan's worktree folder; pan never removes it.",
+            SessionNoticeReason.FOLDER_OUTSIDE_WORKTREES,
         ),
         (
             "wt/pan-7",
             _worktree_status(is_main_worktree=True),
             {},
             UnsafeWorktreeError,
-            "pan-7's folder is a main repository; pan never removes it.",
+            SessionNoticeReason.FOLDER_IS_MAIN_REPOSITORY,
         ),
         (
             "wt/pan-7",
             None,
             {"status": GitWorktreeError("not a git repository")},
             GitWorktreeError,
-            "Could not read pan-7's worktree; kept it.",
+            SessionNoticeReason.WORKTREE_UNREADABLE,
         ),
     ],
     ids=["outside-worktree-base", "main-worktree", "unreadable"],
@@ -1587,19 +1618,19 @@ def test_done_keeps_a_worktree_it_cannot_safely_remove(
     status: WorktreeStatus | None,
     git_errors: dict[str, PanError],
     expected_error: type[PanError],
-    expected_reply: str,
+    expected_reason: SessionNoticeReason,
 ) -> None:
     folder = tmp_path / folder_name
     folder.mkdir(parents=True)
     thread_map = _thread_map(tmp_path, _record(worktree_path=folder))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     git = FakeGitWorktree(status=status, errors=git_errors)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(expected_error):
-        _done(tmp_path, thread_map, terminal_host, git, slack)
+        _done(tmp_path, thread_map, terminal_host, git, reporter)
 
-    assert slack.texts() == [expected_reply]
+    assert reporter.events() == [SessionNotice(reason=expected_reason, session_name="pan-7")]
     assert terminal_host.removed == []
     assert not any(call[0] in ("remove", "prune", "delete_branch") for call in git.calls)
     assert _tied_record(thread_map).tied is True
@@ -1614,16 +1645,13 @@ def test_done_reports_a_failed_cleanup_and_keeps_the_thread_tied(
     terminal_host = _host(make_terminal("t7", name="pan-7"))
     git = _git_with()
     git.errors[failing_operation] = GitWorktreeError("git failed")
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(GitWorktreeError):
-        _done(tmp_path, thread_map, terminal_host, git, slack)
+        _done(tmp_path, thread_map, terminal_host, git, reporter)
 
     assert terminal_host.removed == ["t7"]
-    assert slack.texts() == [
-        "Closed pan-7, but could not remove its worktree or branch; "
-        f"send `@pan done` to try again, or remove {worktree_path} by hand."
-    ]
+    assert reporter.events() == [CleanupFailed(session_name="pan-7", worktree_path=worktree_path)]
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.IDLE
     assert record.tied is True
@@ -1640,42 +1668,41 @@ def test_done_retry_after_a_failed_branch_delete_reports_only_the_branch(
     git = _git_with(_worktree_status(main_repo=repo), repo=repo)
     git.errors["delete_branch"] = GitWorktreeError("git failed")
     with pytest.raises(GitWorktreeError):
-        _done(tmp_path, thread_map, _host(make_terminal("t7", name="pan-7")), git, RecordingSlack())
+        _done(
+            tmp_path, thread_map, _host(make_terminal("t7", name="pan-7")), git, RecordingReporter()
+        )
     worktree_path.rmdir()
     git.errors.clear()
     git.calls.clear()
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _done(tmp_path, thread_map, _host(), git, slack)
+    _done(tmp_path, thread_map, _host(), git, reporter)
 
     assert git.calls == [
         ("branch_status", repo, "pan-7"),
         ("prune", repo),
         ("delete_branch", repo, "pan-7", True),
     ]
-    assert slack.texts() == ["Closed pan-7 and removed its branch; its worktree was already gone."]
+    assert _line_events(reporter) == [_closed(worktree_removed=False, branch_deleted=True)]
     record = _tied_record(thread_map)
     assert record.status is WorkerStatus.DONE
     assert record.tied is False
 
 
 @pytest.mark.parametrize(
-    "reply_mode, expected_posts_after_check",
-    [
-        (ReplyMode.SLACK, ["Fixed the login page."]),
-        (ReplyMode.ON_DEMAND, ["Fixed the login page."]),
-    ],
+    "reply_mode",
+    [ReplyMode.SLACK, ReplyMode.ON_DEMAND],
     ids=["reply-in-slack-stop-hook-posted-it", "on-demand-check-posts-it"],
 )
 def test_check_never_reposts_the_answer_already_posted(
-    tmp_path: Path, reply_mode: ReplyMode, expected_posts_after_check: list[str]
+    tmp_path: Path, reply_mode: ReplyMode
 ) -> None:
     # In the reply-in-Slack mode the Stop hook posts the answer, so check only updates the
     # status; on demand nothing was posted, so check posts it. Either way it appears once.
     transcript = _transcript_answering(tmp_path, "Fixed the login page.")
     thread_map = _thread_map(tmp_path, _record(reply_mode=reply_mode))
     terminal_host = _host(make_terminal("t7", name="pan-7", agent_status=AgentStatus.DONE))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
     stop_payload = json.dumps(
         {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
     )
@@ -1683,18 +1710,18 @@ def test_check_never_reposts_the_answer_already_posted(
     stop_hook(
         _OLD_CONVERSATION,
         thread_map,
-        slack,
+        reporter,
         stdin=io.StringIO(stop_payload),
         session_name="pan-7",
         clock=FixedClock(),
     )
     thread_map.record_session(_OLD_CONVERSATION, "s1", transcript, session_name="pan-7")
-    _check(thread_map, terminal_host, slack)
-    _check(thread_map, terminal_host, slack)
+    _check(thread_map, terminal_host, reporter)
+    _check(thread_map, terminal_host, reporter)
 
-    assert slack.texts() == expected_posts_after_check
+    assert _line_events(reporter) == [AnswerReady(text="Fixed the login page.")]
     # hc's `done` on a live terminal is a finished turn, never Closed.
-    assert set(slack.status_texts()) == {"Finished"}
+    assert set(reporter.states()) == {StatusState.FINISHED}
 
 
 def test_check_posts_a_newer_answer_than_the_one_already_posted(tmp_path: Path) -> None:
@@ -1703,24 +1730,24 @@ def test_check_posts_a_newer_answer_than_the_one_already_posted(tmp_path: Path) 
         last_answer_digest=answer_digest("First answer."),
     )
     thread_map = _thread_map(tmp_path, record)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _check(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+    _check(thread_map, _host(make_terminal("t7", name="pan-7")), reporter)
 
-    assert slack.texts() == ["Second answer."]
+    assert _line_events(reporter) == [AnswerReady(text="Second answer.")]
     stored = thread_map.get(_OLD_CONVERSATION)
     assert stored is not None
     assert stored.last_answer_digest == answer_digest("Second answer.")
 
 
 def _stop(
-    thread_map: FileThreadMap, terminal_host: FakeTerminalHost, slack: RecordingSlack
+    thread_map: FileThreadMap, terminal_host: FakeTerminalHost, reporter: RecordingReporter
 ) -> None:
     stop_thread(
         conversation=_OLD_CONVERSATION,
         thread_map=thread_map,
         terminal_host=terminal_host,
-        open_slack=lambda: slack,
+        open_reporter=lambda: reporter,
         clock=FixedClock(),
     )
 
@@ -1732,7 +1759,7 @@ def test_stop_thread_removes_the_terminal_and_marks_failed(
     thread_map = _thread_map(tmp_path, _record(terminal_address=terminal_address))
     terminal_host = _host(make_terminal("t7", name="pan-7"))
 
-    _stop(thread_map, terminal_host, RecordingSlack())
+    _stop(thread_map, terminal_host, RecordingReporter())
 
     assert terminal_host.removed == ([terminal_address] if terminal_address else [])
     stopped = thread_map.get(_OLD_CONVERSATION)
@@ -1745,28 +1772,29 @@ def test_stop_thread_edits_the_threads_status_message_to_stopped(tmp_path: Path)
         tmp_path,
         _record(status_message_ts="1700000000.000900", status_label="fix the bug"),
     )
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _stop(thread_map, _host(make_terminal("t7", name="pan-7")), slack)
+    _stop(thread_map, _host(make_terminal("t7", name="pan-7")), reporter)
 
-    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
-        ("1700000000.000900", "Stopped: fix the bug")
-    ]
-    assert slack.posts == []
+    assert [
+        (status.status_message_id, status.state, status.label)
+        for status in reporter.of_type(StatusChanged)
+    ] == [("1700000000.000900", StatusState.STOPPED, "fix the bug")]
+    assert len(reporter.events()) == 1
 
 
 def test_stop_thread_still_stops_when_slack_cannot_be_reached(tmp_path: Path) -> None:
     thread_map = _thread_map(tmp_path, _record())
     terminal_host = _host(make_terminal("t7", name="pan-7"))
 
-    def no_credentials() -> RecordingSlack:
+    def no_credentials() -> RecordingReporter:
         raise CredentialsError("no credentials")
 
     stop_thread(
         conversation=_OLD_CONVERSATION,
         thread_map=thread_map,
         terminal_host=terminal_host,
-        open_slack=no_credentials,
+        open_reporter=no_credentials,
         clock=FixedClock(),
     )
 
@@ -1780,19 +1808,19 @@ def test_stop_thread_never_stops_a_session_pan_did_not_start(tmp_path: Path) -> 
     thread_map = FileThreadMap(tmp_path / "threads.json", FixedClock())
     thread_map.tie(_record(terminal_name="desk-api", terminal_address="t9", started_by_pan=False))
     terminal_host = _host(make_terminal("t9", name="desk-api"))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(NotPanSessionError):
-        _stop(thread_map, terminal_host, slack)
+        _stop(thread_map, terminal_host, reporter)
 
     assert terminal_host.removed == []
     kept = thread_map.get(_OLD_CONVERSATION)
     assert kept is not None
     assert kept.tied is False
     assert kept.status is WorkerStatus.IDLE
-    assert slack.status_updates == []
+    assert reporter.events() == []
 
 
 def test_stop_thread_without_a_record_raises(tmp_path: Path) -> None:
     with pytest.raises(ThreadNotFoundError):
-        _stop(_thread_map(tmp_path), _host(), RecordingSlack())
+        _stop(_thread_map(tmp_path), _host(), RecordingReporter())
