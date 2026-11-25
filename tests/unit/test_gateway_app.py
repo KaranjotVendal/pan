@@ -13,6 +13,7 @@ from slack_sdk.errors import SlackApiError
 
 from pan.core.errors import SlackPostError
 from pan.core.models import (
+    Conversation,
     InboxItem,
     PanConfig,
     SlackCredentials,
@@ -144,13 +145,13 @@ def test_allowed_app_mention_acks_then_appends() -> None:
     assert len(inbox.items) == 1
     item = inbox.items[0]
     assert item.id == "Ev123"
-    assert item.slack_user == "U1"
-    assert item.channel == "C1"
-    assert item.thread_ts == "1718000000.000200"
+    assert item.author == "U1"
+    assert item.conversation == Conversation(
+        source=ThreadSource.SLACK, id="1718000000.000200", place="C1"
+    )
     assert item.is_thread_reply is False
     assert item.raw_text == "<@B> do the thing"
     assert item.received_at == _FIXED_NOW
-    assert item.source is ThreadSource.SLACK
 
     kinds = [entry[0] for entry in timeline]
     assert kinds == ["reaction", "append"]  # :eyes: before append (INV-1)
@@ -171,7 +172,7 @@ def test_thread_reply_sets_thread_ts_and_flag() -> None:
     adapter.handle_event(event, "Ev456")
 
     item = inbox.items[0]
-    assert item.thread_ts == "1718000000.000200"
+    assert item.conversation.id == "1718000000.000200"
     assert item.is_thread_reply is True
     # The :eyes: ack lands on the reply's own ts, not the thread root.
     assert timeline[0] == ("reaction", ("C1", "1718000000.000500", "eyes"))
@@ -216,10 +217,8 @@ def _thread_record(
     source: ThreadSource = ThreadSource.SLACK,
 ) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts=_TEST_THREAD_TS,
+        conversation=Conversation(source=source, id=_TEST_THREAD_TS, place=channel),
         terminal_name=terminal_name,
-        channel=channel,
-        source=source,
         worktree_path=Path("/tmp/wt") / terminal_name,
         created_at=_FIXED_NOW,
         updated_at=_FIXED_NOW,
@@ -236,7 +235,7 @@ def _thread_map(tmp_path: Path, thread_state: str) -> FileThreadMap:
     if thread_state in ("tied", "untied", "retied"):
         thread_map.tie(_thread_record("pan-first"))
     if thread_state == "untied":
-        thread_map.untie(_TEST_THREAD_TS)
+        thread_map.untie(Conversation.slack(_TEST_THREAD_TS))
     if thread_state == "retied":
         thread_map.tie(_thread_record("pan-second"))
     if thread_state == "tied-elsewhere":
@@ -249,7 +248,9 @@ def _thread_map(tmp_path: Path, thread_state: str) -> FileThreadMap:
 
 
 class ExplodingThreadMap:
-    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None:
+    def get(
+        self, conversation: Conversation, *, session_name: str | None = None
+    ) -> ThreadRecord | None:
         raise AssertionError("the thread map must not be read")
 
 
@@ -405,7 +406,7 @@ def test_forwarded_reply_subtypes_reach_the_inbox(tmp_path: Path, event: dict[st
     adapter.handle_event(event, "Ev1")
 
     assert len(inbox.items) == 1
-    assert inbox.items[0].thread_ts == _TEST_THREAD_TS
+    assert inbox.items[0].conversation.id == _TEST_THREAD_TS
     assert inbox.items[0].is_thread_reply is True
 
 

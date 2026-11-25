@@ -59,7 +59,7 @@ class FileInboxStore:
             temp_path.unlink(missing_ok=True)
             raise InboxError(f"failed to append inbox item id={item.id}") from error
 
-        logger.info(f"inbox append id={item.id} channel={item.channel}")
+        logger.info(f"inbox append id={item.id} conversation={item.conversation.key}")
 
     def drain(self) -> list[InboxItem]:
         if not self._inbox_dir.exists():

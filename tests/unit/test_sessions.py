@@ -19,6 +19,7 @@ from pan.backend.spawn import worker_brief
 from pan.core.errors import PrivateMessageError, SlackPostError
 from pan.core.models import (
     AgentStatus,
+    Conversation,
     ReplyMode,
     SessionSummary,
     TerminalState,
@@ -37,10 +38,9 @@ def _record(
     status: WorkerStatus = WorkerStatus.RUNNING,
 ) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts=thread_ts,
+        conversation=Conversation.slack(thread_ts, "C1"),
         terminal_name=terminal_name,
         terminal_address=terminal_address,
-        channel="C1",
         worktree_path=Path(worktree_path),
         status=status,
         created_at=_FIXED_NOW,
@@ -402,8 +402,7 @@ def test_thread_permalinks_asks_once_per_thread_and_drops_threads_without_a_link
 def _send_privately(slack: RecordingSlack) -> None:
     send_sessions_privately(
         slack,
-        channel="C000TEST",
-        thread_ts="1700000000.000100",
+        conversation=Conversation.slack("1700000000.000100", "C000TEST"),
         requester="U000TEST",
         text="*Your sessions*",
         session_count=1,

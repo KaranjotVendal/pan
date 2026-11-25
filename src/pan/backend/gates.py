@@ -12,7 +12,7 @@ from pan.core.errors import (
     SlackPostError,
     XSourceRefusedError,
 )
-from pan.core.models import InboxItem, ThreadRecord, ThreadSource
+from pan.core.models import Conversation, InboxItem, ThreadRecord, ThreadSource
 from pan.core.seams import DrainedLog, ThreadMap
 from pan.utils.logging import initialise_logger
 
@@ -33,33 +33,43 @@ ThreadReply = Callable[[str], None]
 
 
 def newest_drained_item(
-    drained_log: DrainedLog, item_id: str | None, *, thread_ts: str, channel: str
+    drained_log: DrainedLog, item_id: str | None, conversation: Conversation
 ) -> InboxItem | None:
-    """The item as pan drained it, only when it was sent in this thread and channel and is the
-    newest message pan drained there from the same sender: an older message cannot authorize
-    what the sender's later one may have changed, while someone else's "+1" changes nothing."""
+    """The item as pan drained it, only when it was sent in this conversation (same source,
+    id and place) and is the newest message pan drained there from the same sender: an older
+    message cannot authorize what the sender's later one may have changed, while someone
+    else's "+1" changes nothing."""
     if item_id is None:
         return None
     item = drained_log.get(item_id)
-    if item is None or item.thread_ts != thread_ts or item.channel != channel:
-        logger.info(f"no drained item id={item_id} in thread={thread_ts}")
+    if item is None or item.conversation != conversation:
+        logger.info(f"no drained item id={item_id} in conversation={conversation.key}")
         return None
-    newest = drained_log.newest_in(thread_ts, channel, item.slack_user)
+    newest = drained_log.newest_in(conversation, item.author)
     if newest is None or newest.id != item.id:
-        logger.info(f"drained item id={item_id} is not its sender's newest in thread={thread_ts}")
+        logger.info(
+            f"drained item id={item_id} is not its sender's newest "
+            f"in conversation={conversation.key}"
+        )
         return None
     return item
 
 
-def refuse_x_source(thread_map: ThreadMap, thread_ts: str, item: InboxItem | None) -> None:
-    """Raise XSourceRefusedError (exit 35) when the thread or the item came from X."""
+def refuse_x_source(
+    thread_map: ThreadMap, drained_log: DrainedLog, item_id: str | None, conversation_id: str
+) -> None:
+    """Raise XSourceRefusedError (exit 35) when the item pan drained as `item_id`, or a
+    conversation with this id, came from X."""
     # TODO(MOB-87): replace with the X safety gate; until then X may only start new sessions.
-    record = thread_map.get(thread_ts)
-    from_x = (item is not None and item.source is ThreadSource.X) or (
-        record is not None and record.source is ThreadSource.X
-    )
-    if from_x:
-        logger.info(f"refused a thread from X thread={thread_ts}")
+    # Today only the --item check can fire: spawn always stores a Slack conversation, so no X
+    # record exists yet. The X safety gate (MOB-87) will make spawn store the item's source.
+    # The commands name a conversation by its id alone, so an X record with that id refuses:
+    # the gate errs on the side of refusing. The item is read whatever conversation it is in,
+    # since an X item can never pass the conversation check of a Slack command.
+    item = drained_log.get(item_id) if item_id is not None else None
+    x_record = thread_map.get(Conversation(source=ThreadSource.X, id=conversation_id))
+    if (item is not None and item.conversation.source is ThreadSource.X) or x_record is not None:
+        logger.info(f"refused a conversation from X id={conversation_id}")
         raise XSourceRefusedError(X_TO_ROUTE_NOTICE)
 
 
@@ -70,57 +80,69 @@ def require_named_target(
     item_id: str | None,
     target: str,
     requester: str | None,
-    thread_ts: str,
+    conversation: Conversation,
     reply: ThreadReply,
 ) -> InboxItem:
     """The item a send --to or relay (`action`) rests on, when it is usable (from `requester`, if given)
     and names `target` as a whole word or phrase; otherwise NoExactMatchError (exit 28). An
     unusable item also gets UNUSABLE_ITEM_REPLY in the thread."""
-    if item is None or (requester is not None and item.slack_user != requester):
-        _refuse_unusable_item(reply, thread_ts, NoExactMatchError(f"item {item_id} cannot be used"))
+    if item is None or (requester is not None and item.author != requester):
+        _refuse_unusable_item(
+            reply, conversation, NoExactMatchError(f"item {item_id} cannot be used")
+        )
     if not names_selector(item.raw_text, target):
         logger.info(
-            f"{action} target not in the person's drained message thread={thread_ts} item={item_id}"
+            f"{action} target not in the person's drained message conversation={conversation.key} item={item_id}"
         )
         raise NoExactMatchError(f"'{target}' is not named in the person's message")
     return item
 
 
 def require_requesters_message(
-    item: InboxItem | None, *, requester: str, thread_ts: str, reply: ThreadReply
+    item: InboxItem | None, *, requester: str, conversation: Conversation, reply: ThreadReply
 ) -> InboxItem:
     """The requester's own item a propose rests on; otherwise NoExactMatchError (exit 28) after
     UNUSABLE_ITEM_REPLY in the thread."""
-    if item is None or item.slack_user != requester:
+    if item is None or item.author != requester:
         _refuse_unusable_item(
             reply,
-            thread_ts,
-            NoExactMatchError(f"no message from {requester} to propose for in thread {thread_ts}"),
+            conversation,
+            NoExactMatchError(
+                f"no message from {requester} to propose for in thread {conversation.id}"
+            ),
         )
     return item
 
 
 def require_discard_request(
-    item: InboxItem | None, record: ThreadRecord | None, *, thread_ts: str, reply: ThreadReply
+    item: InboxItem | None,
+    record: ThreadRecord | None,
+    *,
+    conversation: Conversation,
+    reply: ThreadReply,
 ) -> None:
     """Allow done --discard only on the thread requester's own message that is exactly
     done --discard; otherwise DiscardNotRequestedError (exit 33). An unusable item (missing, or
     not from the thread's requester) also gets UNUSABLE_ITEM_REPLY in the thread."""
     refusal = DiscardNotRequestedError(
-        f"--discard refused for thread {thread_ts}: its requester did not send done --discard"
+        f"--discard refused for thread {conversation.id}: its requester did not send done --discard"
     )
     requester = record.requester if record is not None else None
-    if item is None or requester is None or item.slack_user != requester:
-        _refuse_unusable_item(reply, thread_ts, refusal)
+    if item is None or requester is None or item.author != requester:
+        _refuse_unusable_item(reply, conversation, refusal)
     if not asks_to_discard(item.raw_text):
         raise refusal
 
 
-def _refuse_unusable_item(reply: ThreadReply, thread_ts: str, error: PanError) -> NoReturn:
+def _refuse_unusable_item(
+    reply: ThreadReply, conversation: Conversation, error: PanError
+) -> NoReturn:
     # Says so in the thread, so a refusal is never silent, then raises `error`. A failed post
     # is only logged: the refusal and its exit code stand either way.
     try:
         reply(UNUSABLE_ITEM_REPLY)
     except (CredentialsError, SlackPostError) as e:
-        logger.warning(f"could not post the refusal thread={thread_ts}: {type(e).__name__}")
+        logger.warning(
+            f"could not post the refusal conversation={conversation.key}: {type(e).__name__}"
+        )
     raise error

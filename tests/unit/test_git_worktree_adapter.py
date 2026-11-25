@@ -13,7 +13,7 @@ from terminal_host_fakes import FakeTerminalHost
 
 from pan.backend.session_control import done_thread
 from pan.core.errors import GitWorktreeError, PanError, SpawnError, UnsavedWorkError
-from pan.core.models import BranchStatus, ThreadRecord, WorkerStatus
+from pan.core.models import BranchStatus, Conversation, ThreadRecord, WorkerStatus
 from pan.data.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.data.threadmap import FileThreadMap
 
@@ -476,9 +476,8 @@ def test_done_thread_with_real_git(
     thread_map = FileThreadMap(tmp_path / "threads.json", clock)
     thread_map.tie(
         ThreadRecord(
-            thread_ts="1700000000.000100",
+            conversation=Conversation.slack("1700000000.000100", "C0TEST"),
             terminal_name=_BRANCH,
-            channel="C0TEST",
             worktree_path=worktree,
             repo_path=main_repo,
             status=WorkerStatus.IDLE,
@@ -490,8 +489,7 @@ def test_done_thread_with_real_git(
 
     try:
         done_thread(
-            thread_ts="1700000000.000100",
-            channel="C0TEST",
+            conversation=Conversation.slack("1700000000.000100", "C0TEST"),
             discard=discard,
             worktree_base=tmp_path / "worktrees",
             fallback_repo=tmp_path / "orchestrator",

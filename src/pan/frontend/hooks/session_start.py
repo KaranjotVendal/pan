@@ -6,6 +6,7 @@ from typing import TextIO
 
 from pydantic import BaseModel
 
+from pan.core.models import Conversation
 from pan.core.seams import ThreadMap
 from pan.utils.logging import initialise_logger
 
@@ -19,7 +20,7 @@ class SessionStartHookPayload(BaseModel, frozen=True):
 
 
 def session_start_hook(
-    thread_ts: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     *,
     stdin: TextIO = sys.stdin,
@@ -29,9 +30,9 @@ def session_start_hook(
     # `pan read --full` can render the transcript without any session index. Posts nothing.
     payload = SessionStartHookPayload.model_validate_json(stdin.read())
     if not payload.session_id:
-        logger.warning(f"session-start hook without a session id thread={thread_ts}")
+        logger.warning(f"session-start hook without a session id conversation={conversation.key}")
         return
     thread_map.record_session(
-        thread_ts, payload.session_id, payload.transcript_path, session_name=session_name
+        conversation, payload.session_id, payload.transcript_path, session_name=session_name
     )
-    logger.info(f"session-start hook thread={thread_ts}")
+    logger.info(f"session-start hook conversation={conversation.key}")

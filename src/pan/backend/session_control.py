@@ -36,13 +36,13 @@ from pan.core.errors import (
 from pan.core.models import (
     AgentStatus,
     BranchStatus,
+    Conversation,
     InboxThread,
     ReplyMode,
     StatusState,
     Terminal,
     TerminalState,
     ThreadRecord,
-    ThreadSource,
     WorkerStatus,
     WorktreeStatus,
 )
@@ -151,8 +151,7 @@ def _deliver(
     text: str,
     *,
     slack: SlackAdapter,
-    channel: str,
-    thread_ts: str,
+    conversation: Conversation,
     retry_hint: str | None = None,
 ) -> None:
     # Type the text only into a session that is ready for it. Busy, or a state pan cannot
@@ -162,15 +161,15 @@ def _deliver(
     # tells the person to do next.
     name = _session_name(terminal)
     if terminal.agent_status is AgentStatus.BLOCKED:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
+        slack_post(slack, conversation, _blocked_reply(name, retry_hint))
         raise TargetBlockedError(f"{terminal.address} is waiting on a person")
     if not _is_ready(terminal):
-        slack_post(slack, channel, thread_ts, _busy_reply(name, retry_hint))
+        slack_post(slack, conversation, _busy_reply(name, retry_hint))
         raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
     try:
         terminal_host.send(terminal.address, text)
     except TargetBlockedError:
-        slack_post(slack, channel, thread_ts, _blocked_reply(name, retry_hint))
+        slack_post(slack, conversation, _blocked_reply(name, retry_hint))
         raise
 
 
@@ -188,7 +187,7 @@ def _with_inbox_link(
     if found is None:
         return record
     thread_map.record_inbox_thread(
-        record.thread_ts, found.thread_id, found.url, session_name=record.terminal_name
+        record.conversation, found.thread_id, found.url, session_name=record.terminal_name
     )
     return record.model_copy(
         update={
@@ -214,8 +213,7 @@ def _with_found_thread(record: ThreadRecord, found_thread: InboxThread) -> Threa
 
 def send_to_session(
     *,
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     selector: str,
     text: str,
     requester: str | None,
@@ -240,7 +238,7 @@ def send_to_session(
     try:
         target = resolve_target(selector, terminals)
     except (TargetNotFoundError, TargetAmbiguousError) as error:
-        logger.info(f"no exact match for selector={selector} thread={thread_ts}")
+        logger.info(f"no exact match for selector={selector} conversation={conversation.key}")
         raise NoExactMatchError(f"no session matches '{selector}' exactly") from error
 
     name = _session_name(target)
@@ -269,8 +267,7 @@ def send_to_session(
         target,
         from_slack_text(inbox_thread, text, reply_mode, thread_known=thread_known),
         slack=slack,
-        channel=channel,
-        thread_ts=thread_ts,
+        conversation=conversation,
         retry_hint=retry_hint,
     )
 
@@ -279,15 +276,13 @@ def send_to_session(
         # A desk session: pan did not start it, so its record holds its own folder and pan
         # never stops, removes or reopens it.
         tied_record = ThreadRecord(
-            thread_ts=thread_ts,
+            conversation=conversation,
             terminal_name=name,
             terminal_address=target.address,
-            channel=channel,
             worktree_path=target.cwd,
             status=WorkerStatus.RUNNING,
             created_at=now,
             updated_at=now,
-            source=ThreadSource.SLACK,
             started_by_pan=False,
             requester=requester,
             reply_mode=reply_mode,
@@ -296,12 +291,10 @@ def send_to_session(
             task_started_at=now,
         )
     else:
-        same_thread = session_record.thread_ts == thread_ts
+        same_thread = session_record.conversation.key == conversation.key
         updates: dict[str, object] = {
-            "thread_ts": thread_ts,
-            "channel": channel,
+            "conversation": conversation,
             "terminal_address": target.address,
-            "source": ThreadSource.SLACK,
             "requester": requester,
             "reply_mode": reply_mode,
             "inbox_thread_name": inbox_thread,
@@ -332,7 +325,7 @@ def send_to_session(
     )
     send_private_details(slack=slack, record=tied_record)
     logger.info(
-        f"sent to session terminal={target.address} thread={thread_ts} "
+        f"sent to session terminal={target.address} conversation={conversation.key} "
         f"started_by_pan={tied_record.started_by_pan} len={len(text)}"
     )
     return tied_record
@@ -340,8 +333,7 @@ def send_to_session(
 
 def follow_up_to_session(
     *,
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     text: str,
     terminal_host: TerminalHost,
     thread_map: ThreadMap,
@@ -358,14 +350,14 @@ def follow_up_to_session(
     # text is typed, so the Stop hook posts this answer; a busy or blocked refusal leaves the
     # record unchanged. Without it the mode is left as it is (never back to on demand). Once
     # typed, the follow-up is the thread's task and its status message says Working.
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
-        raise ThreadNotFoundError(f"no tied session for thread_ts={thread_ts}")
+        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
+        raise ThreadNotFoundError(f"no tied session for thread_ts={conversation.id}")
     terminal = _live_terminal(terminal_host, record)
     if terminal is None:
         if not record.started_by_pan:
-            slack_post(slack, channel, thread_ts, desk_session_ended_reply(record.terminal_name))
+            slack_post(slack, conversation, desk_session_ended_reply(record.terminal_name))
         raise TerminalGoneError(f"the session {record.terminal_name} has ended")
     reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
 
@@ -375,15 +367,17 @@ def follow_up_to_session(
         typed = from_slack_text(
             inbox_thread, text, reply_mode, thread_known=inbox_thread_known(record)
         )
-    _deliver(terminal_host, terminal, typed, slack=slack, channel=channel, thread_ts=thread_ts)
+    _deliver(terminal_host, terminal, typed, slack=slack, conversation=conversation)
     if reply_mode is not record.reply_mode:
-        thread_map.set_reply_mode(thread_ts, reply_mode, session_name=record.terminal_name)
-        logger.info(f"reply mode set to {reply_mode} thread={thread_ts}")
+        thread_map.set_reply_mode(conversation, reply_mode, session_name=record.terminal_name)
+        logger.info(f"reply mode set to {reply_mode} conversation={conversation.key}")
         record = record.model_copy(update={"reply_mode": reply_mode})
     if not record.started_by_pan:
-        thread_map.update_status(thread_ts, WorkerStatus.RUNNING, session_name=record.terminal_name)
+        thread_map.update_status(
+            conversation, WorkerStatus.RUNNING, session_name=record.terminal_name
+        )
     label, started_at = status_label(text), clock.now()
-    thread_map.record_task(thread_ts, label, started_at, session_name=record.terminal_name)
+    thread_map.record_task(conversation, label, started_at, session_name=record.terminal_name)
     record = publish_status(
         slack=slack,
         thread_map=thread_map,
@@ -391,31 +385,32 @@ def follow_up_to_session(
         state=StatusState.WORKING,
         clock=clock,
     )
-    logger.info(f"follow-up sent terminal={terminal.address} thread={thread_ts} len={len(text)}")
+    logger.info(
+        f"follow-up sent terminal={terminal.address} conversation={conversation.key} len={len(text)}"
+    )
     return record
 
 
 def forget_thread(
-    *, thread_ts: str, channel: str, thread_map: ThreadMap, slack: SlackAdapter
+    *, conversation: Conversation, thread_map: ThreadMap, slack: SlackAdapter
 ) -> None:
     # Untie the thread. The session is never stopped or touched.
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
+        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
         return
-    thread_map.untie(thread_ts)
+    thread_map.untie(conversation)
     slack_post(
         slack,
-        channel,
-        thread_ts,
+        conversation,
         f"untied this thread from {record.terminal_name}; the session was not stopped",
     )
-    logger.info(f"forget thread={thread_ts}")
+    logger.info(f"forget conversation={conversation.key}")
 
 
 def stop_thread(
     *,
-    thread_ts: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     terminal_host: TerminalHost,
     open_slack: Callable[[], SlackAdapter],
@@ -424,19 +419,19 @@ def stop_thread(
     """Kill switch: remove the worker's terminal, mark its record FAILED and edit the thread's
     status message to Stopped. A session pan did not start is only untied, never stopped
     (NotPanSessionError, exit 25)."""
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(conversation)
     if record is None:
-        raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+        raise ThreadNotFoundError(f"no thread record for thread_ts={conversation.id}")
     if not record.started_by_pan:
         if record.tied:
-            thread_map.untie(thread_ts)
+            thread_map.untie(conversation)
         raise NotPanSessionError(
             f"{record.terminal_name} was not started by pan, so pan never stops it; "
             "this thread is untied from it"
         )
     if record.terminal_address:
         terminal_host.remove(record.terminal_address)
-    thread_map.update_status(thread_ts, WorkerStatus.FAILED, session_name=record.terminal_name)
+    thread_map.update_status(conversation, WorkerStatus.FAILED, session_name=record.terminal_name)
     if record.tied:
         _publish_stopped(open_slack, thread_map, record, clock)
 
@@ -469,7 +464,7 @@ def _session_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Term
     if record.terminal_address and not joins_by_address(record, terminal):
         logger.info(
             f"terminal at address={record.terminal_address} is not {record.terminal_name}; "
-            f"treating the session as gone thread={record.thread_ts}"
+            f"treating the session as gone conversation={record.conversation.key}"
         )
         return None
     return terminal
@@ -532,7 +527,7 @@ def screen_answer(
             full_history_lines=screen_lines,
         )
     except TerminalHostError:
-        logger.info(f"check could not read the screen thread={record.thread_ts}")
+        logger.info(f"check could not read the screen conversation={record.conversation.key}")
         return None
     cleaned = clean_screen_text(screen)
     if not cleaned:
@@ -542,8 +537,7 @@ def screen_answer(
 
 def check_thread(
     *,
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     terminal_host: TerminalHost,
     inbox_directory: InboxDirectory,
@@ -554,9 +548,9 @@ def check_thread(
     # Bring the thread's status message up to date (edited in place, or posted anew when it is
     # missing), post the latest answer as its own clean message when there is one, and send
     # the session's Inbox thread and terminal to the requester only.
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, channel, thread_ts, UNTIED_THREAD_REPLY)
+        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
         return
     record = _with_inbox_link(record, inbox_directory, thread_map)
     terminal = _live_terminal(terminal_host, record)
@@ -572,9 +566,9 @@ def check_thread(
     else:
         screen = screen_answer(record, terminal, terminal_host, screen_lines=screen_lines)
         if screen is not None:
-            slack_post_parts(slack, channel, thread_ts, screen)
+            slack_post_parts(slack, conversation, screen)
     send_private_details(slack=slack, record=record)
-    logger.info(f"check thread={thread_ts} session={record.terminal_name}")
+    logger.info(f"check conversation={conversation.key} session={record.terminal_name}")
 
 
 NO_SESSION_REPLY = "This thread has no session."
@@ -685,8 +679,7 @@ def _repo_without_worktree(
 
 def done_thread(
     *,
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     discard: bool,
     worktree_base: Path,
     fallback_repo: Path,
@@ -703,24 +696,24 @@ def done_thread(
     # worktree (or, when the folder is already gone, the repository's record of it) and its
     # branch, and only then is the record marked DONE and untied, and the thread's status
     # message says Closed.
-    record = thread_map.get(thread_ts)
+    record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, channel, thread_ts, NO_SESSION_REPLY)
+        slack_post(slack, conversation, NO_SESSION_REPLY)
         return
     name = record.terminal_name
     if not record.started_by_pan:
-        thread_map.untie(thread_ts)
-        slack_post(slack, channel, thread_ts, desk_session_done_reply(name))
-        logger.info(f"done untied desk session={name} thread={thread_ts}")
+        thread_map.untie(conversation)
+        slack_post(slack, conversation, desk_session_done_reply(name))
+        logger.info(f"done untied desk session={name} conversation={conversation.key}")
         return
 
     terminal = _session_terminal(terminal_host, record)
     if terminal is not None and terminal.state is TerminalState.LIVE and not discard:
         if terminal.agent_status is AgentStatus.WORKING:
-            slack_post(slack, channel, thread_ts, done_busy_reply(name))
+            slack_post(slack, conversation, done_busy_reply(name))
             raise SessionBusyError(f"{name} is still working; not closed")
         if terminal.agent_status is AgentStatus.BLOCKED:
-            slack_post(slack, channel, thread_ts, done_blocked_reply(name))
+            slack_post(slack, conversation, done_blocked_reply(name))
             raise TargetBlockedError(f"{name} is waiting on a prompt; not closed")
 
     worktree_path = record.worktree_path
@@ -731,8 +724,7 @@ def done_thread(
             if not _is_pan_worktree(worktree_path, worktree_base):
                 slack_post(
                     slack,
-                    channel,
-                    thread_ts,
+                    conversation,
                     f"{name}'s folder is not in pan's worktree folder; pan never removes it.",
                 )
                 raise UnsafeWorktreeError(f"{worktree_path} is not under {worktree_base}")
@@ -740,8 +732,7 @@ def done_thread(
             if worktree.is_main_worktree:
                 slack_post(
                     slack,
-                    channel,
-                    thread_ts,
+                    conversation,
                     f"{name}'s folder is a main repository; pan never removes it.",
                 )
                 raise UnsafeWorktreeError(f"{worktree_path} is a main worktree")
@@ -751,7 +742,7 @@ def done_thread(
         if repo is not None:
             branch = git.branch_status(repo, name)
     except GitWorktreeError:
-        slack_post(slack, channel, thread_ts, f"Could not read {name}'s worktree; kept it.")
+        slack_post(slack, conversation, f"Could not read {name}'s worktree; kept it.")
         raise
 
     uncommitted_count = len(uncommitted_paths(worktree)) if worktree is not None else 0
@@ -759,7 +750,7 @@ def done_thread(
     if worktree is not None:
         unpushed_count += worktree.detached_commits
     if (uncommitted_count or unpushed_count) and not discard:
-        slack_post(slack, channel, thread_ts, kept_reply(name, uncommitted_count, unpushed_count))
+        slack_post(slack, conversation, kept_reply(name, uncommitted_count, unpushed_count))
         raise UnsavedWorkError(
             f"{name} has {uncommitted_count} uncommitted file(s) and "
             f"{unpushed_count} unpushed commit(s); not closed"
@@ -787,22 +778,20 @@ def done_thread(
         thread_map.put(record.model_copy(update={"terminal_address": ""}))
         slack_post(
             slack,
-            channel,
-            thread_ts,
+            conversation,
             f"Closed {name}, but could not remove its worktree or branch; "
             f"send `@pan done` to try again, or remove {worktree_path} by hand.",
         )
         raise
 
-    thread_map.update_status(thread_ts, WorkerStatus.DONE, session_name=name)
-    thread_map.untie(thread_ts)
+    thread_map.update_status(conversation, WorkerStatus.DONE, session_name=name)
+    thread_map.untie(conversation)
     publish_status(
         slack=slack, thread_map=thread_map, record=record, state=StatusState.CLOSED, clock=clock
     )
     slack_post(
         slack,
-        channel,
-        thread_ts,
+        conversation,
         closed_reply(
             name,
             worktree_removed=worktree_removed,
@@ -811,6 +800,6 @@ def done_thread(
         ),
     )
     logger.info(
-        f"done session={name} thread={thread_ts} discard={discard} "
+        f"done session={name} conversation={conversation.key} discard={discard} "
         f"worktree_removed={worktree_removed} branch_deleted={branch_deleted}"
     )

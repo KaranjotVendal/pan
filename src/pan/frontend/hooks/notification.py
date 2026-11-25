@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from pan.backend.status_message import publish_status
 from pan.core.errors import ThreadNotFoundError
-from pan.core.models import StatusState, WorkerStatus
+from pan.core.models import Conversation, StatusState, WorkerStatus
 from pan.core.seams import Clock, SlackAdapter, ThreadMap
 from pan.utils.clock import SystemClock
 from pan.utils.logging import initialise_logger
@@ -40,8 +40,7 @@ def is_blocking_notification(payload: NotificationHookPayload) -> bool:
 
 
 def notification_hook(
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     slack: SlackAdapter,
     *,
@@ -55,17 +54,17 @@ def notification_hook(
     # posted. An idle reminder changes nothing. `session_name` picks this session's record in
     # the thread.
     payload = NotificationHookPayload.model_validate_json(stdin.read())
-    record = thread_map.get(thread_ts, session_name=session_name)
+    record = thread_map.get(conversation, session_name=session_name)
     if record is None:
-        raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+        raise ThreadNotFoundError(f"no thread record for thread_ts={conversation.id}")
     if not is_blocking_notification(payload):
         logger.info(
-            f"notification hook thread={thread_ts} ignored "
+            f"notification hook conversation={conversation.key} ignored "
             f"type={payload.notification_type or 'none'}"
         )
         return
 
-    thread_map.update_status(thread_ts, WorkerStatus.BLOCKED, session_name=record.terminal_name)
+    thread_map.update_status(conversation, WorkerStatus.BLOCKED, session_name=record.terminal_name)
     if record.tied:
         publish_status(
             slack=slack,
@@ -75,4 +74,4 @@ def notification_hook(
             clock=clock or SystemClock(),
             detail=payload.message or None,
         )
-    logger.info(f"notification hook thread={thread_ts} status=blocked")
+    logger.info(f"notification hook conversation={conversation.key} status=blocked")

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from pan.core.errors import InboxError
-from pan.core.models import InboxItem
+from pan.core.models import Conversation, InboxItem
 from pan.data.inbox import FileInboxStore
 
 _BASE_TIME = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
@@ -15,9 +16,8 @@ _BASE_TIME = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 def _item(event_id: str, received_at: datetime, channel: str = "C1") -> InboxItem:
     return InboxItem(
         id=event_id,
-        slack_user="U1",
-        channel=channel,
-        thread_ts="1718000000.000100",
+        author="U1",
+        conversation=Conversation.slack("1718000000.000100", channel),
         is_thread_reply=False,
         raw_text="do the thing",
         received_at=received_at,
@@ -105,3 +105,26 @@ def test_malformed_entry_does_not_lose_valid_siblings(tmp_path: Path) -> None:
     # The corrupt entry is quarantined; the valid sibling survives for a retry.
     drained = store.drain()
     assert [item.id for item in drained] == ["EvGood"]
+
+
+def test_a_flat_entry_from_before_conversation_drains_in_the_new_shape(tmp_path: Path) -> None:
+    # A gateway still running the previous pan writes entries in the flat shape.
+    inbox_dir = tmp_path / "inbox"
+    inbox_dir.mkdir()
+    (inbox_dir / "EvOld.json").write_text(
+        json.dumps(
+            {
+                "id": "EvOld",
+                "slack_user": "U1",
+                "channel": "C1",
+                "thread_ts": "1718000000.000100",
+                "is_thread_reply": False,
+                "raw_text": "do the thing",
+                "received_at": _BASE_TIME.isoformat(),
+            }
+        )
+    )
+
+    (drained,) = FileInboxStore(inbox_dir).drain()
+
+    assert drained == _item("EvOld", _BASE_TIME)

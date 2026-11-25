@@ -8,6 +8,7 @@ from terminal_host_fakes import make_terminal
 
 from pan.core.models import (
     AgentStatus,
+    Conversation,
     SessionSummary,
     StatusState,
     TerminalState,
@@ -39,10 +40,9 @@ _NOW_SLACK_TIME = "<!date^1784197800^{time}|10:30 UTC>"
 
 def _record(**updates: object) -> ThreadRecord:
     record = ThreadRecord(
-        thread_ts="1700000000.000100",
+        conversation=Conversation.slack("1700000000.000100", "C0TEST"),
         terminal_name="pan-login",
         terminal_address="t7",
-        channel="C0TEST",
         worktree_path=Path("/tmp/wt/pan-login"),
         created_at=_NOW,
         updated_at=_NOW,

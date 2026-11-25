@@ -5,11 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from pan.core.errors import SlackPostError
 from pan.core.models import (
+    Conversation,
     InboxItem,
     PanConfig,
     SlackConfig,
     ThreadRecord,
+    ThreadSource,
     UserPolicy,
     WorkerStatus,
 )
@@ -42,7 +45,14 @@ def test_pan_config_composition_resolves_nested_fields() -> None:
     assert config.paths.threads == Path("/Users/me/.pan/threads.json")
 
 
-def test_inbox_item_parses_typed_fields() -> None:
+@pytest.mark.parametrize(
+    ("stored_source", "expected_source"),
+    [({}, ThreadSource.SLACK), ({"source": "x"}, ThreadSource.X)],
+    ids=["no-source", "x"],
+)
+def test_a_flat_inbox_item_from_before_conversation_loads_into_the_new_shape(
+    stored_source: dict[str, str], expected_source: ThreadSource
+) -> None:
     item = InboxItem.model_validate(
         {
             "id": "Ev0AAAAA",
@@ -52,19 +62,35 @@ def test_inbox_item_parses_typed_fields() -> None:
             "is_thread_reply": True,
             "raw_text": "@pan build the thing",
             "received_at": "2026-07-16T10:00:00+00:00",
+            **stored_source,
         }
     )
 
-    assert item.is_thread_reply is True
+    assert item.author == "U12345"
+    assert item.conversation == Conversation(
+        source=expected_source, id="1718000000.000100", place="C0001"
+    )
     assert isinstance(item.received_at, datetime)
+
+
+def test_conversation_key_tells_sources_apart_and_ignores_the_place() -> None:
+    slack_thread = Conversation.slack("1700000000", "C0001")
+
+    assert slack_thread.key == Conversation.slack("1700000000", "C0002").key
+    assert slack_thread.key != Conversation(source=ThreadSource.X, id="1700000000").key
+
+
+def test_conversation_slack_channel_needs_a_place() -> None:
+    assert Conversation.slack("1700000000", "C0001").slack_channel() == "C0001"
+    with pytest.raises(SlackPostError):
+        Conversation(source=ThreadSource.X, id="1700000000").slack_channel()
 
 
 def test_thread_record_defaults_to_spawning() -> None:
     now = datetime(2026, 7, 16, 10, 0, 0)
     record = ThreadRecord(
-        thread_ts="1718000000.000100",
+        conversation=Conversation.slack("1718000000.000100", "C0001"),
         terminal_name="pan-task-3",
-        channel="C0001",
         worktree_path=Path("/Users/me/dev/pan-worktrees/task-3"),
         created_at=now,
         updated_at=now,
@@ -74,20 +100,6 @@ def test_thread_record_defaults_to_spawning() -> None:
     assert record.terminal_address == ""
     assert record.claude_session_id is None
     assert record.transcript_path is None
-
-
-def test_thread_record_carries_channel() -> None:
-    now = datetime(2026, 7, 16, 10, 0, 0)
-    record = ThreadRecord(
-        thread_ts="1718000000.000100",
-        terminal_name="pan-task-3",
-        channel="C0001",
-        worktree_path=Path("/Users/me/dev/pan-worktrees/task-3"),
-        created_at=now,
-        updated_at=now,
-    )
-
-    assert record.channel == "C0001"
 
 
 @pytest.mark.parametrize(
@@ -118,6 +130,7 @@ def test_herdr_era_record_loads_as_lost(legacy_status: str, expected_status: Wor
         }
     )
 
+    assert record.conversation == Conversation.slack("1700000000.000100", "C0001")
     assert record.terminal_name == "pan-0a1b2c3d"
     assert record.terminal_address == ""
     assert record.status is expected_status

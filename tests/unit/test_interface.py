@@ -14,7 +14,7 @@ from pan.backend.interface import (
     resolve_target,
 )
 from pan.core.errors import TargetAmbiguousError, TargetBlockedError, TargetNotFoundError
-from pan.core.models import Terminal, TerminalRead, ThreadRecord
+from pan.core.models import Conversation, Terminal, TerminalRead, ThreadRecord
 
 _NOW = datetime(2026, 7, 19, 10, 0, 0, tzinfo=UTC)
 
@@ -32,10 +32,9 @@ def _terminals() -> list[Terminal]:
 
 def _record(address: str, transcript_path: Path | None) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts="t-1",
+        conversation=Conversation.slack("t-1", "C1"),
         terminal_name="pan-backend",
         terminal_address=address,
-        channel="C1",
         worktree_path=Path("/wt/pan-backend"),
         transcript_path=transcript_path,
         created_at=_NOW,

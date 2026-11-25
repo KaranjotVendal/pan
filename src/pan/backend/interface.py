@@ -69,7 +69,7 @@ def _transcript_for(target: Terminal, records: list[ThreadRecord]) -> str | None
             try:
                 return render_transcript(record.transcript_path)
             except OSError:
-                logger.warning(f"transcript unreadable thread={record.thread_ts}")
+                logger.warning(f"transcript unreadable conversation={record.conversation.key}")
                 return None
     return None
 

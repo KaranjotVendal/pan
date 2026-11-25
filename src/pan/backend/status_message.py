@@ -42,23 +42,32 @@ def publish_status(
     fallback_text = status_text(state, record.status_label)
     if record.status_message_ts:
         try:
-            slack.update_message(record.channel, record.status_message_ts, blocks, fallback_text)
-            logger.info(f"status edited thread={record.thread_ts} state={state}")
+            slack.update_message(
+                record.conversation.slack_channel(),
+                record.status_message_ts,
+                blocks,
+                fallback_text,
+            )
+            logger.info(f"status edited conversation={record.conversation.key} state={state}")
             return record
         except SlackPostError as e:
             logger.warning(
                 f"status message could not be edited, posting a new one "
-                f"thread={record.thread_ts}: {e}"
+                f"conversation={record.conversation.key}: {e}"
             )
     try:
-        message_ts = slack.post_blocks(record.channel, record.thread_ts, blocks, fallback_text)
+        message_ts = slack.post_blocks(
+            record.conversation.slack_channel(), record.conversation.id, blocks, fallback_text
+        )
     except SlackPostError as e:
-        logger.warning(f"status message could not be posted thread={record.thread_ts}: {e}")
+        logger.warning(
+            f"status message could not be posted conversation={record.conversation.key}: {e}"
+        )
         return record
     thread_map.record_status_message(
-        record.thread_ts, message_ts, session_name=record.terminal_name
+        record.conversation, message_ts, session_name=record.terminal_name
     )
-    logger.info(f"status posted thread={record.thread_ts} state={state}")
+    logger.info(f"status posted conversation={record.conversation.key} state={state}")
     return record.model_copy(update={"status_message_ts": message_ts})
 
 
@@ -74,10 +83,12 @@ def post_answer(
     # again). Stores its digest. True when posted. A Slack failure raises SlackPostError.
     digest = answer_digest(answer)
     if digest == record.last_answer_digest:
-        logger.info(f"answer already posted, not posting again thread={record.thread_ts}")
+        logger.info(
+            f"answer already posted, not posting again conversation={record.conversation.key}"
+        )
         return False
-    slack_post_parts(slack, record.channel, record.thread_ts, answer)
-    thread_map.record_posted_answer(record.thread_ts, digest, session_name=record.terminal_name)
+    slack_post_parts(slack, record.conversation, answer)
+    thread_map.record_posted_answer(record.conversation, digest, session_name=record.terminal_name)
     return True
 
 
@@ -85,13 +96,18 @@ def send_private_details(*, slack: SlackAdapter, record: ThreadRecord) -> None:
     # The session's Inbox thread and terminal, as an ephemeral message to the requester only.
     # Skipped when the record has no requester; a failure is logged, never raised.
     if not record.requester:
-        logger.info(f"private details skipped, no requester thread={record.thread_ts}")
+        logger.info(f"private details skipped, no requester conversation={record.conversation.key}")
         return
     try:
         slack.post_ephemeral(
-            record.channel, record.thread_ts, record.requester, private_details_text(record)
+            record.conversation.slack_channel(),
+            record.conversation.id,
+            record.requester,
+            private_details_text(record),
         )
     except SlackPostError as e:
-        logger.warning(f"private details could not be sent thread={record.thread_ts}: {e}")
+        logger.warning(
+            f"private details could not be sent conversation={record.conversation.key}: {e}"
+        )
         return
-    logger.info(f"private details sent thread={record.thread_ts}")
+    logger.info(f"private details sent conversation={record.conversation.key}")
