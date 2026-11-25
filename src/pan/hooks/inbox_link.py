@@ -142,9 +142,12 @@ def _is_repl_call(payload: dict[str, Any]) -> bool:
 
 
 def _candidate_links(payload: dict[str, Any]) -> list[InboxLink]:
-    # The links a send result offers. The direct tool's JSON result is read first, as one
-    # link; else the send lines, one per distinct thread id. A code mode REPL call's result
-    # is only searched for send lines: its code may also have read or listed threads, whose
+    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}. Its
+    # `tool_response` may be the structured result (a dict), a string, or a list of content blocks
+    # (possibly under a `content` key) whose `text` is the Inbox's prose line followed by the
+    # result as JSON. Returns the links a send result offers: the direct tool's JSON result is read
+    # first, as one link; else the send lines, one per distinct thread id. A code mode REPL call's
+    # result is only searched for send lines: its code may also have read or listed threads, whose
     # JSON carries other threads' ids and urls.
     tool_response = payload.get("tool_response")
     if not _is_repl_call(payload):
@@ -152,19 +155,6 @@ def _candidate_links(payload: dict[str, Any]) -> list[InboxLink]:
         if json_link is not None:
             return [json_link]
     return _prose_links(tool_response)
-
-
-def parse_inbox_link(raw_payload: str) -> InboxLink | None:
-    # The Claude Code PostToolUse payload: {tool_name, tool_input, tool_response, ...}.
-    # `tool_response` may be the structured result (a dict), a string, or a list of content
-    # blocks (possibly under a `content` key) whose `text` is the Inbox's prose line followed
-    # by the result as JSON. The link, when the result offers exactly one; else None (no link,
-    # or send lines naming more than one thread).
-    payload = _payload(raw_payload)
-    if payload is None:
-        return None
-    links = _candidate_links(payload)
-    return links[0] if len(links) == 1 else None
 
 
 def _input_texts(value: Any, depth: int = 0) -> list[str]:

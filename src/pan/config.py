@@ -149,7 +149,6 @@ HELP_USER_FACING_COMMANDS: tuple[str, ...] = (
     "read",
     "status",
     "stop",
-    "pause",
 )
 # Slack renders a fenced block as monospace, and to_slack_mrkdwn passes a fence through verbatim,
 # so the generated help keeps its column alignment.
@@ -181,6 +180,12 @@ what you want in your own words, for example:
   help [command]             this help
 Untagged replies count only in a thread pan is working in.
 """.strip()
+
+
+# Config keys pan once had and no longer reads. A config holding them still loads; load_config
+# names them in a warning.
+REMOVED_TOP_LEVEL_CONFIG_KEYS: tuple[str, ...] = ("defaults", "gated_ops")
+REMOVED_USER_POLICY_KEYS: tuple[str, ...] = ("autonomy", "repos")
 
 
 def _expand_user_paths(raw_config: dict) -> None:
@@ -222,6 +227,25 @@ def _reject_unknown_terminal_host(raw_config: dict, config_path: Path) -> None:
         )
 
 
+def _warn_about_removed_keys(raw_config: dict, config_path: Path) -> None:
+    # Keys pan no longer reads. Named (never their values) so a person who set gated_ops or
+    # autonomy learns they enforced nothing, and can delete them.
+    removed_keys = [key for key in REMOVED_TOP_LEVEL_CONFIG_KEYS if key in raw_config]
+    paths = raw_config.get("paths")
+    if isinstance(paths, dict) and "logs" in paths:
+        removed_keys.append("paths.logs")
+    users = raw_config.get("users")
+    if isinstance(users, dict):
+        for user_key in REMOVED_USER_POLICY_KEYS:
+            if any(isinstance(policy, dict) and user_key in policy for policy in users.values()):
+                removed_keys.append(f"users.*.{user_key}")
+    if removed_keys:
+        logger.warning(
+            f"config keys {', '.join(removed_keys)} are no longer used and are ignored (gated_ops "
+            f"and autonomy never enforced anything); they can be deleted: {config_path}"
+        )
+
+
 def load_config(path: Path | None = None) -> PanConfig:
     config_path = path if path is not None else DEFAULT_CONFIG_PATH
 
@@ -240,6 +264,7 @@ def load_config(path: Path | None = None) -> PanConfig:
 
     _reject_herdr_era_orchestrator(raw_config, config_path)
     _reject_unknown_terminal_host(raw_config, config_path)
+    _warn_about_removed_keys(raw_config, config_path)
     _expand_user_paths(raw_config)
 
     try:

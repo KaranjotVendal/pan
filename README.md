@@ -74,15 +74,12 @@ Config is JSON at `~/.config/pan/config.json` and contains **no secrets**. A min
     "cwd": "~/dev/pan",
     "worktree_base": "~/dev/pan-worktrees"
   },
-  "defaults": { "agent": "claude", "permission_mode": "bypass", "repo_allowlist": [] },
   "users": {
-    "U_YOURID": { "autonomy": "full", "channels": ["*"], "repos": ["*"] }
+    "U_YOURID": { "channels": ["*"] }
   },
-  "gated_ops": [],
   "paths": {
     "inbox": "~/.pan/inbox",
     "threads": "~/.pan/threads.json",
-    "logs": "~/.pan/logs",
     "credentials": "~/.pan/credentials.json"
   }
 }
@@ -100,9 +97,7 @@ Config is JSON at `~/.config/pan/config.json` and contains **no secrets**. A min
 - A config from before herdr-core (with `orchestrator.pane_id`) is rejected with a message naming
   the keys that replace it.
 - `users` is your sender allowlist keyed by Slack user id; a mention from anyone not listed is
-  dropped before it reaches the inbox. `channels: ["*"]` allows all channels. `gated_ops: []` leaves
-  the approval gate dormant (populate it later — e.g. `git push`, `rm -rf` — to require approvals
-  with no code change).
+  dropped before it reaches the inbox. `channels: ["*"]` allows all channels.
 - Run `pan config show` to print the resolved config with the credentials masked.
 
 ## Start the orchestrator
@@ -159,12 +154,8 @@ For interactive debugging instead of launchd, run them in hc terminals: `hc run 
 
 The intended lid-closed story is the proven `caffeinate` + `pmset disablesleep 1` pattern, engaged
 **only on AC power and only while at least one worker is active**, so the machine is never forced
-awake for nothing. `src/pan/power.py` provides the policy predicate for that — `should_caffeinate`
-returns True exactly when on AC and at least one worker is running (R-3). The actuation that calls
-`caffeinate`/`pmset` off this decision is **not yet wired** (it is the deferred, live-verified part
-of the always-on work), so lid-closed execution does not hold the machine awake today — keep the lid
-open, or expect the machine to sleep. On battery it may sleep regardless; plug in for lid-closed
-runs once the actuation lands.
+awake for nothing. It is **not built yet**, so pan does not hold the machine awake today — keep the
+lid open, or expect the machine to sleep.
 
 ## CLI
 
@@ -195,7 +186,6 @@ runs once the actuation lands.
 | `pan relay <target> <message> --thread … --channel … --item …` | Send a message into a live terminal (address, name, or Herdr app label). The target must be named in the sender's newest message in the thread (`--item`), else exit 28; a thread from X exits 35. |
 | `pan read <target> [--full]` | Print a terminal's recent output, or the full transcript. |
 | `pan stop --thread …` | Kill switch: kill and remove the worker's terminal, mark the thread FAILED and edit its status message to Stopped. Refuses for a session pan did not start: it only unties the thread. |
-| `pan pause` | Toggle the pause flag (not checked by the gateway yet). |
 | `pan hook stop` / `pan hook notification` | Claude Code worker hooks: mark the thread idle / blocked and edit its status message to Finished / Waiting for you (with the prompt's text); the stop hook also posts the answer, alone, when the request said "reply in slack". Only a prompt waiting on the person (a permission prompt) marks blocked; the idle reminder Claude Code sends after a minute changes nothing. |
 | `pan hook inbox-link` | Claude Code worker PostToolUse hook on the Inbox tool (records the session's Inbox thread id and link). |
 | `pan hook session-start` | Claude Code worker SessionStart hook (records the session id and transcript path). |
@@ -234,7 +224,7 @@ pan keeps a thread readable for everyone in the channel:
 These use `chat:write` only (posting, editing and ephemeral messages); no new scope is needed.
 
 Exit codes of the `pan` commands: 10 unauthorized sender, 11 config missing, 12 credentials, 13
-inbox, 14 thread not found, 15 spawn, 16 terminal host, 17 Slack post, 18 gated op denied, 20
+inbox, 14 thread not found, 15 spawn, 16 terminal host, 17 Slack post, 20
 target not found, 21 target ambiguous, 22 terminal gone, 23 waiting on a prompt, 24 terminal name
 taken, 25 not a pan session, 26 busy, 27 service, 28 no exact match (propose instead), 29 unsaved
 work, 30 git cleanup failed, 31 unsafe worktree, 32 private message failed, 33 `--discard` not typed

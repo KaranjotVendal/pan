@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from pan.config import load_config
 from pan.errors import ConfigMissingError
-from pan.models import Agent, TerminalHostKind
+from pan.models import TerminalHostKind
 
 
 def _minimal_config() -> dict:
@@ -16,11 +18,9 @@ def _minimal_config() -> dict:
             "cwd": "/Users/me/dev/pan",
             "worktree_base": "/Users/me/dev/pan-worktrees",
         },
-        "defaults": {},
         "paths": {
             "inbox": "/Users/me/.pan/inbox",
             "threads": "/Users/me/.pan/threads.json",
-            "logs": "/Users/me/.pan/logs",
             "credentials": "/Users/me/.pan/credentials.json",
         },
     }
@@ -36,14 +36,12 @@ def test_load_config_validates_into_pan_config(tmp_path: Path) -> None:
     data = _minimal_config()
     data["orchestrator"]["terminal"] = "t42"
     data["orchestrator"]["app_space"] = "sp123"
-    data["defaults"] = {"agent": "claude"}
     data["users"] = {"U1": {"channels": ["C1"]}}
 
     config = load_config(_write_config(tmp_path, data))
 
     assert config.orchestrator.terminal == "t42"
     assert config.orchestrator.app_space == "sp123"
-    assert config.defaults.agent is Agent.CLAUDE
     assert config.users["U1"].channels == ["C1"]
 
 
@@ -59,7 +57,6 @@ def test_omitted_optional_sections_fall_back_to_defaults(tmp_path: Path) -> None
     assert config.orchestrator.terminal == "pan-orchestrator"
     assert config.orchestrator.app_space is None
     assert config.orchestrator.command == ["claude"]
-    assert config.gated_ops == []
     assert config.users == {}
 
 
@@ -130,3 +127,84 @@ def test_non_object_json_raises_config_missing_error(tmp_path: Path, non_object_
 
     with pytest.raises(ConfigMissingError):
         load_config(config_path)
+
+
+def test_config_with_removed_keys_still_loads(tmp_path: Path) -> None:
+    # Configs written before these keys were removed still carry them; they are ignored.
+    data = _minimal_config()
+    data["defaults"] = {"agent": "codex", "permission_mode": "bypass", "repo_allowlist": []}
+    data["users"] = {"U1": {"autonomy": "gated", "channels": ["C1"], "repos": ["*"]}}
+    data["gated_ops"] = ["git push"]
+    data["paths"]["logs"] = "/Users/me/.pan/logs"
+
+    config = load_config(_write_config(tmp_path, data))
+
+    assert config.users["U1"].channels == ["C1"]
+    assert config.paths.threads == Path("/Users/me/.pan/threads.json")
+
+
+def _set_removed_defaults(data: dict) -> None:
+    data["defaults"] = {"agent": "secret-default-value"}
+
+
+def _set_removed_gated_ops(data: dict) -> None:
+    data["gated_ops"] = ["secret-gated-op"]
+
+
+def _set_removed_paths_logs(data: dict) -> None:
+    data["paths"]["logs"] = "/secret/logs/path"
+
+
+def _set_removed_user_autonomy(data: dict) -> None:
+    data["users"] = {"U1": {"channels": ["C1"]}, "U2": {"autonomy": "secret-autonomy"}}
+
+
+def _set_removed_user_repos(data: dict) -> None:
+    data["users"] = {"U1": {"repos": ["secret-repo"]}}
+
+
+def _no_removed_keys(data: dict) -> None:
+    data["users"] = {"U1": {"channels": ["C1"]}}
+
+
+@pytest.mark.parametrize(
+    "add_keys, expected_key_name",
+    [
+        (_set_removed_defaults, "defaults"),
+        (_set_removed_gated_ops, "gated_ops"),
+        (_set_removed_paths_logs, "paths.logs"),
+        (_set_removed_user_autonomy, "users.*.autonomy"),
+        (_set_removed_user_repos, "users.*.repos"),
+        (_no_removed_keys, None),
+    ],
+    ids=["defaults", "gated-ops", "paths-logs", "user-autonomy", "user-repos", "none"],
+)
+def test_removed_config_keys_are_named_in_one_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    add_keys: Callable[[dict], None],
+    expected_key_name: str | None,
+) -> None:
+    data = _minimal_config()
+    add_keys(data)
+    config_path = _write_config(tmp_path, data)
+
+    # propagate=False on this logger, so attach caplog's handler directly.
+    config_logger = logging.getLogger("pan.config")
+    config_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="pan.config"):
+            load_config(config_path)
+    finally:
+        config_logger.removeHandler(caplog.handler)
+
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    if expected_key_name is None:
+        assert warnings == []
+        return
+    assert len(warnings) == 1
+    assert expected_key_name in warnings[0]
+    assert "ignored" in warnings[0]
+    assert "secret" not in warnings[0]

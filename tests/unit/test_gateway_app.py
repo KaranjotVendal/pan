@@ -91,12 +91,10 @@ def _config(users: dict[str, dict]) -> PanConfig:
     return PanConfig.model_validate(
         {
             "orchestrator": {"cwd": "/tmp/pan", "worktree_base": "/tmp/wt"},
-            "defaults": {},
             "users": users,
             "paths": {
                 "inbox": "/tmp/inbox",
                 "threads": "/tmp/threads.json",
-                "logs": "/tmp/logs",
                 "credentials": "/tmp/creds.json",
             },
         }

@@ -83,6 +83,17 @@ as it works.
   notices, `TaskMode`, `RouteKind`, `Route`, `Directive`, `InboxItem.route`, `OpenQuestions`,
   `route_with_pending`, `select_sessions_for_slack`, `match_words` and
   `SESSIONS_MATCH_MIN_WORD_LENGTH`.
+- Unused code, with no change to anything in use: the dormant approval gate
+  (`src/pan/hooks/pretooluse_gate.py`, `GatedOpDeniedError` and its exit code 18, the `gated_ops`
+  config key, `UserPolicy.autonomy`, `UserPolicy.repos` and the `Autonomy` enum), which never
+  enforced anything; the `pan pause` command, whose flag nothing read (`~/.pan/paused.flag` can be
+  deleted); `src/pan/power.py` (`should_caffeinate`, never wired); the `defaults` config section
+  (`Defaults`, with `agent`, `permission_mode` and `repo_allowlist`), the `Agent` enum,
+  `PanPaths.logs` and `ThreadRecord.agent`, which nothing read; and `parse_inbox_link`, which only
+  tests called (`pan hook inbox-link` is unchanged). A config that still holds the removed keys
+  (`defaults`, `gated_ops`, `paths.logs`, `users.*.autonomy`, `users.*.repos`) loads as before:
+  `load_config` ignores them and logs one warning naming them. A thread record with `agent` loads
+  as before; the key is ignored.
 
 ### Fixed
 

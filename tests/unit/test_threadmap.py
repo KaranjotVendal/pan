@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pan.errors import ThreadNotFoundError
-from pan.models import Agent, ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
+from pan.models import ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
 from pan.threadmap import FileThreadMap, tie_note
 
 
@@ -35,7 +35,6 @@ def _record(
         terminal_address="t12",
         channel="C0001",
         worktree_path=worktree_path,
-        agent=Agent.CLAUDE,
         claude_session_id="session-123",
         transcript_path=Path("/home/.claude/projects/x/session-123.jsonl"),
         status=WorkerStatus.SPAWNING,
@@ -56,11 +55,24 @@ def test_put_then_get_round_trips_through_disk(tmp_path: Path) -> None:
     assert loaded.terminal_name == "pan-task-3"
     assert loaded.terminal_address == "t12"
     assert loaded.worktree_path == Path("/Users/me/dev/pan-worktrees/task-3")
-    assert loaded.agent is Agent.CLAUDE
     assert loaded.claude_session_id == "session-123"
     assert loaded.transcript_path == Path("/home/.claude/projects/x/session-123.jsonl")
     assert loaded.status is WorkerStatus.SPAWNING
     assert loaded.created_at == record.created_at
+
+
+@pytest.mark.parametrize("stored_agent", ["claude", "codex"])
+def test_record_with_the_removed_agent_key_still_loads(tmp_path: Path, stored_agent: str) -> None:
+    # Records written before ThreadRecord.agent was removed carry an `agent` key; it is ignored.
+    stored_payload = _record().model_dump(mode="json")
+    stored_payload["agent"] = stored_agent
+    threads_path = tmp_path / "threads.json"
+    threads_path.write_text(json.dumps({stored_payload["thread_ts"]: stored_payload}))
+    thread_map = FileThreadMap(threads_path, FakeClock(datetime(2026, 7, 16, tzinfo=UTC)))
+
+    loaded = thread_map.get(stored_payload["thread_ts"])
+
+    assert loaded == _record()
 
 
 def test_update_status_transitions_and_bumps_updated_at(tmp_path: Path) -> None:
@@ -84,7 +96,6 @@ def test_update_status_transitions_and_bumps_updated_at(tmp_path: Path) -> None:
     assert updated.claude_session_id == record.claude_session_id
     assert updated.worktree_path == record.worktree_path
     assert updated.terminal_address == record.terminal_address
-    assert updated.agent is record.agent
 
 
 def test_get_unknown_thread_returns_none(tmp_path: Path) -> None:
