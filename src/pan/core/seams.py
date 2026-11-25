@@ -175,6 +175,17 @@ class PendingConfirmations(Protocol):
     def clear(self, source: ThreadSource, thread_ts: str) -> None: ...
 
 
+class DrainedLog(Protocol):
+    # The items `pan inbox drain` handed out, kept so an action can check the message it rests
+    # on. Reads never fail (an unreadable log counts as empty); `record` raises OSError when it
+    # cannot write.
+    def get(self, item_id: str) -> InboxItem | None: ...
+
+    def newest_in(self, thread_ts: str, channel: str, slack_user: str) -> InboxItem | None: ...
+
+    def record(self, items: list[InboxItem], now: datetime) -> None: ...
+
+
 class GitWorktreeAdapter(Protocol):
     # Creating a worktree raises SpawnError; the other methods raise GitWorktreeError.
     def create_worktree(self, repo: Path, branch: str, base: Path) -> Path: ...

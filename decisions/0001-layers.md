@@ -34,8 +34,8 @@ A layer may import any layer below it. `core` imports nothing from pan except `c
 | `core` | `models`, `errors`, `seams` |
 | `utils` | `logging`, `config`, `credentials`, `clock` |
 | `data` | `adapters/` (`git_worktree`, `hc`, `launchd`, `plannotator_inbox`, `terminal_host`), `inbox`, `threadmap`, `drained`, `transcript` |
-| `backend` | `spawn`, `session_control`, `sessions`, `lifecycle`, `interface`, `confirmations`, `directive`, `status_message`, `service`, `orchestrating_skill` |
-| `frontend` | `cli`, `gateway/` (`app`, `auth`, `slack_post`), `help`, `hooks/`, `watcher`, `slack_format`, `slack_render` |
+| `backend` | `spawn`, `session_control`, `sessions`, `lifecycle`, `interface`, `confirmations`, `directive`, `status_message`, `service`, `orchestrating_skill`, `gates`, `drain` |
+| `frontend` | `cli`, `wiring`, `gateway/` (`app`, `auth`, `slack_post`), `help`, `hooks/`, `watcher`, `slack_format`, `slack_render` |
 
 `src/pan/__main__.py` stays at the top as a thin entry that calls `pan.frontend.cli`. The
 packaged data (`skills/orchestrating/SKILL.md` and the `launchd/` templates) stays at the top

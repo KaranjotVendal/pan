@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from pan.backend.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
@@ -18,8 +19,10 @@ from pan.backend.spawn import (
 )
 from pan.backend.status_message import post_answer, publish_status, send_private_details
 from pan.core.errors import (
+    CredentialsError,
     GitWorktreeError,
     NoExactMatchError,
+    NotPanSessionError,
     SessionBusyError,
     TargetAmbiguousError,
     TargetBlockedError,
@@ -408,6 +411,51 @@ def forget_thread(
         f"untied this thread from {record.terminal_name}; the session was not stopped",
     )
     logger.info(f"forget thread={thread_ts}")
+
+
+def stop_thread(
+    *,
+    thread_ts: str,
+    thread_map: ThreadMap,
+    terminal_host: TerminalHost,
+    open_slack: Callable[[], SlackAdapter],
+    clock: Clock,
+) -> None:
+    """Kill switch: remove the worker's terminal, mark its record FAILED and edit the thread's
+    status message to Stopped. A session pan did not start is only untied, never stopped
+    (NotPanSessionError, exit 25)."""
+    record = thread_map.get(thread_ts)
+    if record is None:
+        raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+    if not record.started_by_pan:
+        if record.tied:
+            thread_map.untie(thread_ts)
+        raise NotPanSessionError(
+            f"{record.terminal_name} was not started by pan, so pan never stops it; "
+            "this thread is untied from it"
+        )
+    if record.terminal_address:
+        terminal_host.remove(record.terminal_address)
+    thread_map.update_status(thread_ts, WorkerStatus.FAILED, session_name=record.terminal_name)
+    if record.tied:
+        _publish_stopped(open_slack, thread_map, record, clock)
+
+
+def _publish_stopped(
+    open_slack: Callable[[], SlackAdapter],
+    thread_map: ThreadMap,
+    record: ThreadRecord,
+    clock: Clock,
+) -> None:
+    # Best effort: the kill switch has done its work whether or not Slack can be reached.
+    try:
+        slack = open_slack()
+    except CredentialsError as e:
+        logger.warning(f"stop could not update the status message: {type(e).__name__}")
+        return
+    publish_status(
+        slack=slack, thread_map=thread_map, record=record, state=StatusState.STOPPED, clock=clock
+    )
 
 
 def _session_terminal(terminal_host: TerminalHost, record: ThreadRecord) -> Terminal | None:
