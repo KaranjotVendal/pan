@@ -14,12 +14,12 @@ from pan.core.errors import (
     TerminalNameTakenError,
 )
 from pan.core.models import (
+    Conversation,
     ReplyMode,
     StatusState,
     Terminal,
     TerminalState,
     ThreadRecord,
-    ThreadSource,
     WorkerStatus,
 )
 from pan.core.seams import (
@@ -174,12 +174,10 @@ def desk_session_ended_reply(name: str) -> str:
     )
 
 
-def worker_labels(thread_ts: str, channel: str, app_space: str | None) -> dict[str, str]:
-    labels = {
-        PAN_ROLE_LABEL: WORKER_ROLE,
-        PAN_THREAD_LABEL: thread_ts,
-        PAN_CHANNEL_LABEL: channel,
-    }
+def worker_labels(conversation: Conversation, app_space: str | None) -> dict[str, str]:
+    labels = {PAN_ROLE_LABEL: WORKER_ROLE, PAN_THREAD_LABEL: conversation.id}
+    if conversation.place is not None:
+        labels[PAN_CHANNEL_LABEL] = conversation.place
     if app_space is not None:
         labels[HERDR_SPACE_LABEL] = app_space
     return labels
@@ -219,8 +217,7 @@ def _ensure_name_free(terminal_host: TerminalHost, name: str) -> None:
 
 def spawn_worker(
     *,
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     task: str,
     repo: Path,
     base: Path,
@@ -249,7 +246,11 @@ def spawn_worker(
         request_text if request_text is not None else task
     )
     reply_mode = ReplyMode.SLACK if asks_for_slack_reply else ReplyMode.ON_DEMAND
-    thread_paragraph = slack_thread_paragraph(channel, thread_ts) if from_thread_reply else None
+    thread_paragraph = (
+        slack_thread_paragraph(conversation.slack_channel(), conversation.id)
+        if from_thread_reply
+        else None
+    )
 
     try:
         _ensure_name_free(terminal_host, name)
@@ -261,7 +262,7 @@ def spawn_worker(
             name,
             worktree_path,
             worker_brief(inbox_thread, task, reply_mode, thread_paragraph=thread_paragraph),
-            worker_labels(thread_ts, channel, app_space),
+            worker_labels(conversation, app_space),
         )
     except (SpawnError, TerminalHostError) as error:
         # Record the failed attempt so the thread map still reflects it (the worktree may
@@ -269,15 +270,13 @@ def spawn_worker(
         # thread stays untied: a later plain request starts a new session.
         reason = "stream name in use" if isinstance(error, TerminalNameTakenError) else None
         failed_record = ThreadRecord(
-            thread_ts=thread_ts,
+            conversation=conversation,
             terminal_name=name,
-            channel=channel,
             worktree_path=base / name,
             repo_path=repo,
             status=WorkerStatus.FAILED,
             created_at=created_at,
             updated_at=clock.now(),
-            source=ThreadSource.SLACK,
             tied=False,
             requester=requester,
             reply_mode=reply_mode,
@@ -286,21 +285,19 @@ def spawn_worker(
         notice = f"spawn failed for stream {name}"
         if reason is not None:
             notice = f"{notice}: {reason}"
-        slack_post(slack, channel, thread_ts, notice)
-        logger.info(f"spawn failed stream={name} thread={thread_ts}")
+        slack_post(slack, conversation, notice)
+        logger.info(f"spawn failed stream={name} conversation={conversation.key}")
         raise SpawnError(notice) from error
 
     record = ThreadRecord(
-        thread_ts=thread_ts,
+        conversation=conversation,
         terminal_name=name,
         terminal_address=terminal.address,
-        channel=channel,
         worktree_path=worktree_path,
         repo_path=repo,
         status=WorkerStatus.SPAWNING,
         created_at=created_at,
         updated_at=created_at,
-        source=ThreadSource.SLACK,
         tied=True,
         started_by_pan=True,
         requester=requester,
@@ -320,7 +317,7 @@ def spawn_worker(
         clock=clock,
     )
     send_private_details(slack=slack, record=record)
-    logger.info(f"spawn stream={name} terminal={terminal.address} thread={thread_ts}")
+    logger.info(f"spawn stream={name} terminal={terminal.address} conversation={conversation.key}")
     return record
 
 
@@ -352,7 +349,7 @@ def reopen_worker(
     # it is, and a failed reopen changes nothing.
     name = record.terminal_name
     if not record.started_by_pan:
-        slack_post(slack, record.channel, record.thread_ts, desk_session_ended_reply(name))
+        slack_post(slack, record.conversation, desk_session_ended_reply(name))
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
     reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
     try:
@@ -363,15 +360,15 @@ def reopen_worker(
             name,
             record.worktree_path,
             task,
-            worker_labels(record.thread_ts, record.channel, app_space),
+            worker_labels(record.conversation, app_space),
             continue_session=True,
         )
     except (SpawnError, TerminalHostError) as error:
         notice = f"reopen failed for stream {name}"
         if isinstance(error, TerminalNameTakenError):
             notice = f"{notice}: stream name in use"
-        slack_post(slack, record.channel, record.thread_ts, notice)
-        logger.info(f"reopen failed stream={name} thread={record.thread_ts}")
+        slack_post(slack, record.conversation, notice)
+        logger.info(f"reopen failed stream={name} conversation={record.conversation.key}")
         raise SpawnError(notice) from error
 
     now = clock.now()
@@ -393,5 +390,7 @@ def reopen_worker(
         state=StatusState.WORKING,
         clock=clock,
     )
-    logger.info(f"reopen stream={name} terminal={terminal.address} thread={record.thread_ts}")
+    logger.info(
+        f"reopen stream={name} terminal={terminal.address} conversation={record.conversation.key}"
+    )
     return reopened

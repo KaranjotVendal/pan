@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from pan.core.models import InboxItem
+from pan.core.models import Conversation, InboxItem
 from pan.utils.config import DRAINED_LOG_MAX_ITEMS, DRAINED_LOG_RETENTION
 from pan.utils.logging import initialise_logger
 
@@ -21,7 +21,9 @@ def drained_log_path(threads_path: Path) -> Path:
 class FileDrainedLog:
     # The items `pan inbox drain` handed the orchestrator, one JSON line each, so a gate can
     # read what the person typed from pan's own record rather than from text the orchestrator
-    # passes. Reads never fail: an unreadable file or line counts as no items.
+    # passes. Reads never fail: an unreadable file or line counts as no items. Lines in the
+    # flat shape from before Conversation existed load (InboxItem) and are rewritten in the new
+    # shape by the next record.
     def __init__(self, path: Path) -> None:
         self._path = path
 
@@ -72,13 +74,10 @@ class FileDrainedLog:
                 return item
         return None
 
-    def newest_in(self, thread_ts: str, channel: str, slack_user: str) -> InboxItem | None:
-        # The item the sender sent last in the thread and channel, of those drained, or None.
+    def newest_in(self, conversation: Conversation, author: str) -> InboxItem | None:
+        # The item the author sent last in the conversation (same source, id and place), of
+        # those drained, or None.
         for item in reversed(self._read_all()):
-            if (
-                item.thread_ts == thread_ts
-                and item.channel == channel
-                and item.slack_user == slack_user
-            ):
+            if item.conversation == conversation and item.author == author:
                 return item
         return None

@@ -10,7 +10,7 @@ import pytest
 from slack_fakes import RecordingSlack
 
 from pan.core.errors import ThreadNotFoundError
-from pan.core.models import ReplyMode, ThreadRecord, WorkerStatus
+from pan.core.models import Conversation, ReplyMode, ThreadRecord, WorkerStatus
 from pan.frontend.hooks.inbox_link import InboxLink, inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.session_start import session_start_hook
@@ -35,10 +35,9 @@ class FakeThreadMap:
         if seed_thread is not None:
             now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
             self.records[seed_thread] = ThreadRecord(
-                thread_ts=seed_thread,
+                conversation=Conversation.slack(seed_thread, "C1"),
                 terminal_name="pan-task",
                 terminal_address="t3",
-                channel="C1",
                 worktree_path=Path("/tmp/wt"),
                 created_at=now,
                 updated_at=now,
@@ -46,61 +45,65 @@ class FakeThreadMap:
                 inbox_thread_name="pan-task: do the thing",
             )
 
-    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None:
-        record = self.records.get(thread_ts)
+    def get(
+        self, conversation: Conversation, *, session_name: str | None = None
+    ) -> ThreadRecord | None:
+        record = self.records.get(conversation.id)
         if record is None or (session_name is not None and record.terminal_name != session_name):
             return None
         return record
 
     def put(self, record: ThreadRecord) -> None:  # pragma: no cover
-        self.records[record.thread_ts] = record
+        self.records[record.conversation.id] = record
 
     def update_status(
-        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+        self, conversation: Conversation, status: WorkerStatus, *, session_name: str | None = None
     ) -> None:
-        self.status_updates.append((thread_ts, status))
+        self.status_updates.append((conversation.id, status))
         self.updated_session_names.append(session_name)
 
     def record_session(
         self,
-        thread_ts: str,
+        conversation: Conversation,
         session_id: str,
         transcript_path: Path | None,
         *,
         session_name: str | None = None,
     ) -> None:
-        self.sessions.append((thread_ts, session_id, transcript_path))
+        self.sessions.append((conversation.id, session_id, transcript_path))
         self.updated_session_names.append(session_name)
 
     def record_inbox_thread(
         self,
-        thread_ts: str,
+        conversation: Conversation,
         inbox_thread_id: str,
         url: str | None,
         *,
         session_name: str | None = None,
     ) -> None:
-        self.inbox_threads.append((thread_ts, inbox_thread_id, url))
+        self.inbox_threads.append((conversation.id, inbox_thread_id, url))
         self.updated_session_names.append(session_name)
-        record = self.records[thread_ts]
-        self.records[thread_ts] = record.model_copy(
+        record = self.records[conversation.id]
+        self.records[conversation.id] = record.model_copy(
             update={"inbox_thread_id": inbox_thread_id, "inbox_thread_url": url}
         )
 
     def record_status_message(
-        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+        self, conversation: Conversation, message_ts: str, *, session_name: str | None = None
     ) -> None:
-        self.status_messages.append((thread_ts, message_ts))
-        record = self.records[thread_ts]
-        self.records[thread_ts] = record.model_copy(update={"status_message_ts": message_ts})
+        self.status_messages.append((conversation.id, message_ts))
+        record = self.records[conversation.id]
+        self.records[conversation.id] = record.model_copy(update={"status_message_ts": message_ts})
 
     # The answer digest each post recorded, in order.
     def record_posted_answer(
-        self, thread_ts: str, answer_digest: str, *, session_name: str | None = None
+        self, conversation: Conversation, answer_digest: str, *, session_name: str | None = None
     ) -> None:
         self.posted_answers.append(answer_digest)
-        record = self.records[thread_ts]
-        self.records[thread_ts] = record.model_copy(update={"last_answer_digest": answer_digest})
+        record = self.records[conversation.id]
+        self.records[conversation.id] = record.model_copy(
+            update={"last_answer_digest": answer_digest}
+        )
 
 
 class FakeSlack(RecordingSlack):
@@ -108,6 +111,7 @@ class FakeSlack(RecordingSlack):
 
 
 _THREAD = "1718000000.000200"
+_CONVERSATION = Conversation.slack(_THREAD, "C1")
 
 
 @pytest.mark.parametrize("reply_mode", [ReplyMode.ON_DEMAND, ReplyMode.SLACK])
@@ -119,7 +123,7 @@ def test_stop_hook_marks_idle_and_posts_a_finished_status_without_an_answer(
     thread_map, slack = FakeThreadMap(reply_mode=reply_mode), FakeSlack()
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
 
     assert slack.posts == []
     assert slack.status_texts() == ["Finished"]
@@ -134,7 +138,7 @@ def test_stop_hook_edits_the_status_message_the_thread_already_has() -> None:
     )
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
 
     assert slack.status_posts == []
     assert [(channel, ts, text) for channel, ts, _blocks, text in slack.status_updates] == [
@@ -167,8 +171,7 @@ def test_hook_of_a_session_whose_thread_moved_on_only_updates_its_own_record(
     thread_map.records[_THREAD] = thread_map.records[_THREAD].model_copy(update={"tied": False})
 
     hook(  # type: ignore[operator]
-        _THREAD,
-        "C1",
+        _CONVERSATION,
         thread_map,
         slack,
         stdin=io.StringIO(json.dumps(payload)),
@@ -191,7 +194,7 @@ def test_stop_hook_posts_no_answer_when_the_transcript_is_missing(tmp_path: Path
         }
     )
 
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
 
     assert slack.posts == []
     assert slack.status_texts() == ["Finished"]
@@ -227,7 +230,7 @@ def test_stop_hook_extracts_last_assistant_text_from_transcript(tmp_path: Path) 
         {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
     )
 
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
 
     # Only the answer, converted to Slack mrkdwn: no session name, no Inbox link.
     assert slack.posts == [("C1", _THREAD, "*Done.* See <https://x.test/1|the PR>")]
@@ -264,7 +267,7 @@ def test_notification_hook_marks_blocked_and_shows_the_prompt_in_the_status(
         payload_fields["message"] = message
 
     notification_hook(
-        _THREAD, "C1", thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
+        _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
     )
 
     assert slack.posts == []
@@ -312,7 +315,7 @@ def test_notification_hook_marks_blocked_only_for_a_prompt_waiting_on_the_person
         payload_fields["message"] = message
 
     notification_hook(
-        _THREAD, "C1", thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
+        _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
     )
 
     assert [status for _, status in thread_map.status_updates] == expected_statuses
@@ -332,7 +335,7 @@ def test_hook_raises_when_thread_unknown(hook: object, payload: dict) -> None:
 
     with pytest.raises(ThreadNotFoundError):
         hook(  # type: ignore[operator]
-            _THREAD, "C1", thread_map, slack, stdin=io.StringIO(json.dumps(payload))
+            _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload))
         )
 
     # Nothing is posted or transitioned when the thread is unknown.
@@ -351,7 +354,7 @@ def test_session_start_hook_records_session_id_and_transcript_path() -> None:
         }
     )
 
-    session_start_hook(_THREAD, thread_map, stdin=io.StringIO(payload))
+    session_start_hook(_CONVERSATION, thread_map, stdin=io.StringIO(payload))
 
     assert thread_map.sessions == [(_THREAD, "s-42", Path("/home/.claude/projects/wt/s-42.jsonl"))]
     assert thread_map.status_updates == []
@@ -360,7 +363,7 @@ def test_session_start_hook_records_session_id_and_transcript_path() -> None:
 def test_session_start_hook_without_session_id_records_nothing() -> None:
     thread_map = FakeThreadMap()
 
-    session_start_hook(_THREAD, thread_map, stdin=io.StringIO(json.dumps({})))
+    session_start_hook(_CONVERSATION, thread_map, stdin=io.StringIO(json.dumps({})))
 
     assert thread_map.sessions == []
 
@@ -415,7 +418,7 @@ def _post_tool_use(tool_response: object, thread: str | None = "pan-task: do the
 def _recorded_link(raw_payload: str) -> InboxLink | None:
     # Run the inbox-link hook on a record with no link yet; the link it records, if any.
     thread_map = FakeThreadMap()
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(raw_payload))
+    inbox_link_hook(_CONVERSATION, thread_map, stdin=io.StringIO(raw_payload))
     if not thread_map.inbox_threads:
         return None
     ((_, thread_id, url),) = thread_map.inbox_threads
@@ -488,7 +491,7 @@ def test_inbox_link_hook_returns_none_without_a_link(raw_payload: str) -> None:
 def test_inbox_link_hook_records_the_first_link_and_posts_nothing() -> None:
     thread_map = FakeThreadMap()
 
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(_post_tool_use(_INBOX_RESULT)))
+    inbox_link_hook(_CONVERSATION, thread_map, stdin=io.StringIO(_post_tool_use(_INBOX_RESULT)))
 
     assert thread_map.inbox_threads == [(_THREAD, "thr_1", "https://inbox.example/t/thr_1")]
     assert thread_map.status_updates == []
@@ -517,7 +520,9 @@ def test_inbox_link_hook_keeps_a_recorded_link_unless_the_send_names_its_own_thr
     }
 
     inbox_link_hook(
-        _THREAD, thread_map, stdin=io.StringIO(_post_tool_use(second_result, sent_thread_name))
+        _CONVERSATION,
+        thread_map,
+        stdin=io.StringIO(_post_tool_use(second_result, sent_thread_name)),
     )
 
     assert thread_map.inbox_threads == expected_recorded
@@ -526,7 +531,7 @@ def test_inbox_link_hook_keeps_a_recorded_link_unless_the_send_names_its_own_thr
 def test_inbox_link_hook_without_a_link_records_nothing() -> None:
     thread_map = FakeThreadMap()
 
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(_post_tool_use("Sent.")))
+    inbox_link_hook(_CONVERSATION, thread_map, stdin=io.StringIO(_post_tool_use("Sent.")))
 
     assert thread_map.inbox_threads == []
 
@@ -667,7 +672,9 @@ def test_inbox_link_hook_prefers_the_json_result_over_the_prose_line() -> None:
 def test_inbox_link_hook_records_the_link_from_a_code_mode_repl_call(code: str) -> None:
     thread_map = FakeThreadMap()
 
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(_repl_post_tool_use(_SENT_PROSE, code)))
+    inbox_link_hook(
+        _CONVERSATION, thread_map, stdin=io.StringIO(_repl_post_tool_use(_SENT_PROSE, code))
+    )
 
     assert thread_map.inbox_threads == [(_THREAD, _PROSE_THREAD_ID, _PROSE_URL)]
 
@@ -678,7 +685,7 @@ def test_inbox_link_hook_ignores_a_repl_call_that_does_not_use_the_inbox() -> No
     unrelated_response = {"thread_id": "gh_thread_1", "url": "https://example.invalid/t/1"}
 
     inbox_link_hook(
-        _THREAD,
+        _CONVERSATION,
         thread_map,
         stdin=io.StringIO(_repl_post_tool_use(unrelated_response, "return fetchIssues()")),
     )
@@ -727,7 +734,9 @@ def test_inbox_link_hook_keeps_a_recorded_link_unless_a_repl_send_names_its_own_
         update={"inbox_thread_id": "thr_1", "inbox_thread_url": "https://inbox.example/t/thr_1"}
     )
 
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(_repl_post_tool_use(_SENT_PROSE, code)))
+    inbox_link_hook(
+        _CONVERSATION, thread_map, stdin=io.StringIO(_repl_post_tool_use(_SENT_PROSE, code))
+    )
 
     assert thread_map.inbox_threads == expected_recorded
 
@@ -759,7 +768,9 @@ def test_inbox_link_hook_records_nothing_when_send_lines_name_several_threads(
     own_thread_code = _send_code('thread: "pan-task: do the thing"')
 
     inbox_link_hook(
-        _THREAD, thread_map, stdin=io.StringIO(_repl_post_tool_use(tool_response, own_thread_code))
+        _CONVERSATION,
+        thread_map,
+        stdin=io.StringIO(_repl_post_tool_use(tool_response, own_thread_code)),
     )
 
     assert thread_map.inbox_threads == expected_recorded
@@ -780,7 +791,7 @@ def test_inbox_link_hook_skips_tools_other_than_the_inbox_and_repl(tool_name: st
     if tool_name is not None:
         payload["tool_name"] = tool_name
 
-    inbox_link_hook(_THREAD, thread_map, stdin=io.StringIO(json.dumps(payload)))
+    inbox_link_hook(_CONVERSATION, thread_map, stdin=io.StringIO(json.dumps(payload)))
 
     assert thread_map.inbox_threads == []
 
@@ -797,8 +808,8 @@ def test_stop_hook_never_posts_the_same_answer_twice(tmp_path: Path) -> None:
         {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
     )
 
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
-    stop_hook(_THREAD, "C1", thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
 
     assert slack.posts == [("C1", _THREAD, "same")]
     assert len(thread_map.posted_answers) == 1

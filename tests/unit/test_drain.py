@@ -9,8 +9,10 @@ from pan.backend.confirmations import FilePendingConfirmations, confirmations_pa
 from pan.backend.drain import DrainedEntry, drain_inbox
 from pan.core.models import (
     ConfirmationCandidate,
+    Conversation,
     InboxItem,
     PendingConfirmation,
+    ThreadRecord,
     ThreadSource,
 )
 from pan.core.seams import DrainedLog
@@ -20,6 +22,7 @@ from pan.data.threadmap import FileThreadMap
 from pan.utils.clock import SystemClock
 
 _THREAD = "1718000000.000200"
+_CONVERSATION = Conversation.slack(_THREAD, "C1")
 
 
 class _Stores:
@@ -42,8 +45,7 @@ class _Stores:
     def store_question(self, asked_minutes_ago: int, *, requester: str | None = "U1") -> None:
         self.confirmations.put(
             PendingConfirmation(
-                thread_ts=_THREAD,
-                channel="C1",
+                conversation=_CONVERSATION,
                 selector="pan docs",
                 task="add the tests",
                 requester=requester,
@@ -57,7 +59,7 @@ class _Stores:
         )
 
     def stored_question(self) -> PendingConfirmation | None:
-        return self.confirmations.get(ThreadSource.SLACK, _THREAD)
+        return self.confirmations.get(_CONVERSATION)
 
 
 @pytest.fixture
@@ -65,12 +67,11 @@ def stores(tmp_path: Path) -> _Stores:
     return _Stores(tmp_path)
 
 
-def _reply(event_id: str, slack_user: str, raw_text: str = "yes") -> InboxItem:
+def _reply(event_id: str, author: str, raw_text: str = "yes") -> InboxItem:
     return InboxItem(
         id=event_id,
-        slack_user=slack_user,
-        channel="C1",
-        thread_ts=_THREAD,
+        author=author,
+        conversation=_CONVERSATION,
         is_thread_reply=True,
         raw_text=raw_text,
         received_at=datetime.now(tz=UTC),
@@ -78,7 +79,7 @@ def _reply(event_id: str, slack_user: str, raw_text: str = "yes") -> InboxItem:
 
 
 @pytest.mark.parametrize(
-    "slack_user, requester, raw_text, expected_answer",
+    "author, requester, raw_text, expected_answer",
     [
         ("U1", "U1", "yes", "yes"),
         ("U1", "U1", "<@U000BOT> the second one please", "the second one please"),
@@ -96,14 +97,14 @@ def _reply(event_id: str, slack_user: str, raw_text: str = "yes") -> InboxItem:
 )
 def test_drain_marks_the_question_answered_only_by_the_requester(
     stores: _Stores,
-    slack_user: str,
+    author: str,
     requester: str | None,
     raw_text: str,
     expected_answer: str | None,
 ) -> None:
     stores.store_question(asked_minutes_ago=1, requester=requester)
     expected_answered = expected_answer is not None
-    stores.inbox.append(_reply("Ev1", slack_user, raw_text))
+    stores.inbox.append(_reply("Ev1", author, raw_text))
 
     (entry,) = stores.drain()
 
@@ -207,7 +208,7 @@ class _UnwritableDrainedLog:
     def get(self, item_id: str) -> InboxItem | None:
         return None
 
-    def newest_in(self, thread_ts: str, channel: str, slack_user: str) -> InboxItem | None:
+    def newest_in(self, conversation: Conversation, author: str) -> InboxItem | None:
         return None
 
     def record(self, items: list[InboxItem], now: datetime) -> None:
@@ -235,3 +236,30 @@ def test_drain_keeps_the_items_when_they_cannot_be_recorded(stores: _Stores) -> 
     (entry,) = stores.drain()
 
     assert entry.item.id == "Ev1"
+
+
+def test_drain_gives_an_x_post_no_tie_or_question_of_a_slack_thread_with_the_same_id(
+    stores: _Stores,
+) -> None:
+    now = datetime.now(tz=UTC)
+    stores.thread_map.tie(
+        ThreadRecord(
+            conversation=_CONVERSATION,
+            terminal_name="pan-7",
+            worktree_path=Path("/tmp/pan-7"),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    stores.store_question(asked_minutes_ago=1)
+    x_post = Conversation(source=ThreadSource.X, id=_THREAD, place="C1")
+    stores.inbox.append(_reply("Ev1", "U1").model_copy(update={"conversation": x_post}))
+
+    (entry,) = stores.drain()
+
+    assert (entry.item.source, entry.item.thread_ts) == (ThreadSource.X, _THREAD)
+    assert entry.tie is None
+    assert entry.open_question is None
+    stored = stores.stored_question()
+    assert stored is not None
+    assert stored.answered_at is None

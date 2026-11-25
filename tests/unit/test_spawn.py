@@ -28,7 +28,13 @@ from pan.core.errors import (
     TerminalHostError,
     TerminalNameTakenError,
 )
-from pan.core.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
+from pan.core.models import (
+    Conversation,
+    ReplyMode,
+    TerminalState,
+    ThreadRecord,
+    WorkerStatus,
+)
 from pan.data.adapters.hc import HcError
 from pan.frontend.slack_format import to_slack_mrkdwn
 
@@ -47,21 +53,21 @@ class FakeThreadMap:
         self.records: dict[str, ThreadRecord] = {}
         self.ties: list[str] = []
 
-    def get(self, thread_ts: str) -> ThreadRecord | None:
-        return self.records.get(thread_ts)
+    def get(self, conversation: Conversation) -> ThreadRecord | None:
+        return self.records.get(conversation.id)
 
     def put(self, record: ThreadRecord) -> None:
-        self.records[record.thread_ts] = record
+        self.records[record.conversation.id] = record
 
     def tie(self, record: ThreadRecord) -> None:
-        self.ties.append(record.thread_ts)
-        self.records[record.thread_ts] = record
+        self.ties.append(record.conversation.id)
+        self.records[record.conversation.id] = record
 
     def record_status_message(
-        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+        self, conversation: Conversation, message_ts: str, *, session_name: str | None = None
     ) -> None:
-        record = self.records[thread_ts]
-        self.records[thread_ts] = record.model_copy(update={"status_message_ts": message_ts})
+        record = self.records[conversation.id]
+        self.records[conversation.id] = record.model_copy(update={"status_message_ts": message_ts})
 
 
 class FakeSlack(RecordingSlack):
@@ -93,8 +99,7 @@ def _spawn(
     from_thread_reply: bool = False,
 ) -> ThreadRecord:
     return spawn_worker(
-        thread_ts=_THREAD,
-        channel="C1",
+        conversation=Conversation.slack(_THREAD, "C1"),
         task=task,
         repo=Path("/repo"),
         base=base,
@@ -140,11 +145,10 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert record.status is WorkerStatus.SPAWNING
     assert record.terminal_name == "pan-backend"
     assert record.terminal_address == "t101"
-    assert record.channel == "C1"
+    assert record.conversation == Conversation.slack(_THREAD, "C1")
     assert record.worktree_path == tmp_path / "pan-backend"
     assert record.repo_path == Path("/repo")
     assert record.created_at == _FIXED_NOW
-    assert record.source is ThreadSource.SLACK
     assert record.tied is True
     assert record.started_by_pan is True
     assert record.requester == "U0TEST"
@@ -377,7 +381,7 @@ def test_terminal_host_failure_wraps_as_spawn_error_and_marks_failed(
     failed = thread_map.records[_THREAD]
     assert failed.status is WorkerStatus.FAILED
     assert failed.terminal_address == ""
-    assert failed.channel == "C1"
+    assert failed.conversation == Conversation.slack(_THREAD, "C1")
     assert len(slack.posts) == 1
     assert slack.posts[0][0:2] == ("C1", _THREAD)
 
@@ -403,10 +407,9 @@ def _finished_record(
     worktree_path: Path, status: WorkerStatus = WorkerStatus.FAILED
 ) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts=_THREAD,
+        conversation=Conversation.slack(_THREAD, "C1"),
         terminal_name="pan-backend",
         terminal_address="t50",
-        channel="C1",
         worktree_path=worktree_path,
         claude_session_id="s-1",
         status=status,

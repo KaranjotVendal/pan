@@ -7,6 +7,7 @@ from typing import Any, TextIO
 
 from pydantic import BaseModel
 
+from pan.core.models import Conversation
 from pan.core.seams import ThreadMap
 from pan.utils.config import (
     PLANNOTATOR_INBOX_TOOL_MARKER,
@@ -207,7 +208,7 @@ def _names_own_thread(raw_payload: str, own_thread_name: str | None) -> bool:
 
 
 def inbox_link_hook(
-    thread_ts: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     *,
     stdin: TextIO = sys.stdin,
@@ -223,39 +224,41 @@ def inbox_link_hook(
         REPL_TOOL_NAME,
     ):
         tool_name = payload.get("tool_name") if payload is not None else None
-        logger.info(f"inbox-link hook skipped tool={tool_name} thread={thread_ts}")
+        logger.info(f"inbox-link hook skipped tool={tool_name} conversation={conversation.key}")
         return
     if _is_unrelated_repl_call(raw_payload):
-        logger.debug(f"inbox-link hook skipped a REPL call with no Inbox use thread={thread_ts}")
+        logger.debug(
+            f"inbox-link hook skipped a REPL call with no Inbox use conversation={conversation.key}"
+        )
         return
     links = _candidate_links(payload)
     if not links:
-        logger.info(f"inbox-link hook found no thread link thread={thread_ts}")
+        logger.info(f"inbox-link hook found no thread link conversation={conversation.key}")
         return
-    record = thread_map.get(thread_ts, session_name=session_name)
+    record = thread_map.get(conversation, session_name=session_name)
     if record is None:
-        logger.warning(f"inbox-link hook: no thread record thread={thread_ts}")
+        logger.warning(f"inbox-link hook: no thread record conversation={conversation.key}")
         return
     if len(links) > 1:
         thread_ids = ", ".join(link.thread_id for link in links)
         if record.inbox_thread_id in {link.thread_id for link in links}:
             logger.info(
                 f"inbox-link hook kept the recorded link; the result names threads "
-                f"{thread_ids} thread={thread_ts}"
+                f"{thread_ids} conversation={conversation.key}"
             )
         else:
             logger.info(
                 f"inbox-link hook recorded nothing; the result names more than one thread "
-                f"({thread_ids}) thread={thread_ts}"
+                f"({thread_ids}) conversation={conversation.key}"
             )
         return
     (link,) = links
     if record.inbox_thread_id is not None and not _names_own_thread(
         raw_payload, record.inbox_thread_name
     ):
-        logger.info(f"inbox-link hook kept the recorded link thread={thread_ts}")
+        logger.info(f"inbox-link hook kept the recorded link conversation={conversation.key}")
         return
     thread_map.record_inbox_thread(
-        thread_ts, link.thread_id, link.url, session_name=record.terminal_name
+        conversation, link.thread_id, link.url, session_name=record.terminal_name
     )
-    logger.info(f"inbox-link hook recorded the Inbox thread thread={thread_ts}")
+    logger.info(f"inbox-link hook recorded the Inbox thread conversation={conversation.key}")

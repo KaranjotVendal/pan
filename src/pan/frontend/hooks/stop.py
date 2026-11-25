@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from pan.backend.status_message import post_answer, publish_status
 from pan.core.errors import ThreadNotFoundError
-from pan.core.models import ReplyMode, StatusState, WorkerStatus
+from pan.core.models import Conversation, ReplyMode, StatusState, WorkerStatus
 from pan.core.seams import Clock, SlackAdapter, ThreadMap
 from pan.data.transcript import last_assistant_text
 from pan.utils.clock import SystemClock
@@ -24,8 +24,7 @@ class StopHookPayload(BaseModel, frozen=True):
 
 
 def stop_hook(
-    thread_ts: str,
-    channel: str,
+    conversation: Conversation,
     thread_map: ThreadMap,
     slack: SlackAdapter,
     *,
@@ -40,11 +39,11 @@ def stop_hook(
     # and then at every turn end. `session_name` picks this session's record in the thread;
     # once the thread moved to another session (untied), nothing changes there any more.
     payload = StopHookPayload.model_validate_json(stdin.read())
-    record = thread_map.get(thread_ts, session_name=session_name)
+    record = thread_map.get(conversation, session_name=session_name)
     if record is None:
-        raise ThreadNotFoundError(f"no thread record for thread_ts={thread_ts}")
+        raise ThreadNotFoundError(f"no thread record for thread_ts={conversation.id}")
 
-    thread_map.update_status(thread_ts, WorkerStatus.IDLE, session_name=record.terminal_name)
+    thread_map.update_status(conversation, WorkerStatus.IDLE, session_name=record.terminal_name)
     if record.tied:
         publish_status(
             slack=slack,
@@ -62,5 +61,7 @@ def stop_hook(
         if answer:
             post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
         else:
-            logger.info(f"stop hook found no answer to post thread={thread_ts}")
-    logger.info(f"stop hook thread={thread_ts} status=idle reply_mode={record.reply_mode}")
+            logger.info(f"stop hook found no answer to post conversation={conversation.key}")
+    logger.info(
+        f"stop hook conversation={conversation.key} status=idle reply_mode={record.reply_mode}"
+    )

@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from pan.core.models import (
     BranchStatus,
+    Conversation,
     InboxItem,
     InboxThread,
     LaunchdJobState,
@@ -14,7 +15,6 @@ from pan.core.models import (
     Terminal,
     TerminalRead,
     ThreadRecord,
-    ThreadSource,
     WorkerStatus,
     WorktreeStatus,
 )
@@ -61,10 +61,12 @@ class InboxStore(Protocol):
 
 
 class ThreadMap(Protocol):
-    # Records are kept per (thread, session). A thread lookup returns the thread's tied
-    # record, else its newest; `session_name` (a terminal name) picks that session's record
+    # Records are kept per (conversation, session), matched on Conversation.key (source and
+    # id). A conversation lookup returns its tied record, else its newest; `session_name` (a terminal name) picks that session's record
     # in the thread instead, which is how a session's own hooks reach it after it was untied.
-    def get(self, thread_ts: str, *, session_name: str | None = None) -> ThreadRecord | None: ...
+    def get(
+        self, conversation: Conversation, *, session_name: str | None = None
+    ) -> ThreadRecord | None: ...
 
     def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None: ...
 
@@ -74,11 +76,11 @@ class ThreadMap(Protocol):
     # and the thread's previous session.
     def tie(self, record: ThreadRecord) -> None: ...
 
-    def untie(self, thread_ts: str) -> None: ...
+    def untie(self, conversation: Conversation) -> None: ...
 
     def record_inbox_thread(
         self,
-        thread_ts: str,
+        conversation: Conversation,
         inbox_thread_id: str,
         url: str | None,
         *,
@@ -86,34 +88,39 @@ class ThreadMap(Protocol):
     ) -> None: ...
 
     def update_status(
-        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+        self, conversation: Conversation, status: WorkerStatus, *, session_name: str | None = None
     ) -> None: ...
 
     # Persist the thread's reply mode (a follow-up or reopen that asks for the answer in Slack).
     def set_reply_mode(
-        self, thread_ts: str, reply_mode: ReplyMode, *, session_name: str | None = None
+        self, conversation: Conversation, reply_mode: ReplyMode, *, session_name: str | None = None
     ) -> None: ...
 
     def records(self) -> list[ThreadRecord]: ...
 
     # The ts of pan's status message in the thread (see ThreadRecord.status_message_ts).
     def record_status_message(
-        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+        self, conversation: Conversation, message_ts: str, *, session_name: str | None = None
     ) -> None: ...
 
     # The digest of the answer pan just posted to the thread (see last_answer_digest).
     def record_posted_answer(
-        self, thread_ts: str, answer_digest: str, *, session_name: str | None = None
+        self, conversation: Conversation, answer_digest: str, *, session_name: str | None = None
     ) -> None: ...
 
     # The task the status message shows: its short label and when it started.
     def record_task(
-        self, thread_ts: str, label: str, started_at: datetime, *, session_name: str | None = None
+        self,
+        conversation: Conversation,
+        label: str,
+        started_at: datetime,
+        *,
+        session_name: str | None = None,
     ) -> None: ...
 
     def record_session(
         self,
-        thread_ts: str,
+        conversation: Conversation,
         session_id: str,
         transcript_path: Path | None,
         *,
@@ -157,7 +164,7 @@ class PendingConfirmations(Protocol):
     # pan's open questions asking the person which session should get a task, one per thread
     # (see PendingConfirmation). `put` replaces the thread's question; `clear` is a no-op when
     # there is none. Reads never fail: an unreadable store counts as holding no questions.
-    def get(self, source: ThreadSource, thread_ts: str) -> PendingConfirmation | None: ...
+    def get(self, conversation: Conversation) -> PendingConfirmation | None: ...
 
     def all_pending(self) -> list[PendingConfirmation]: ...
 
@@ -165,14 +172,14 @@ class PendingConfirmations(Protocol):
 
     # Sets the question's answer (the latest reply wins); a no-op when there is no question.
     def mark_answered(
-        self, source: ThreadSource, thread_ts: str, answered_at: datetime, answer_text: str
+        self, conversation: Conversation, answered_at: datetime, answer_text: str
     ) -> None: ...
 
     # Clears the question's answer when pan asks again at `asked_at`; a no-op when there is no
     # question.
-    def clear_answer(self, source: ThreadSource, thread_ts: str, asked_at: datetime) -> None: ...
+    def clear_answer(self, conversation: Conversation, asked_at: datetime) -> None: ...
 
-    def clear(self, source: ThreadSource, thread_ts: str) -> None: ...
+    def clear(self, conversation: Conversation) -> None: ...
 
 
 class DrainedLog(Protocol):
@@ -181,7 +188,7 @@ class DrainedLog(Protocol):
     # cannot write.
     def get(self, item_id: str) -> InboxItem | None: ...
 
-    def newest_in(self, thread_ts: str, channel: str, slack_user: str) -> InboxItem | None: ...
+    def newest_in(self, conversation: Conversation, author: str) -> InboxItem | None: ...
 
     def record(self, items: list[InboxItem], now: datetime) -> None: ...
 
@@ -210,7 +217,7 @@ class AgentLauncher(Protocol):
     # Starts a worker agent in a new terminal named `name`, in the worktree, with the task
     # brief as its first task; continue_session resumes the worktree's last conversation.
     # The orchestrator (spawn_worker) owns ThreadRecord construction, since the record's
-    # thread_ts/channel context is not the launcher's.
+    # conversation is not the launcher's.
     def launch(
         self,
         name: str,

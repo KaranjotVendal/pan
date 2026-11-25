@@ -9,6 +9,27 @@ as it works.
 
 ### Changed
 
+- A conversation pan acts in is now one value, `Conversation` in `pan.core.models` (`source`,
+  `id`: the Slack thread ts, `place`: the Slack channel). `InboxItem`, `ThreadRecord` and
+  `PendingConfirmation` store it in place of their `thread_ts`, `channel` and `source` fields,
+  and `InboxItem.slack_user` is now `author`. The thread map, the open questions and the drained
+  log look records up by `Conversation.key` (source and id): before, the thread map matched on
+  the thread ts alone, so a Slack thread and an X post with the same id could read, tie, untie
+  or update each other's records. Files written before the change (`threads.json`,
+  `confirmations.json`, `drained.jsonl` and inbox entries) load as they are and are rewritten in
+  the new shape on their next save; the thread map and open-question keys are unchanged. The
+  `pan inbox drain --json` items keep their flat fields (`id`, `slack_user`, `channel`,
+  `thread_ts`, `is_thread_reply`, `raw_text`, `received_at`, `source`, `mentioned`), which the
+  orchestrating skill reads; `pan threads get` now prints the record in the new shape. The X
+  refusal (exit 35) reads the `--item` pan drained by id and refuses when an X record has the
+  thread's id. The commands that take only `--thread` (`stop`, `status`, `threads get`,
+  `threads set`, `reopen`) use the Slack record with that id, else an X record with it.
+  Text-mode `pan inbox drain` shows a missing channel as `-`. CLI options, exit codes and Slack
+  posts do not change.
+  Upgrade: a gateway or watcher still running the previous pan cannot read records in the new
+  shape, so after upgrading run `pan service install` to restart them. Downgrading needs the
+  old `threads.json`, `confirmations.json` and `drained.jsonl` restored: the previous pan
+  cannot read files this version has rewritten.
 - `pan.frontend.cli` now only parses options, calls the backend and maps errors to exit codes.
   The checks on the message an action rests on (`--item`: the sender's newest drained message,
   the `--to`/relay target named in it, the requester's own message for `propose`, `done

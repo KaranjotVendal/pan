@@ -6,7 +6,13 @@ from pydantic import BaseModel
 
 from pan.backend.confirmations import is_answer, live_pending
 from pan.backend.directive import clean_message
-from pan.core.models import InboxItem, PendingConfirmation, ThreadRecord, WorkerStatus
+from pan.core.models import (
+    InboxItem,
+    PendingConfirmation,
+    ThreadRecord,
+    ThreadSource,
+    WorkerStatus,
+)
 from pan.core.seams import Clock, DrainedLog, InboxStore, PendingConfirmations, ThreadMap
 from pan.data.threadmap import tie_note
 from pan.utils.logging import initialise_logger
@@ -38,11 +44,41 @@ class OpenQuestion(BaseModel, frozen=True):
     answer_text: str | None
 
 
+class DrainedItem(BaseModel, frozen=True):
+    # An inbox item as `pan inbox drain --json` prints it. The orchestrator's skill reads these
+    # fields by name (item.thread_ts, item.channel, item.slack_user, ...), so they keep their
+    # flat Slack-era names whatever shape pan stores items in. `channel` is None for a
+    # conversation with no place.
+    id: str
+    slack_user: str
+    channel: str | None
+    thread_ts: str
+    is_thread_reply: bool
+    raw_text: str
+    received_at: datetime
+    source: ThreadSource
+    mentioned: bool
+
+    @classmethod
+    def from_inbox_item(cls, item: InboxItem) -> DrainedItem:
+        return cls(
+            id=item.id,
+            slack_user=item.author,
+            channel=item.conversation.place,
+            thread_ts=item.conversation.id,
+            is_thread_reply=item.is_thread_reply,
+            raw_text=item.raw_text,
+            received_at=item.received_at,
+            source=item.conversation.source,
+            mentioned=item.mentioned,
+        )
+
+
 class DrainedEntry(BaseModel, frozen=True):
     # Facts only: what the person typed (mention, signature and phone punctuation cleaned), the
     # thread's tie read at drain time (it can change after the gateway wrote the item), and
     # pan's open question in the thread. What the message means is the orchestrator's call.
-    item: InboxItem
+    item: DrainedItem
     text: str
     tie: ThreadTie | None
     open_question: OpenQuestion | None
@@ -61,18 +97,16 @@ def drain_inbox(
     needs that); neither write can cost the drained items."""
     # The open questions are read before the drain, and reading them never fails, so a bad
     # confirmations file can never cost drained items.
-    open_questions = {
-        (pending.source, pending.thread_ts): pending for pending in confirmations.all_pending()
-    }
+    open_questions = {pending.conversation.key: pending for pending in confirmations.all_pending()}
     items = inbox_store.drain()
     now = clock.now()
     _record_drained(drained_log, items, now)
 
     entries: list[DrainedEntry] = []
     for item in items:
-        key = (item.source, item.thread_ts)
+        key = item.conversation.key
         pending = live_pending(open_questions.get(key), now)
-        if pending is not None and is_answer(pending, item.slack_user, item.received_at):
+        if pending is not None and is_answer(pending, item.author, item.received_at):
             answered = _mark_answered(confirmations, pending, item)
             if answered is not None:
                 # The latest reply from the requester is the answer, also for later items.
@@ -80,9 +114,9 @@ def drain_inbox(
                 open_questions[key] = answered
         entries.append(
             DrainedEntry(
-                item=item,
+                item=DrainedItem.from_inbox_item(item),
                 text=clean_message(item.raw_text),
-                tie=_thread_tie(thread_map.get(item.thread_ts)),
+                tie=_thread_tie(thread_map.get(item.conversation)),
                 open_question=_open_question(pending) if pending is not None else None,
             )
         )
@@ -124,12 +158,11 @@ def _mark_answered(
     # and the question stays unanswered (`pan confirm --choice` then refuses).
     answer_text = clean_message(item.raw_text)
     try:
-        confirmations.mark_answered(
-            pending.source, pending.thread_ts, item.received_at, answer_text
-        )
+        confirmations.mark_answered(pending.conversation, item.received_at, answer_text)
     except OSError as e:
         logger.warning(
-            f"could not mark the question answered thread={pending.thread_ts}: {type(e).__name__}"
+            f"could not mark the question answered conversation={pending.conversation.key}: "
+            f"{type(e).__name__}"
         )
         return None
     return pending.model_copy(update={"answered_at": item.received_at, "answer_text": answer_text})

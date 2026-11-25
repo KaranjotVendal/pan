@@ -22,7 +22,7 @@ from pan.core.errors import (
     SlackPostError,
     XSourceRefusedError,
 )
-from pan.core.models import InboxItem, ThreadRecord, ThreadSource
+from pan.core.models import Conversation, InboxItem, ThreadRecord, ThreadSource
 from pan.data.drained import FileDrainedLog
 from pan.data.threadmap import FileThreadMap
 from pan.utils.clock import SystemClock
@@ -31,13 +31,14 @@ _THREAD = "1700000000.000100"
 _CHANNEL = "C000TEST"
 _REQUESTER = "U000TEST"
 _RECEIVED_AT = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+_CONVERSATION = Conversation.slack(_THREAD, _CHANNEL)
 
 
 def _item(
     raw_text: str = "<@U000BOT> to pan-7: add the tests",
     *,
     event_id: str = "Ev1",
-    slack_user: str = _REQUESTER,
+    author: str = _REQUESTER,
     thread_ts: str = _THREAD,
     channel: str = _CHANNEL,
     source: ThreadSource = ThreadSource.SLACK,
@@ -45,22 +46,19 @@ def _item(
 ) -> InboxItem:
     return InboxItem(
         id=event_id,
-        slack_user=slack_user,
-        channel=channel,
-        thread_ts=thread_ts,
+        author=author,
+        conversation=Conversation(source=source, id=thread_ts, place=channel),
         is_thread_reply=True,
         raw_text=raw_text,
         received_at=_RECEIVED_AT + timedelta(minutes=minutes_later),
-        source=source,
     )
 
 
 def _record(**updates: object) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts=_THREAD,
+        conversation=_CONVERSATION,
         terminal_name="pan-task",
         terminal_address="t12",
-        channel=_CHANNEL,
         worktree_path=Path("/tmp/wt"),
         requester=_REQUESTER,
         created_at=_RECEIVED_AT,
@@ -87,9 +85,10 @@ class _RecordingReply:
         ([_item()], "Ev9", None),
         ([_item(thread_ts="1700000000.000999")], "Ev1", None),
         ([_item(channel="C000OTHER")], "Ev1", None),
+        ([_item(source=ThreadSource.X)], "Ev1", None),
         ([_item(), _item("never mind", event_id="Ev2", minutes_later=1)], "Ev1", None),
         (
-            [_item(), _item("+1", event_id="Ev2", slack_user="U000OTHER", minutes_later=1)],
+            [_item(), _item("+1", event_id="Ev2", author="U000OTHER", minutes_later=1)],
             "Ev1",
             "Ev1",
         ),
@@ -100,6 +99,7 @@ class _RecordingReply:
         "unknown-item",
         "other-thread",
         "other-channel",
+        "same-id-from-x",
         "sender-wrote-later",
         "someone-else-wrote-later",
     ],
@@ -110,7 +110,7 @@ def test_newest_drained_item_is_only_the_senders_newest_in_the_thread(
     drained_log = FileDrainedLog(tmp_path / "drained.jsonl")
     drained_log.record(drained, _RECEIVED_AT)
 
-    item = newest_drained_item(drained_log, item_id, thread_ts=_THREAD, channel=_CHANNEL)
+    item = newest_drained_item(drained_log, item_id, _CONVERSATION)
 
     assert (item.id if item is not None else None) == expected_id
 
@@ -134,15 +134,21 @@ def test_refuse_x_source_refuses_an_item_or_a_thread_from_x(
 ) -> None:
     thread_map = FileThreadMap(tmp_path / "threads.json", SystemClock())
     if record_source is not None:
-        thread_map.tie(_record(source=record_source))
-    item = _item(source=item_source) if item_source is not None else None
+        thread_map.tie(
+            _record(conversation=Conversation(source=record_source, id=_THREAD, place=_CHANNEL))
+        )
+    drained_log = FileDrainedLog(tmp_path / "drained.jsonl")
+    item_id = None
+    if item_source is not None:
+        drained_log.record([_item(source=item_source)], _RECEIVED_AT)
+        item_id = "Ev1"
 
     if refused:
         with pytest.raises(XSourceRefusedError, match="only start new sessions") as raised:
-            refuse_x_source(thread_map, _THREAD, item)
+            refuse_x_source(thread_map, drained_log, item_id, _THREAD)
         assert str(raised.value) == X_TO_ROUTE_NOTICE
     else:
-        refuse_x_source(thread_map, _THREAD, item)
+        refuse_x_source(thread_map, drained_log, item_id, _THREAD)
 
 
 @pytest.mark.parametrize(
@@ -150,7 +156,7 @@ def test_refuse_x_source_refuses_an_item_or_a_thread_from_x(
     [
         (_item(), _REQUESTER),
         (_item(), None),
-        (_item(slack_user="U000OTHER"), None),
+        (_item(author="U000OTHER"), None),
     ],
     ids=["from-the-requester", "no-requester-given", "any-sender-without-requester"],
 )
@@ -165,7 +171,7 @@ def test_require_named_target_returns_a_usable_item_that_names_the_target(
         item_id="Ev1",
         target="pan-7",
         requester=requester,
-        thread_ts=_THREAD,
+        conversation=_CONVERSATION,
         reply=reply,
     )
 
@@ -175,7 +181,7 @@ def test_require_named_target_returns_a_usable_item_that_names_the_target(
 
 @pytest.mark.parametrize(
     "item, requester",
-    [(None, None), (None, _REQUESTER), (_item(slack_user="U000OTHER"), _REQUESTER)],
+    [(None, None), (None, _REQUESTER), (_item(author="U000OTHER"), _REQUESTER)],
     ids=["no-item", "no-item-with-requester", "other-sender"],
 )
 def test_require_named_target_refuses_an_unusable_item_in_the_thread(
@@ -190,7 +196,7 @@ def test_require_named_target_refuses_an_unusable_item_in_the_thread(
             item_id="Ev1",
             target="pan-7",
             requester=requester,
-            thread_ts=_THREAD,
+            conversation=_CONVERSATION,
             reply=reply,
         )
 
@@ -207,7 +213,7 @@ def test_require_named_target_refuses_a_target_not_named_without_a_reply() -> No
             item_id="Ev1",
             target="pan-7",
             requester=_REQUESTER,
-            thread_ts=_THREAD,
+            conversation=_CONVERSATION,
             reply=reply,
         )
 
@@ -227,14 +233,14 @@ def test_a_refusal_stands_when_its_reply_cannot_be_posted(post_error: PanError) 
             item_id="Ev1",
             target="pan-7",
             requester=None,
-            thread_ts=_THREAD,
+            conversation=_CONVERSATION,
             reply=_RecordingReply(post_error),
         )
 
 
 @pytest.mark.parametrize(
     "item, refused",
-    [(_item(), False), (None, True), (_item(slack_user="U000OTHER"), True)],
+    [(_item(), False), (None, True), (_item(author="U000OTHER"), True)],
     ids=["requesters-message", "no-item", "other-sender"],
 )
 def test_require_requesters_message(item: InboxItem | None, refused: bool) -> None:
@@ -242,11 +248,15 @@ def test_require_requesters_message(item: InboxItem | None, refused: bool) -> No
 
     if refused:
         with pytest.raises(NoExactMatchError, match=f"no message from {_REQUESTER}"):
-            require_requesters_message(item, requester=_REQUESTER, thread_ts=_THREAD, reply=reply)
+            require_requesters_message(
+                item, requester=_REQUESTER, conversation=_CONVERSATION, reply=reply
+            )
         assert reply.lines == [UNUSABLE_ITEM_REPLY]
     else:
         assert (
-            require_requesters_message(item, requester=_REQUESTER, thread_ts=_THREAD, reply=reply)
+            require_requesters_message(
+                item, requester=_REQUESTER, conversation=_CONVERSATION, reply=reply
+            )
             is item
         )
         assert reply.lines == []
@@ -261,7 +271,7 @@ _DISCARD = "<@U000BOT> done --discard"
         (None, _record(), [UNUSABLE_ITEM_REPLY]),
         (_item(_DISCARD), None, [UNUSABLE_ITEM_REPLY]),
         (_item(_DISCARD), _record(requester=None), [UNUSABLE_ITEM_REPLY]),
-        (_item(_DISCARD, slack_user="U000OTHER"), _record(), [UNUSABLE_ITEM_REPLY]),
+        (_item(_DISCARD, author="U000OTHER"), _record(), [UNUSABLE_ITEM_REPLY]),
         (_item("<@U000BOT> done"), _record(), []),
         (_item("<@U000BOT> just close it, throw the changes away"), _record(), []),
     ],
@@ -280,7 +290,7 @@ def test_require_discard_request_refuses_what_the_requester_did_not_send(
     reply = _RecordingReply()
 
     with pytest.raises(DiscardNotRequestedError):
-        require_discard_request(item, record, thread_ts=_THREAD, reply=reply)
+        require_discard_request(item, record, conversation=_CONVERSATION, reply=reply)
 
     assert reply.lines == expected_replies
 
@@ -291,6 +301,6 @@ def test_require_discard_request_refuses_what_the_requester_did_not_send(
 def test_require_discard_request_allows_the_requesters_done_discard(raw_text: str) -> None:
     reply = _RecordingReply()
 
-    require_discard_request(_item(raw_text), _record(), thread_ts=_THREAD, reply=reply)
+    require_discard_request(_item(raw_text), _record(), conversation=_CONVERSATION, reply=reply)
 
     assert reply.lines == []

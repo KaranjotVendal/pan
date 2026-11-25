@@ -6,6 +6,7 @@ from collections.abc import Iterator
 import pytest
 
 from pan.core.errors import SlackPostError
+from pan.core.models import Conversation, ThreadSource
 from pan.frontend.gateway.slack_post import slack_post
 
 
@@ -36,10 +37,13 @@ def slack_post_logger_capture(caplog: pytest.LogCaptureFixture) -> Iterator[None
         logger.removeHandler(caplog.handler)
 
 
+_THREAD = Conversation.slack("1718000000.000200", "C1")
+
+
 def test_slack_post_delegates_to_post_message() -> None:
     adapter = FakeSlackAdapter()
 
-    slack_post(adapter, "C1", "1718000000.000200", "work is done")
+    slack_post(adapter, _THREAD, "work is done")
 
     assert adapter.calls == [("C1", "1718000000.000200", "work is done")]
 
@@ -49,7 +53,7 @@ def test_slack_post_normalizes_to_mrkdwn_before_post_message() -> None:
     # adapter receives Slack mrkdwn, not the raw GFM body.
     adapter = FakeSlackAdapter()
 
-    slack_post(adapter, "C1", "1718000000.000200", "See **the report**")
+    slack_post(adapter, _THREAD, "See **the report**")
 
     assert adapter.calls == [("C1", "1718000000.000200", "See *the report*")]
 
@@ -58,7 +62,16 @@ def test_adapter_failure_surfaces_as_slack_post_error() -> None:
     adapter = FakeSlackAdapter(fail=True)
 
     with pytest.raises(SlackPostError):
-        slack_post(adapter, "C1", "1718000000.000200", "work is done")
+        slack_post(adapter, _THREAD, "work is done")
+
+
+def test_a_conversation_with_no_channel_raises_and_posts_nothing() -> None:
+    adapter = FakeSlackAdapter()
+
+    with pytest.raises(SlackPostError):
+        slack_post(adapter, Conversation(source=ThreadSource.X, id="1718000000"), "work is done")
+
+    assert adapter.calls == []
 
 
 @pytest.mark.usefixtures("slack_post_logger_capture")
@@ -67,7 +80,7 @@ def test_log_is_value_free(caplog: pytest.LogCaptureFixture) -> None:
     secret_body = "super secret result body"
 
     with caplog.at_level(logging.INFO, logger="pan.frontend.gateway.slack_post"):
-        slack_post(adapter, "C1", "1718000000.000200", secret_body)
+        slack_post(adapter, _THREAD, secret_body)
 
     assert caplog.records, "expected a log record"
     for record in caplog.records:

@@ -76,9 +76,10 @@ from pan.core.errors import (
     UnsavedWorkError,
     XSourceRefusedError,
 )
-from pan.core.models import SessionSummary, SlackCredentials, WorkerStatus
+from pan.core.models import Conversation, SessionSummary, SlackCredentials, WorkerStatus
 from pan.core.seams import SlackAdapter, ThreadMap
 from pan.data.adapters.launchd import build_service_manager
+from pan.data.threadmap import conversation_for_id
 from pan.frontend.gateway.slack_post import slack_post
 from pan.frontend.hooks.inbox_link import inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
@@ -249,7 +250,8 @@ def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
 
 def _drained_entry_text(entry: DrainedEntry) -> str:
     item = entry.item
-    lines = [f"{item.id} {item.channel} {item.thread_ts} {item.slack_user}", f"  {entry.text}"]
+    channel = item.channel if item.channel is not None else "-"
+    lines = [f"{item.id} {channel} {item.thread_ts} {item.slack_user}", f"  {entry.text}"]
     if entry.open_question is not None:
         answered = "answered" if entry.open_question.answered_by_requester else "not answered"
         lines.append(f"  open question in this thread ({answered} by the requester)")
@@ -288,8 +290,7 @@ def spawn(
     # spawn_worker already posts the failure notice and records a FAILED ThreadRecord,
     # then re-raises SpawnError, so this boundary only maps the exit code (no double post).
     spawn_worker(
-        thread_ts=thread,
-        channel=channel,
+        conversation=Conversation.slack(thread, channel),
         task=task,
         repo=repo if repo is not None else Path.cwd(),
         base=config.orchestrator.worktree_base,
@@ -327,14 +328,10 @@ def reopen(
     the thread to posting answers in Slack (never back). A thread from X (its record, or the
     --item pan drained) exits 35: X may only start new sessions."""
     wiring = load_wiring()
-    record = wiring.thread_map.get(thread)
+    refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
+    record = wiring.thread_map.get(conversation_for_id(wiring.thread_map, thread))
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
-    refuse_x_source(
-        wiring.thread_map,
-        thread,
-        newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=record.channel),
-    )
     slack = wiring.slack
     terminal_host = wiring.terminal_host
     # reopen_worker posts its own failure notice and re-raises SpawnError; this boundary
@@ -355,7 +352,8 @@ def reopen(
 @threads_app.command("get")
 def threads_get(thread: str = typer.Option(..., "--thread")) -> None:
     """Print the ThreadRecord for a thread_ts as JSON."""
-    record = load_wiring().thread_map.get(thread)
+    thread_map = load_wiring().thread_map
+    record = thread_map.get(conversation_for_id(thread_map, thread))
     typer.echo(record.model_dump_json() if record is not None else "null")
 
 
@@ -365,7 +363,8 @@ def threads_set(
     status: WorkerStatus = typer.Option(..., "--status"),
 ) -> None:
     """Update a ThreadRecord's status."""
-    load_wiring().thread_map.update_status(thread, status)
+    thread_map = load_wiring().thread_map
+    thread_map.update_status(conversation_for_id(thread_map, thread), status)
     typer.echo(f"{thread} -> {status.value}")
 
 
@@ -376,7 +375,7 @@ def slack_post_command(
     text: str = typer.Option(..., "--text"),
 ) -> None:
     """Post text to a Slack thread via the one egress path (INV-4)."""
-    slack_post(load_wiring().slack, channel, thread, text)
+    slack_post(load_wiring().slack, Conversation.slack(thread, channel), text)
 
 
 def _extract_cwd(raw_stdin: str) -> str | None:
@@ -406,8 +405,7 @@ def _dispatch_completion_hook(
         logger.warning(f"completion hook: no thread record for cwd={cwd}")
         return
     hook_fn(
-        record.thread_ts,
-        record.channel,
+        record.conversation,
         thread_map,
         slack,
         stdin=io.StringIO(raw_stdin),
@@ -436,7 +434,7 @@ def hook_session_start() -> None:
         logger.warning(f"session-start hook: no thread record for cwd={cwd}")
         return
     session_start_hook(
-        record.thread_ts,
+        record.conversation,
         thread_map,
         stdin=io.StringIO(raw_stdin),
         session_name=record.terminal_name,
@@ -465,7 +463,7 @@ def _dispatch_inbox_link_hook(raw_stdin: str, thread_map: ThreadMap) -> None:
         logger.warning(f"inbox-link hook: no thread record for cwd={cwd}")
         return
     inbox_link_hook(
-        record.thread_ts,
+        record.conversation,
         thread_map,
         stdin=io.StringIO(raw_stdin),
         session_name=record.terminal_name,
@@ -488,7 +486,7 @@ def hook_inbox_link() -> None:
 def status(thread: str = typer.Option(..., "--thread")) -> None:
     """Report a worker's live status from its hc terminal (resolved via its thread record)."""
     wiring = load_wiring()
-    record = wiring.thread_map.get(thread)
+    record = wiring.thread_map.get(conversation_for_id(wiring.thread_map, thread))
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={thread}")
     terminal = None
@@ -549,7 +547,9 @@ def sessions(
         return
     if show is not None and thread is not None and channel is not None and requester is not None:
         addresses = [address.strip() for address in show.split(",") if address.strip()]
-        _send_sessions_privately(wiring, summaries, channel, thread, requester, addresses)
+        _send_sessions_privately(
+            wiring, summaries, Conversation.slack(thread, channel), requester, addresses
+        )
         return
     if any(option is not None for option in (show, thread, channel, requester)):
         # The list is private and sent only with all four; one alone is a mistake.
@@ -560,8 +560,7 @@ def sessions(
 def _send_sessions_privately(
     wiring: Wiring,
     summaries: list[SessionSummary],
-    channel: str,
-    thread_ts: str,
+    conversation: Conversation,
     requester: str,
     addresses: list[str],
 ) -> None:
@@ -575,8 +574,7 @@ def _send_sessions_privately(
     )
     send_sessions_privately(
         slack,
-        channel=channel,
-        thread_ts=thread_ts,
+        conversation=conversation,
         requester=requester,
         text=text,
         session_count=len(selected),
@@ -593,8 +591,7 @@ def check(
     session pan did not start) and says if it is still working or waiting on a prompt."""
     wiring = load_wiring()
     check_thread(
-        thread_ts=thread,
-        channel=channel,
+        conversation=Conversation.slack(thread, channel),
         thread_map=wiring.thread_map,
         terminal_host=wiring.terminal_host,
         inbox_directory=wiring.inbox_directory,
@@ -612,7 +609,9 @@ def forget(
     """Untie the thread from its session and say so in the thread. Never stops the session."""
     wiring = load_wiring()
     forget_thread(
-        thread_ts=thread, channel=channel, thread_map=wiring.thread_map, slack=wiring.slack
+        conversation=Conversation.slack(thread, channel),
+        thread_map=wiring.thread_map,
+        slack=wiring.slack,
     )
 
 
@@ -642,16 +641,16 @@ def done(
     exactly done --discard; otherwise nothing is touched and it exits 33 (an unusable item also
     gets a one-line reply asking to send the request again)."""
     wiring = load_wiring()
+    conversation = Conversation.slack(thread, channel)
     if discard:
         require_discard_request(
-            newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel),
-            wiring.thread_map.get(thread),
-            thread_ts=thread,
-            reply=wiring.thread_reply(channel, thread),
+            newest_drained_item(wiring.drained_log, item, conversation),
+            wiring.thread_map.get(conversation),
+            conversation=conversation,
+            reply=wiring.thread_reply(conversation),
         )
     done_thread(
-        thread_ts=thread,
-        channel=channel,
+        conversation=conversation,
         discard=discard,
         worktree_base=wiring.config.orchestrator.worktree_base,
         fallback_repo=wiring.config.orchestrator.cwd,
@@ -695,12 +694,11 @@ def send(
     from Slack and which Inbox thread to use. A thread from X exits 35: X may only start new
     sessions."""
     wiring = load_wiring()
-    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
-    refuse_x_source(wiring.thread_map, thread, drained)
+    conversation = Conversation.slack(thread, channel)
+    refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
     if to is None:
         follow_up_to_session(
-            thread_ts=thread,
-            channel=channel,
+            conversation=conversation,
             text=task,
             terminal_host=wiring.terminal_host,
             thread_map=wiring.thread_map,
@@ -710,20 +708,19 @@ def send(
         )
         return
     named_in = require_named_target(
-        drained,
+        newest_drained_item(wiring.drained_log, item, conversation),
         action="send",
         item_id=item,
         target=to,
         requester=requester,
-        thread_ts=thread,
-        reply=wiring.thread_reply(channel, thread),
+        conversation=conversation,
+        reply=wiring.thread_reply(conversation),
     )
     send_to_session(
-        thread_ts=thread,
-        channel=channel,
+        conversation=conversation,
         selector=to,
         text=task,
-        requester=named_in.slack_user,
+        requester=named_in.author,
         reply_in_slack=reply_in_slack,
         terminal_host=wiring.terminal_host,
         thread_map=wiring.thread_map,
@@ -761,14 +758,16 @@ def propose(
     --item must be --requester's newest message pan drained in this thread; otherwise nothing
     is asked, a one-line reply asks to send the request again, and it exits 28. A thread from X exits 35: X may only start new sessions."""
     wiring = load_wiring()
-    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
-    refuse_x_source(wiring.thread_map, thread, drained)
+    conversation = Conversation.slack(thread, channel)
+    refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
     require_requesters_message(
-        drained, requester=requester, thread_ts=thread, reply=wiring.thread_reply(channel, thread)
+        newest_drained_item(wiring.drained_log, item, conversation),
+        requester=requester,
+        conversation=conversation,
+        reply=wiring.thread_reply(conversation),
     )
     propose_sessions(
-        thread_ts=thread,
-        channel=channel,
+        conversation=conversation,
         selector=to,
         task=task,
         requester=requester,
@@ -804,15 +803,13 @@ def confirm(
     wiring = load_wiring()
     if normalized_choice is None:
         cancel_confirmation(
-            thread_ts=thread,
-            channel=channel,
+            conversation=Conversation.slack(thread, channel),
             confirmations=wiring.confirmations,
             slack=wiring.slack,
         )
         return
     confirm_session(
-        thread_ts=thread,
-        channel=channel,
+        conversation=Conversation.slack(thread, channel),
         choice=normalized_choice,
         terminal_host=wiring.terminal_host,
         thread_map=wiring.thread_map,
@@ -841,16 +838,16 @@ def relay(
     the request again) and hold the target as a whole word or phrase; otherwise nothing is sent
     and it exits 28. A thread from X exits 35."""
     wiring = load_wiring()
-    drained = newest_drained_item(wiring.drained_log, item, thread_ts=thread, channel=channel)
-    refuse_x_source(wiring.thread_map, thread, drained)
+    conversation = Conversation.slack(thread, channel)
+    refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
     require_named_target(
-        drained,
+        newest_drained_item(wiring.drained_log, item, conversation),
         action="relay",
         item_id=item,
         target=target,
         requester=None,
-        thread_ts=thread,
-        reply=wiring.thread_reply(channel, thread),
+        conversation=conversation,
+        reply=wiring.thread_reply(conversation),
     )
     terminal_host = wiring.terminal_host
     resolved = relay_to_session(terminal_host, target, message, terminal_host.list_terminals())
@@ -889,7 +886,7 @@ def stop(thread: str = typer.Option(..., "--thread")) -> None:
     unties the thread and never stops it."""
     wiring = load_wiring()
     stop_thread(
-        thread_ts=thread,
+        conversation=conversation_for_id(wiring.thread_map, thread),
         thread_map=wiring.thread_map,
         terminal_host=wiring.terminal_host,
         open_slack=lambda: wiring.slack,

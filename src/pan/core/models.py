@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
+from pan.core.errors import SlackPostError
+
 
 class WorkerStatus(StrEnum):
     SPAWNING = "spawning"
@@ -23,6 +25,54 @@ class ThreadSource(StrEnum):
     # Where a thread lives, so a Slack thread ts and (later) an X post id never collide.
     SLACK = "slack"
     X = "x"
+
+
+class Conversation(BaseModel, frozen=True):
+    # Where a message was said and where pan answers, on any source: a Slack thread (`id` its
+    # thread ts, `place` its channel) or an X post (`id` the post id, no place). Lookups match
+    # on `key`, the source and id, so a Slack thread and an X post with the same id never
+    # collide; `place` only says where to reply.
+    source: ThreadSource
+    id: str
+    place: str | None = None
+
+    @classmethod
+    def slack(cls, thread_ts: str, channel: str | None = None) -> Conversation:
+        return cls(source=ThreadSource.SLACK, id=thread_ts, place=channel)
+
+    @property
+    def key(self) -> str:
+        return f"{self.source.value}:{self.id}"
+
+    def slack_channel(self) -> str:
+        # The Slack channel pan posts in; SlackPostError when the conversation has none.
+        if self.place is None:
+            raise SlackPostError(f"conversation {self.key} has no channel to post in")
+        return self.place
+
+
+def _lift_flat_conversation(raw: Any, *, author_key: str | None = None) -> Any:
+    # Files written before Conversation existed hold the identity flat: thread_ts, channel and
+    # an optional source (and an InboxItem's sender as slack_user). They load into the new
+    # shape and are written back in it on the next save. A flat record without a channel
+    # stays unparseable, as it always was.
+    if not isinstance(raw, dict) or "conversation" in raw:
+        return raw
+    if "thread_ts" not in raw or "channel" not in raw:
+        return raw
+    lifted = {
+        key: value
+        for key, value in raw.items()
+        if key not in ("thread_ts", "channel", "source", author_key)
+    }
+    lifted["conversation"] = {
+        "source": raw.get("source", ThreadSource.SLACK.value),
+        "id": raw["thread_ts"],
+        "place": raw["channel"],
+    }
+    if author_key is not None and author_key in raw:
+        lifted["author"] = raw[author_key]
+    return lifted
 
 
 class ReplyMode(StrEnum):
@@ -68,16 +118,20 @@ class TerminalHostKind(StrEnum):
 
 class InboxItem(BaseModel, frozen=True):
     id: str
-    slack_user: str
-    channel: str
-    thread_ts: str
+    # Who sent the message: a Slack user id.
+    author: str
+    conversation: Conversation
     is_thread_reply: bool
     raw_text: str
     received_at: datetime
-    source: ThreadSource = ThreadSource.SLACK
     # The message mentioned the bot (an app_mention event); False for a reply the gateway
     # forwarded without one. Items written before it existed were all mentions.
     mentioned: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_flat_item(cls, raw: Any) -> Any:
+        return _lift_flat_conversation(raw, author_key="slack_user")
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -86,12 +140,11 @@ _LEGACY_RECORD_KEYS = frozenset({"workspace_name", "workspace_id", "pane_ids", "
 
 
 class ThreadRecord(BaseModel):
-    thread_ts: str
+    conversation: Conversation
     # The worker's hc terminal: `terminal_name` is the stream name (also the git branch);
     # `terminal_address` is hc's address (t7, machine/t7), empty when no terminal exists.
     terminal_name: str
     terminal_address: str = ""
-    channel: str
     # The worker's worktree; for a session pan did not start (started_by_pan False), the
     # session's own folder, which pan never removes.
     worktree_path: Path
@@ -105,7 +158,6 @@ class ThreadRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     # Session control. Every field defaults, so records written before they existed load.
-    source: ThreadSource = ThreadSource.SLACK
     # The thread is tied to this session: follow-ups go to it. One thread per session, so a
     # new tie of the session elsewhere unties this one (FileThreadMap.tie).
     tied: bool = True
@@ -130,17 +182,21 @@ class ThreadRecord(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _load_legacy_herdr_record(cls, raw: Any) -> Any:
-        if not isinstance(raw, dict) or "terminal_name" in raw:
-            return raw
-        if not _LEGACY_RECORD_KEYS.intersection(raw):
-            return raw
-        upgraded = {key: value for key, value in raw.items() if key not in _LEGACY_RECORD_KEYS}
-        upgraded["terminal_name"] = raw.get("workspace_name", "")
-        upgraded["terminal_address"] = ""
-        if raw.get("status") != WorkerStatus.DONE.value:
-            upgraded["status"] = WorkerStatus.FAILED.value
-        return upgraded
+    def _load_legacy_record(cls, raw: Any) -> Any:
+        return _load_legacy_herdr_record(_lift_flat_conversation(raw))
+
+
+def _load_legacy_herdr_record(raw: Any) -> Any:
+    if not isinstance(raw, dict) or "terminal_name" in raw:
+        return raw
+    if not _LEGACY_RECORD_KEYS.intersection(raw):
+        return raw
+    upgraded = {key: value for key, value in raw.items() if key not in _LEGACY_RECORD_KEYS}
+    upgraded["terminal_name"] = raw.get("workspace_name", "")
+    upgraded["terminal_address"] = ""
+    if raw.get("status") != WorkerStatus.DONE.value:
+        upgraded["status"] = WorkerStatus.FAILED.value
+    return upgraded
 
 
 class ConfirmationCandidate(BaseModel, frozen=True):
@@ -155,16 +211,14 @@ class ConfirmationCandidate(BaseModel, frozen=True):
 
 
 class PendingConfirmation(BaseModel, frozen=True):
-    # pan's open question in a Slack thread: which session should get `task`. Stored per
+    # pan's open question in a conversation: which session should get `task`. Stored per
     # thread until it is answered, cancelled or expires (CONFIRMATION_TIMEOUT). It is not kept
     # on the thread's ThreadRecord because a send to a named session in a new thread has no
     # record yet. `answered_at` and `answer_text` (the reply, cleaned) are set by `pan inbox
     # drain` when the requester replies after pan last asked; `pan confirm --choice` refuses
     # until they are set, and they are cleared whenever pan asks again. A question stored
     # without a requester is never answered; it expires.
-    thread_ts: str
-    channel: str
-    source: ThreadSource = ThreadSource.SLACK
+    conversation: Conversation
     selector: str
     task: str
     requester: str | None = None
@@ -176,6 +230,11 @@ class PendingConfirmation(BaseModel, frozen=True):
     asked_at: datetime | None = None
     answered_at: datetime | None = None
     answer_text: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_flat_question(cls, raw: Any) -> Any:
+        return _lift_flat_conversation(raw)
 
     def last_asked_at(self) -> datetime:
         return self.asked_at if self.asked_at is not None else self.created_at

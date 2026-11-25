@@ -8,7 +8,7 @@ from slack_fakes import RecordingSlack
 
 from pan.backend.status_message import publish_status, send_private_details
 from pan.core.errors import SlackPostError
-from pan.core.models import ReplyMode, StatusState, ThreadRecord
+from pan.core.models import Conversation, ReplyMode, StatusState, ThreadRecord
 
 _NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1700000000.000100"
@@ -24,17 +24,16 @@ class RecordingThreadMap:
         self.status_messages: list[tuple[str, str, str | None]] = []
 
     def record_status_message(
-        self, thread_ts: str, message_ts: str, *, session_name: str | None = None
+        self, conversation: Conversation, message_ts: str, *, session_name: str | None = None
     ) -> None:
-        self.status_messages.append((thread_ts, message_ts, session_name))
+        self.status_messages.append((conversation.id, message_ts, session_name))
 
 
 def _record(**updates: object) -> ThreadRecord:
     record = ThreadRecord(
-        thread_ts=_THREAD,
+        conversation=Conversation.slack(_THREAD, "C0TEST"),
         terminal_name="pan-login",
         terminal_address="t7",
-        channel="C0TEST",
         worktree_path=Path("/tmp/wt/pan-login"),
         created_at=_NOW,
         updated_at=_NOW,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from pan.core.errors import (
 from pan.core.models import (
     AgentStatus,
     ConfirmationCandidate,
+    Conversation,
     PendingConfirmation,
     Terminal,
     TerminalState,
@@ -40,6 +42,7 @@ from pan.data.threadmap import FileThreadMap
 
 _ASKED_AT = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1700000000.000300"
+_CONVERSATION = Conversation.slack(_THREAD, "C0TEST")
 _PAN_FOLDER = Path("/tmp/work/pan")
 _DOCS_FOLDER = Path("/tmp/work/docs")
 
@@ -82,8 +85,7 @@ def _question(
     # Answered with `answer` a minute after it was asked; unanswered when `answer` is None.
     # `asked_again_at` is when pan last asked, when it asked again.
     return PendingConfirmation(
-        thread_ts=thread_ts,
-        channel="C0TEST",
+        conversation=Conversation.slack(thread_ts, "C0TEST"),
         selector="pan docs",
         task="add the tests",
         requester="U0TEST",
@@ -111,8 +113,7 @@ def _propose(
     tmp_path: Path, terminal_host: FakeTerminalHost, slack: RecordingSlack, *addresses: str
 ) -> PendingConfirmation | None:
     return propose_sessions(
-        thread_ts=_THREAD,
-        channel="C0TEST",
+        conversation=_CONVERSATION,
         selector="pan docs",
         task="add the tests",
         requester="U0TEST",
@@ -134,8 +135,7 @@ def _confirm(
     clock: SettableClock | None = None,
 ) -> ThreadRecord | None:
     return confirm_session(
-        thread_ts=_THREAD,
-        channel="C0TEST",
+        conversation=_CONVERSATION,
         choice=choice,
         terminal_host=terminal_host,
         thread_map=FileThreadMap(tmp_path / "threads.json", SettableClock()),
@@ -156,7 +156,7 @@ def test_store_reads_a_damaged_file_as_no_questions(tmp_path: Path, contents: by
     store = _store(tmp_path)
 
     assert store.all_pending() == []
-    assert store.get(ThreadSource.SLACK, _THREAD) is None
+    assert store.get(_CONVERSATION) is None
     store.put(_question(_PAN_CANDIDATE))
     assert store.all_pending() == [_question(_PAN_CANDIDATE)]
 
@@ -173,10 +173,10 @@ def test_store_keeps_one_question_per_thread_and_drops_expired_ones(tmp_path: Pa
     store.put(_question(_DOCS_CANDIDATE))
     store.put(_question(_PAN_CANDIDATE))
 
-    assert store.get(ThreadSource.SLACK, "old") is None
-    assert store.get(ThreadSource.SLACK, _THREAD) == _question(_PAN_CANDIDATE)
-    store.clear(ThreadSource.SLACK, _THREAD)
-    assert store.get(ThreadSource.SLACK, _THREAD) is None
+    assert store.get(Conversation.slack("old")) is None
+    assert store.get(_CONVERSATION) == _question(_PAN_CANDIDATE)
+    store.clear(_CONVERSATION)
+    assert store.get(_CONVERSATION) is None
 
 
 def test_store_keeps_the_latest_answer_and_clears_it(tmp_path: Path) -> None:
@@ -185,23 +185,62 @@ def test_store_keeps_the_latest_answer_and_clears_it(tmp_path: Path) -> None:
     first_reply = _ASKED_AT + timedelta(minutes=2)
     second_reply = first_reply + timedelta(minutes=1)
 
-    store.mark_answered(ThreadSource.SLACK, _THREAD, first_reply, "yes")
-    store.mark_answered(ThreadSource.SLACK, _THREAD, second_reply, "no wait")
-    store.mark_answered(ThreadSource.SLACK, "1700000000.000999", first_reply, "yes")
+    store.mark_answered(_CONVERSATION, first_reply, "yes")
+    store.mark_answered(_CONVERSATION, second_reply, "no wait")
+    store.mark_answered(Conversation.slack("1700000000.000999"), first_reply, "yes")
 
-    stored = store.get(ThreadSource.SLACK, _THREAD)
+    stored = store.get(_CONVERSATION)
     assert stored is not None
     assert (stored.answered_at, stored.answer_text) == (second_reply, "no wait")
-    assert store.get(ThreadSource.SLACK, "1700000000.000999") is None
+    assert store.get(Conversation.slack("1700000000.000999")) is None
     asked_again = second_reply + timedelta(minutes=1)
-    store.clear_answer(ThreadSource.SLACK, _THREAD, asked_again)
-    assert store.get(ThreadSource.SLACK, _THREAD) == _question(
+    store.clear_answer(_CONVERSATION, asked_again)
+    assert store.get(_CONVERSATION) == _question(
         _PAN_CANDIDATE, answer=None, asked_again_at=asked_again
     )
 
 
+def test_store_keeps_a_slack_question_and_an_x_question_with_the_same_id_apart(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    x_post = Conversation(source=ThreadSource.X, id=_THREAD)
+    slack_question = _question(_PAN_CANDIDATE, answer=None)
+    store.put(slack_question)
+    store.put(_question(_DOCS_CANDIDATE, answer=None).model_copy(update={"conversation": x_post}))
+
+    store.mark_answered(x_post, _ASKED_AT + timedelta(minutes=2), "yes")
+    store.clear(x_post)
+
+    assert store.get(_CONVERSATION) == slack_question
+    assert store.get(x_post) is None
+
+
+def test_store_loads_a_flat_question_from_before_conversation_and_rewrites_it(
+    tmp_path: Path,
+) -> None:
+    question = _question(_PAN_CANDIDATE, answer=None)
+    flat_question = question.model_dump(mode="json")
+    del flat_question["conversation"]
+    flat_question.update({"thread_ts": _THREAD, "channel": "C0TEST", "source": "slack"})
+    (tmp_path / "confirmations.json").write_text(json.dumps({f"slack:{_THREAD}": flat_question}))
+    store = _store(tmp_path)
+
+    loaded = store.get(_CONVERSATION)
+    store.mark_answered(_CONVERSATION, _ASKED_AT + timedelta(minutes=2), "yes")
+
+    assert loaded == question
+    stored = json.loads((tmp_path / "confirmations.json").read_text())
+    assert list(stored) == [f"slack:{_THREAD}"]
+    assert stored[f"slack:{_THREAD}"]["conversation"] == _CONVERSATION.model_dump(mode="json")
+    assert not {"thread_ts", "channel", "source"} & set(stored[f"slack:{_THREAD}"])
+    reloaded = store.get(_CONVERSATION)
+    assert reloaded is not None
+    assert reloaded.answer_text == "yes"
+
+
 @pytest.mark.parametrize(
-    "slack_user, minutes_after_asking, requester, expected",
+    "author, minutes_after_asking, requester, expected",
     [
         ("U0TEST", 2, "U0TEST", True),
         ("U000OTHER", 2, "U0TEST", False),
@@ -222,12 +261,12 @@ def test_store_keeps_the_latest_answer_and_clears_it(tmp_path: Path) -> None:
     ],
 )
 def test_is_answer(
-    slack_user: str, minutes_after_asking: int, requester: str | None, expected: bool
+    author: str, minutes_after_asking: int, requester: str | None, expected: bool
 ) -> None:
     question = _question(_PAN_CANDIDATE, answer=None).model_copy(update={"requester": requester})
     received_at = _ASKED_AT + timedelta(minutes=minutes_after_asking)
 
-    assert is_answer(question, slack_user, received_at) is expected
+    assert is_answer(question, author, received_at) is expected
 
 
 @pytest.mark.parametrize(
@@ -293,7 +332,7 @@ def test_propose_stores_the_question_and_asks_types_nothing(
 
     _propose(tmp_path, terminal_host, slack, *addresses)
 
-    stored = _store(tmp_path).get(ThreadSource.SLACK, _THREAD)
+    stored = _store(tmp_path).get(_CONVERSATION)
     assert stored is not None
     assert stored.candidates == expected_candidates
     assert stored.task == "add the tests"
@@ -322,7 +361,7 @@ def test_propose_with_no_live_candidate_says_no_session_matches(
 
     assert _propose(tmp_path, terminal_host, slack, *addresses) is None
 
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert _store(tmp_path).get(_CONVERSATION) is None
     assert slack.texts() == [
         'no session matches "pan docs"; to start new work send `@pan new: <your text>`'
     ]
@@ -355,7 +394,7 @@ def test_confirm_sends_the_stored_task_and_ties_the_thread(
     assert sent_address == expected_address
     assert sent_text.startswith("From Slack via pan.")
     assert sent_text.endswith("add the tests")
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert _store(tmp_path).get(_CONVERSATION) is None
     assert slack.status_texts() == ["Working: add the tests"]
     assert [ephemeral[2] for ephemeral in slack.ephemerals] == ["U0TEST"]
 
@@ -384,7 +423,7 @@ def test_confirm_with_a_reply_that_picks_nothing_asks_again(
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
     # Asked again, so the reply that picked nothing no longer answers it.
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(
+    assert _store(tmp_path).get(_CONVERSATION) == _question(
         *candidates, answer=None, asked_again_at=_ASKED_AT
     )
 
@@ -446,7 +485,7 @@ def test_confirm_refuses_without_an_answer_that_picks_the_choice(
 
     assert terminal_host.sent == []
     assert slack.texts() == []
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is not None
+    assert _store(tmp_path).get(_CONVERSATION) is not None
 
 
 def test_confirm_with_no_question_posts_nothing(tmp_path: Path) -> None:
@@ -469,7 +508,7 @@ def test_confirm_after_the_question_expired_sends_nothing(tmp_path: Path) -> Non
 
     assert terminal_host.sent == []
     assert slack.texts() == [EXPIRED_REPLY]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert _store(tmp_path).get(_CONVERSATION) is None
 
 
 @pytest.mark.parametrize(
@@ -501,7 +540,7 @@ def test_confirm_to_a_session_no_longer_running_sends_nothing(
 
     assert terminal_host.sent == []
     assert slack.texts() == [f"{candidate.label} is no longer running; not sent"]
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert _store(tmp_path).get(_CONVERSATION) is None
 
 
 @pytest.mark.parametrize(
@@ -543,7 +582,7 @@ def test_confirm_to_a_session_not_ready_keeps_the_question_open(
     assert terminal_host.sent == []
     assert slack.texts() == [expected_reply]
     # Still open, but the person must answer again.
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) == _question(
+    assert _store(tmp_path).get(_CONVERSATION) == _question(
         *candidates, answer=None, asked_again_at=_ASKED_AT
     )
 
@@ -564,12 +603,12 @@ def test_cancel_confirmation(
     slack = RecordingSlack()
 
     cancelled = cancel_confirmation(
-        thread_ts=_THREAD, channel="C0TEST", confirmations=_store(tmp_path), slack=slack
+        conversation=_CONVERSATION, confirmations=_store(tmp_path), slack=slack
     )
 
     assert cancelled is expected_cancelled
     assert slack.texts() == expected_texts
-    assert _store(tmp_path).get(ThreadSource.SLACK, _THREAD) is None
+    assert _store(tmp_path).get(_CONVERSATION) is None
 
 
 @pytest.mark.parametrize(
@@ -622,4 +661,4 @@ def test_question_expiry_counts_from_when_pan_last_asked(
     store = _store(tmp_path)
     store.put(question)
     store.put(_question(_DOCS_CANDIDATE, thread_ts="1700000000.000999", asked_at=now))
-    assert (store.get(ThreadSource.SLACK, _THREAD) is not None) is expected_live
+    assert (store.get(_CONVERSATION) is not None) is expected_live

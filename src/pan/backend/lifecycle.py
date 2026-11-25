@@ -82,9 +82,9 @@ def reconcile_lost_workers(terminal_host: TerminalHost, thread_map: ThreadMap) -
         if terminal is not None and terminal.state is TerminalState.LIVE:
             continue
         thread_map.update_status(
-            record.thread_ts, WorkerStatus.FAILED, session_name=record.terminal_name
+            record.conversation, WorkerStatus.FAILED, session_name=record.terminal_name
         )
-        lost.append(record.thread_ts)
+        lost.append(record.conversation.id)
     if lost:
         logger.info(f"reconcile marked lost workers failed count={len(lost)}")
     return lost

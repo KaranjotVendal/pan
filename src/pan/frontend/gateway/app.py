@@ -9,7 +9,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from pan.core.errors import SlackPostError, UnauthorizedSenderError
-from pan.core.models import InboxItem, PanConfig, SlackCredentials, ThreadSource
+from pan.core.models import Conversation, InboxItem, PanConfig, SlackCredentials
 from pan.core.seams import Clock, InboxStore, ThreadMap
 from pan.frontend.gateway.auth import auth_check, is_authorized
 from pan.frontend.gateway.slack_post import slack_post
@@ -159,7 +159,7 @@ class BoltSlackAdapter:
             fenced_help = f"{CODE_FENCE}\n{render_cli_help(help_request.command)}\n{CODE_FENCE}"
             # Posted through the one egress (INV-4), so it runs through to_slack_mrkdwn like
             # every other message (a fence passes through verbatim, keeping the columns).
-            slack_post(self, channel, thread_ts, fenced_help)
+            slack_post(self, Conversation.slack(thread_ts, channel), fenced_help)
             # Value-free (INV-9): the requested name is Slack-supplied text, so only whether
             # one was given is logged here — help.py logs the sanitized name when it misses.
             named = help_request.command is not None
@@ -175,13 +175,11 @@ class BoltSlackAdapter:
 
         item = InboxItem(
             id=event_id,
-            slack_user=slack_user,
-            channel=channel,
-            thread_ts=thread_ts,
+            author=slack_user,
+            conversation=Conversation.slack(thread_ts, channel),
             is_thread_reply=thread_ts_value is not None,
             raw_text=raw_text,
             received_at=self._clock.now(),
-            source=ThreadSource.SLACK,
             mentioned=is_mention,
         )
         self._inbox.append(item)
@@ -234,12 +232,14 @@ class BoltSlackAdapter:
         return False
 
     def _is_tied_thread(self, channel: str, thread_ts: str) -> bool:
-        # A thread lookup returns the thread's tied record when it has one, so the thread is
-        # tied exactly when that record is, for this Slack channel.
+        # A lookup returns the Slack thread's tied record when it has one, so the thread is
+        # tied exactly when that record is, for this Slack channel. An X post with the same id
+        # is another conversation and never matches.
         if self._thread_map is None:
             return False
+        conversation = Conversation.slack(thread_ts, channel)
         try:
-            record = self._thread_map.get(thread_ts)
+            record = self._thread_map.get(conversation)
         except (OSError, ValueError, ValidationError) as e:
             # An unreadable thread map must not take the gateway down, and a reply we cannot
             # place is safer dropped than forwarded: forwarding could start a session in a
@@ -249,12 +249,7 @@ class BoltSlackAdapter:
                 f"channel={channel}: {type(e).__name__}"
             )
             return False
-        return (
-            record is not None
-            and record.tied
-            and record.channel == channel
-            and record.source == ThreadSource.SLACK
-        )
+        return record is not None and record.tied and record.conversation == conversation
 
     def start(self) -> None:  # pragma: no cover - live Socket Mode run, not unit-tested
         from slack_bolt import App

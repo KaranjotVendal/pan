@@ -14,7 +14,7 @@ from pan.backend.orchestrating_skill import (
     wake_instruction,
 )
 from pan.core.errors import TargetBlockedError, TerminalNameTakenError
-from pan.core.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
+from pan.core.models import AgentStatus, Conversation, TerminalState, ThreadRecord, WorkerStatus
 
 _NOW = datetime(2026, 11, 15, 9, 0, 0, tzinfo=UTC)
 _CWD = Path("/Users/me/dev/pan")
@@ -23,10 +23,9 @@ _COMMAND = ["claude", "--permission-mode", "acceptEdits"]
 
 def _record(thread_ts: str, address: str, status: WorkerStatus) -> ThreadRecord:
     return ThreadRecord(
-        thread_ts=thread_ts,
+        conversation=Conversation.slack(thread_ts, "C1"),
         terminal_name=f"pan-{thread_ts}",
         terminal_address=address,
-        channel="C1",
         worktree_path=Path(f"/wt/pan-{thread_ts}"),
         status=status,
         created_at=_NOW,
@@ -36,15 +35,15 @@ def _record(thread_ts: str, address: str, status: WorkerStatus) -> ThreadRecord:
 
 class FakeThreadMap:
     def __init__(self, records: list[ThreadRecord]) -> None:
-        self._records = {record.thread_ts: record for record in records}
+        self._records = {record.conversation.id: record for record in records}
 
     def records(self) -> list[ThreadRecord]:
         return list(self._records.values())
 
     def update_status(
-        self, thread_ts: str, status: WorkerStatus, *, session_name: str | None = None
+        self, conversation: Conversation, status: WorkerStatus, *, session_name: str | None = None
     ) -> None:
-        record = self._records[thread_ts]
+        record = self._records[conversation.id]
         assert session_name == record.terminal_name
         record.status = status
 
