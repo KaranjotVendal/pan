@@ -633,6 +633,153 @@ def _repo_without_worktree(
     return fallback_repo if has_branch else None
 
 
+def _refuse_closing_a_busy_session(
+    terminal: Terminal | None,
+    *,
+    discard: bool,
+    conversation: Conversation,
+    name: str,
+    reporter: Reporter,
+) -> None:
+    # Nothing is closed while its live terminal is working or waiting on a prompt, unless
+    # `discard`.
+    if terminal is None or terminal.state is not TerminalState.LIVE or discard:
+        return
+    if terminal.agent_status is AgentStatus.WORKING:
+        reporter.report(
+            conversation,
+            SessionNotice(reason=SessionNoticeReason.NOT_CLOSED_WORKING, session_name=name),
+        )
+        raise SessionBusyError(f"{name} is still working; not closed")
+    if terminal.agent_status is AgentStatus.BLOCKED:
+        reporter.report(
+            conversation,
+            SessionNotice(
+                reason=SessionNoticeReason.NOT_CLOSED_WAITING_ON_PROMPT, session_name=name
+            ),
+        )
+        raise TargetBlockedError(f"{name} is waiting on a prompt; not closed")
+
+
+def _read_worktree_and_branch(
+    record: ThreadRecord,
+    *,
+    conversation: Conversation,
+    worktree_base: Path,
+    fallback_repo: Path,
+    git: GitWorktreeAdapter,
+    reporter: Reporter,
+) -> tuple[WorktreeStatus | None, Path | None, BranchStatus | None]:
+    # The session's worktree (None when its folder is gone), the repository it belongs to
+    # (None when unknown) and the session's branch there (None when it has none). A folder
+    # outside pan's worktrees, or a main checkout, is refused before anything is touched.
+    name = record.terminal_name
+    worktree_path = record.worktree_path
+    worktree: WorktreeStatus | None = None
+    branch: BranchStatus | None = None
+    try:
+        if worktree_path.exists():
+            if not _is_pan_worktree(worktree_path, worktree_base):
+                reporter.report(
+                    conversation,
+                    SessionNotice(
+                        reason=SessionNoticeReason.FOLDER_OUTSIDE_WORKTREES, session_name=name
+                    ),
+                )
+                raise UnsafeWorktreeError(f"{worktree_path} is not under {worktree_base}")
+            worktree = git.worktree_status(worktree_path)
+            if worktree.is_main_worktree:
+                reporter.report(
+                    conversation,
+                    SessionNotice(
+                        reason=SessionNoticeReason.FOLDER_IS_MAIN_REPOSITORY, session_name=name
+                    ),
+                )
+                raise UnsafeWorktreeError(f"{worktree_path} is a main worktree")
+            repo = worktree.main_repo
+        else:
+            repo = _repo_without_worktree(record, fallback_repo, git)
+        if repo is not None:
+            branch = git.branch_status(repo, name)
+    except GitWorktreeError:
+        reporter.report(
+            conversation,
+            SessionNotice(reason=SessionNoticeReason.WORKTREE_UNREADABLE, session_name=name),
+        )
+        raise
+    return worktree, repo, branch
+
+
+def _refuse_closing_unsaved_work(
+    worktree: WorktreeStatus | None,
+    branch: BranchStatus | None,
+    *,
+    discard: bool,
+    conversation: Conversation,
+    name: str,
+    reporter: Reporter,
+) -> None:
+    # Nothing is closed while closing it would lose work (uncommitted files, or branch commits
+    # not pushed or merged), unless `discard`.
+    uncommitted_count = len(uncommitted_paths(worktree)) if worktree is not None else 0
+    unpushed_count = unpushed_commit_count(branch) if branch is not None else 0
+    if worktree is not None:
+        unpushed_count += worktree.detached_commits
+    if (uncommitted_count or unpushed_count) and not discard:
+        reporter.report(
+            conversation,
+            WorkKept(
+                session_name=name,
+                uncommitted_files=uncommitted_count,
+                unpushed_commits=unpushed_count,
+            ),
+        )
+        raise UnsavedWorkError(
+            f"{name} has {uncommitted_count} uncommitted file(s) and "
+            f"{unpushed_count} unpushed commit(s); not closed"
+        )
+
+
+def _remove_worktree_and_branch(
+    record: ThreadRecord,
+    worktree: WorktreeStatus | None,
+    repo: Path | None,
+    branch: BranchStatus | None,
+    *,
+    discard: bool,
+    conversation: Conversation,
+    thread_map: ThreadMap,
+    git: GitWorktreeAdapter,
+    reporter: Reporter,
+) -> tuple[bool, bool]:
+    # Removes the worktree (or, when the folder is already gone, the repository's record of
+    # it) and then the branch; returns whether the worktree was removed and the branch deleted.
+    name = record.terminal_name
+    worktree_removed = False
+    branch_deleted = False
+    try:
+        if worktree is not None:
+            # Without discard, any file left is pan's untracked settings file.
+            has_files = bool(worktree.untracked_paths or worktree.modified_paths)
+            git.remove_worktree(record.worktree_path, force=discard or has_files)
+            worktree_removed = True
+        elif repo is not None:
+            git.prune_worktrees(repo)
+        if repo is not None and branch is not None:
+            git.delete_branch(repo, name, force=force_branch_delete(branch, discard=discard))
+            branch_deleted = True
+    except GitWorktreeError:
+        # The terminal is gone but the cleanup is not finished: the record keeps its status
+        # and its tie (so `@pan done` retries from where it stopped), and forgets the removed
+        # terminal's address, so nothing is ever sent to a terminal now at that address.
+        thread_map.put(record.model_copy(update={"terminal_address": ""}))
+        reporter.report(
+            conversation, CleanupFailed(session_name=name, worktree_path=record.worktree_path)
+        )
+        raise
+    return worktree_removed, branch_deleted
+
+
 def done_thread(
     *,
     conversation: Conversation,
@@ -658,85 +805,44 @@ def done_thread(
         return
     name = record.terminal_name
 
-    def notice(reason: SessionNoticeReason) -> SessionNotice:
-        return SessionNotice(reason=reason, session_name=name)
-
     if not record.started_by_pan:
         thread_map.untie(conversation)
-        reporter.report(conversation, notice(SessionNoticeReason.DESK_SESSION_UNTIED))
+        reporter.report(
+            conversation,
+            SessionNotice(reason=SessionNoticeReason.DESK_SESSION_UNTIED, session_name=name),
+        )
         logger.info(f"done untied desk session={name} conversation={conversation.key}")
         return
 
     terminal = _session_terminal(terminal_host, record)
-    if terminal is not None and terminal.state is TerminalState.LIVE and not discard:
-        if terminal.agent_status is AgentStatus.WORKING:
-            reporter.report(conversation, notice(SessionNoticeReason.NOT_CLOSED_WORKING))
-            raise SessionBusyError(f"{name} is still working; not closed")
-        if terminal.agent_status is AgentStatus.BLOCKED:
-            reporter.report(conversation, notice(SessionNoticeReason.NOT_CLOSED_WAITING_ON_PROMPT))
-            raise TargetBlockedError(f"{name} is waiting on a prompt; not closed")
-
-    worktree_path = record.worktree_path
-    worktree: WorktreeStatus | None = None
-    branch: BranchStatus | None = None
-    try:
-        if worktree_path.exists():
-            if not _is_pan_worktree(worktree_path, worktree_base):
-                reporter.report(conversation, notice(SessionNoticeReason.FOLDER_OUTSIDE_WORKTREES))
-                raise UnsafeWorktreeError(f"{worktree_path} is not under {worktree_base}")
-            worktree = git.worktree_status(worktree_path)
-            if worktree.is_main_worktree:
-                reporter.report(conversation, notice(SessionNoticeReason.FOLDER_IS_MAIN_REPOSITORY))
-                raise UnsafeWorktreeError(f"{worktree_path} is a main worktree")
-            repo = worktree.main_repo
-        else:
-            repo = _repo_without_worktree(record, fallback_repo, git)
-        if repo is not None:
-            branch = git.branch_status(repo, name)
-    except GitWorktreeError:
-        reporter.report(conversation, notice(SessionNoticeReason.WORKTREE_UNREADABLE))
-        raise
-
-    uncommitted_count = len(uncommitted_paths(worktree)) if worktree is not None else 0
-    unpushed_count = unpushed_commit_count(branch) if branch is not None else 0
-    if worktree is not None:
-        unpushed_count += worktree.detached_commits
-    if (uncommitted_count or unpushed_count) and not discard:
-        reporter.report(
-            conversation,
-            WorkKept(
-                session_name=name,
-                uncommitted_files=uncommitted_count,
-                unpushed_commits=unpushed_count,
-            ),
-        )
-        raise UnsavedWorkError(
-            f"{name} has {uncommitted_count} uncommitted file(s) and "
-            f"{unpushed_count} unpushed commit(s); not closed"
-        )
+    _refuse_closing_a_busy_session(
+        terminal, discard=discard, conversation=conversation, name=name, reporter=reporter
+    )
+    worktree, repo, branch = _read_worktree_and_branch(
+        record,
+        conversation=conversation,
+        worktree_base=worktree_base,
+        fallback_repo=fallback_repo,
+        git=git,
+        reporter=reporter,
+    )
+    _refuse_closing_unsaved_work(
+        worktree, branch, discard=discard, conversation=conversation, name=name, reporter=reporter
+    )
 
     if terminal is not None:
         terminal_host.remove(terminal.address)
-    worktree_removed = False
-    branch_deleted = False
-    try:
-        if worktree is not None:
-            # Without discard, any file left is pan's untracked settings file.
-            has_files = bool(worktree.untracked_paths or worktree.modified_paths)
-            git.remove_worktree(worktree_path, force=discard or has_files)
-            worktree_removed = True
-        elif repo is not None:
-            git.prune_worktrees(repo)
-        if repo is not None and branch is not None:
-            git.delete_branch(repo, name, force=force_branch_delete(branch, discard=discard))
-            branch_deleted = True
-    except GitWorktreeError:
-        # The terminal is gone but the cleanup is not finished: the record keeps its status
-        # and its tie (so `@pan done` retries from where it stopped), and forgets the removed
-        # terminal's address, so nothing is ever sent to a terminal now at that address.
-        thread_map.put(record.model_copy(update={"terminal_address": ""}))
-        reporter.report(conversation, CleanupFailed(session_name=name, worktree_path=worktree_path))
-        raise
+    worktree_removed, branch_deleted = _remove_worktree_and_branch(
+        record,
+        worktree,
+        repo,
+        branch,
+        discard=discard,
+        conversation=conversation,
+        thread_map=thread_map,
+        git=git,
+        reporter=reporter,
+    )
 
     thread_map.update_status(conversation, WorkerStatus.DONE, session_name=name)
     thread_map.untie(conversation)

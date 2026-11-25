@@ -87,7 +87,7 @@ def test_herdr_era_pane_id_names_its_replacement(tmp_path: Path) -> None:
     data = _minimal_config()
     data["orchestrator"]["pane_id"] = "w1:p1"
 
-    with pytest.raises(ConfigMissingError, match="orchestrator.terminal"):
+    with pytest.raises(ConfigMissingError, match=r"orchestrator\.terminal"):
         load_config(_write_config(tmp_path, data))
 
 
@@ -108,7 +108,7 @@ def test_unknown_terminal_host_is_a_clear_config_error(
 ) -> None:
     data = {**_minimal_config(), "terminal_host": unknown_terminal_host}
 
-    with pytest.raises(ConfigMissingError, match="terminal_host .* is not supported"):
+    with pytest.raises(ConfigMissingError, match=r"terminal_host .* is not supported"):
         load_config(_write_config(tmp_path, data))
 
 

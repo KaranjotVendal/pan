@@ -34,8 +34,20 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
+# See decisions/0003-lint-rules.md for why each family is on or off.
+select = [
+    "E", "F", "I", "UP", "B", "SIM", "TID",
+    "PLC2701", "SLF001", "FBT", "C901", "BLE001", "RUF", "DTZ", "PTH", "PERF", "FURB",
+    "TRY300", "TRY301", "TRY400", "ERA", "RET", "PIE", "C4", "T20",
+]
 ignore = ["E501"]
+# Phone keyboards autocorrect `--` and quotes into these; pan matches and strips them on
+# purpose (backend/directive.py), and the tests feed them in.
+allowed-confusables = ["–", "‘", "’"]
+# Preview is on only so PLC2701 can be selected; no other preview rule turns on, but preview
+# also changes how some stable rules behave, so ruff is pinned to a minor version below.
+preview = true
+explicit-preview-rules = true
 
 # Layer import rules live in src/pan/<layer>/ruff.toml (see decisions/0001-layers.md).
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
@@ -45,6 +57,15 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "src/pan/frontend/gateway/**" = ["TID251"]
 "tests/unit/test_gateway_app.py" = ["TID251"]
+# pytest passes parametrized values to a test by name, so a boolean test parameter has no
+# positional call site.
+"tests/**" = ["FBT001"]
+
+[tool.ruff.lint.flake8-boolean-trap]
+extend-allowed-calls = ["typer.Option"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["typer.Option", "typer.Argument"]
@@ -59,6 +80,6 @@ include = ["src"]
 dev = [
     "pytest>=9.1.1",
     "respx>=0.23.1",
-    "ruff>=0.15.21",
+    "ruff>=0.15.21,<0.16",
     "ty>=0.0.60",
 ]

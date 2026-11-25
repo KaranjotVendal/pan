@@ -9,6 +9,22 @@ as it works.
 
 ### Changed
 
+- ruff now checks for the mistakes coding agents make most often (decisions/0003-lint-rules.md):
+  private names stay private (`PLC2701` and `SLF001`, with `preview` on only for the rules
+  named and ruff pinned to `<0.16`; inside `pan` the new `tests/unit/test_private_names.py`
+  checks it, since `PLC2701` skips imports within one package),
+  boolean parameters are keyword-only (`FBT`), functions stay under a complexity of 10 (`C901`),
+  catch-alls need a reason (`BLE001`), and `RUF`, `DTZ`, `PTH`, `PERF`, `FURB`, `TRY300`,
+  `TRY301`, `TRY400`, `ERA`, `RET`, `PIE`, `C4` and `T20` are on. Every layer's `ruff.toml`
+  inherits them. To pass: `session_control.done_thread`, `spawn.reopen_worker` and the
+  inbox-link hook's search are split into named helpers; the gateway's forwarding rule is
+  public as `BoltSlackAdapter.should_forward_message`, and `backend.directive`'s
+  `LEADING_MENTION` and `normalize_punctuation` (used by `frontend.help`) lose their underscore; the credentials file is swapped in with
+  `Path.replace`; tests reach exit codes through `cli.main`, the completion hooks through
+  `pan hook stop` and `pan hook notification`, and the inbox event handler through
+  `WatchdogInboxWatcher.start`, instead of private helpers. Behaviour does not change, except
+  that the error logged when the sessions list cannot be sent privately now carries the
+  traceback (`logger.exception`).
 - The brief a new worker starts with is now worded from where the request came from: a
   `RequestOrigin` in `pan.core.models` (the `Conversation`, whether the request was a thread
   reply, the requester, and an `outside_context` slot that is empty for Slack) replaces

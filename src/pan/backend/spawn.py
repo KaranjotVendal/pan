@@ -342,6 +342,29 @@ def upgraded_reply_mode(record: ThreadRecord, *, reply_in_slack: bool) -> ReplyM
     return ReplyMode.SLACK if reply_in_slack else record.reply_mode
 
 
+def _launch_in_existing_worktree(
+    *,
+    record: ThreadRecord,
+    task: str,
+    app_space: str | None,
+    terminal_host: TerminalHost,
+    launcher: AgentLauncher,
+) -> Terminal:
+    # A new terminal under the record's name that continues the worktree's last Claude
+    # conversation; raises SpawnError when the worktree is gone.
+    name = record.terminal_name
+    if not record.worktree_path.is_dir():
+        raise SpawnError(f"worktree missing for stream {name}")
+    _ensure_name_free(terminal_host, name)
+    return launcher.launch(
+        name,
+        record.worktree_path,
+        task,
+        worker_labels(record.conversation, app_space),
+        continue_session=True,
+    )
+
+
 def reopen_worker(
     *,
     record: ThreadRecord,
@@ -370,15 +393,12 @@ def reopen_worker(
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
     reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
     try:
-        if not record.worktree_path.is_dir():
-            raise SpawnError(f"worktree missing for stream {name}")
-        _ensure_name_free(terminal_host, name)
-        terminal = launcher.launch(
-            name,
-            record.worktree_path,
-            task,
-            worker_labels(record.conversation, app_space),
-            continue_session=True,
+        terminal = _launch_in_existing_worktree(
+            record=record,
+            task=task,
+            app_space=app_space,
+            terminal_host=terminal_host,
+            launcher=launcher,
         )
     except (SpawnError, TerminalHostError) as error:
         name_in_use = isinstance(error, TerminalNameTakenError)

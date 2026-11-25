@@ -120,7 +120,7 @@ class BoltSlackAdapter:
         # the link, never the reply it would go in.
         try:
             response = self._client.chat_getPermalink(channel=channel, message_ts=ts)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - best effort: a lost link must not lose the reply
             logger.warning(
                 f"permalink unavailable channel={channel} ts={ts}: {type(e).__name__}: {e}"
             )
@@ -198,7 +198,7 @@ class BoltSlackAdapter:
         with self._mentioned_threads_lock:
             return (channel, thread_ts) in self._mentioned_threads
 
-    def _should_forward_message(self, event: dict[str, Any], bot_user_id: str | None) -> bool:
+    def should_forward_message(self, event: dict[str, Any], bot_user_id: str | None) -> bool:
         # The gateway stays dumb but must not double-append, and must not pick up
         # unrelated chatter: a message event is forwarded only when it is an allowed
         # person's thread reply that does NOT mention the bot, in a thread pan is working
@@ -264,7 +264,7 @@ class BoltSlackAdapter:
 
         @app.event("message")
         def _on_message(event: dict[str, Any], body: dict[str, Any]) -> None:
-            if self._should_forward_message(event, bot_user_id):
+            if self.should_forward_message(event, bot_user_id):
                 self.handle_event(event, body.get("event_id", ""))
 
         handler = SocketModeHandler(app, self._app_token.get_secret_value())

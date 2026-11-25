@@ -173,7 +173,7 @@ def test_bootout_failure_is_ignored_only_when_the_job_is_gone(
     manager = _manager(tmp_path)
 
     if expect_error:
-        with pytest.raises(ServiceError, match="bootout gui/501/com.pan.gateway"):
+        with pytest.raises(ServiceError, match=r"bootout gui/501/com\.pan\.gateway"):
             manager.bootout("com.pan.gateway")
     else:
         manager.bootout("com.pan.gateway")

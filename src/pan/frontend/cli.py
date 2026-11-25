@@ -10,7 +10,9 @@ import typer
 from pydantic import SecretStr
 
 # Typer 0.27 vendors click; its exception base lives here (no standalone click dep).
-from typer._click.exceptions import ClickException
+from typer._click.exceptions import (  # noqa: PLC2701 - Typer exports no public name for ClickException
+    ClickException,
+)
 
 from pan.backend.confirmations import (
     cancel_confirmation,
@@ -236,7 +238,7 @@ def config_show() -> None:
 
 
 @inbox_app.command("drain")
-def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:
+def inbox_drain(as_json: bool = typer.Option(False, "--json")) -> None:  # noqa: FBT001 - Typer, not a caller, passes CLI flags
     """Atomically drain and clear the inbox; emit each item with its cleaned text, its thread's
     tie and pan's open question in the thread (JSON for the orchestrator). A reply from the
     requester after the question marks it answered, which pan confirm --choice needs."""
@@ -278,10 +280,10 @@ def spawn(
     request_text: str | None = typer.Option(
         None, "--request-text", help="the original message; 'reply in slack' in it sets the mode"
     ),
-    reply_in_slack: bool = typer.Option(
+    reply_in_slack: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
-    thread_reply: bool = typer.Option(
+    thread_reply: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False,
         "--thread-reply",
         help="the message was a reply inside a Slack thread; the brief says to read the thread",
@@ -325,7 +327,7 @@ def spawn(
 def reopen(
     thread: str = typer.Option(..., "--thread"),
     task: str = typer.Option(..., "--task"),
-    reply_in_slack: bool = typer.Option(
+    reply_in_slack: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False,
         "--reply-in-slack",
         help="switch the thread to posting the answer in Slack at every turn end",
@@ -489,7 +491,7 @@ def hook_inbox_link() -> None:
     try:
         raw_stdin = sys.stdin.read()
         _dispatch_inbox_link_hook(raw_stdin, load_wiring().thread_map)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - this hook must never fail the tool call
         logger.warning(f"inbox-link hook failed: {type(e).__name__}")
 
 
@@ -534,7 +536,7 @@ def _render_sessions_table(summaries: list[SessionSummary]) -> str:
 
 @app.command()
 def sessions(
-    as_json: bool = typer.Option(False, "--json"),
+    as_json: bool = typer.Option(False, "--json"),  # noqa: FBT001 - Typer, not a caller, passes CLI flags
     show: str | None = typer.Option(
         None,
         "--show",
@@ -623,7 +625,7 @@ def forget(
 def done(
     thread: str = typer.Option(..., "--thread"),
     channel: str = typer.Option(..., "--channel"),
-    discard: bool = typer.Option(
+    discard: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--discard", help="close it even if uncommitted files or unpushed commits are lost"
     ),
     item: str | None = typer.Option(
@@ -683,7 +685,7 @@ def send(
     item: str | None = typer.Option(
         None, "--item", help="the inbox item id (item.id) of the person's message; needed with --to"
     ),
-    reply_in_slack: bool = typer.Option(
+    reply_in_slack: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
 ) -> None:
@@ -751,7 +753,7 @@ def propose(
     item: str = typer.Option(
         ..., "--item", help="the inbox item id (item.id) of the person's message"
     ),
-    reply_in_slack: bool = typer.Option(
+    reply_in_slack: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
     ),
 ) -> None:
@@ -791,7 +793,7 @@ def confirm(
     choice: str | None = typer.Option(
         None, "--choice", help="what the requester picked: yes, or a number from 1 to 3"
     ),
-    cancel: bool = typer.Option(
+    cancel: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--cancel", help="drop the open question and post Not sent."
     ),
 ) -> None:
@@ -863,7 +865,7 @@ def relay(
 @app.command()
 def read(
     target: str = typer.Argument(..., help=_TARGET_HELP),
-    full: bool = typer.Option(False, "--full", help="full transcript instead of recent lines"),
+    full: bool = typer.Option(False, "--full", help="full transcript instead of recent lines"),  # noqa: FBT001 - Typer, not a caller, passes CLI flags
 ) -> None:
     """Print a live session's raw output: recent lines, or the full transcript with --full."""
     wiring = load_wiring()

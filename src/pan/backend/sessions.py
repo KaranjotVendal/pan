@@ -205,8 +205,8 @@ def send_sessions_privately(
     try:
         reporter.report(conversation, listed)
     except SlackPostError as e:
-        logger.error(
-            f"sessions list could not be sent privately conversation={conversation.key}: {e}"
+        logger.exception(
+            f"sessions list could not be sent privately conversation={conversation.key}"
         )
         raise PrivateMessageError(
             f"sessions list could not be sent privately to thread {conversation.id}"

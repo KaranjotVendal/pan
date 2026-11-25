@@ -236,9 +236,11 @@ def _warn_about_removed_keys(raw_config: dict, config_path: Path) -> None:
         removed_keys.append("paths.logs")
     users = raw_config.get("users")
     if isinstance(users, dict):
-        for user_key in REMOVED_USER_POLICY_KEYS:
-            if any(isinstance(policy, dict) and user_key in policy for policy in users.values()):
-                removed_keys.append(f"users.*.{user_key}")
+        removed_keys.extend(
+            f"users.*.{user_key}"
+            for user_key in REMOVED_USER_POLICY_KEYS
+            if any(isinstance(policy, dict) and user_key in policy for policy in users.values())
+        )
     if removed_keys:
         logger.warning(
             f"config keys {', '.join(removed_keys)} are no longer used and are ignored (gated_ops "

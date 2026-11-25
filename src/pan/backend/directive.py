@@ -6,7 +6,7 @@ import re
 # any trailing whitespace, anchored at the START of the text only. Real Slack app-mention
 # text always begins with `<@BOTID>`; it is removed so the orchestrator and the briefs see
 # only what the person typed.
-_LEADING_MENTION = re.compile(r"^<@[A-Z0-9]+>\s*")
+LEADING_MENTION = re.compile(r"^<@[A-Z0-9]+>\s*")
 
 # Phone keyboards autocorrect a typed ASCII `--` into an em-dash (U+2014) or en-dash
 # (U+2013) glued to the following word, so `@pan done --discard` arrives as `—discard`.
@@ -46,7 +46,7 @@ def wants_slack_reply(raw_text: str) -> bool:
     return _REPLY_IN_SLACK.search(raw_text) is not None
 
 
-def _normalize_punctuation(text: str) -> str:
+def normalize_punctuation(text: str) -> str:
     text = _DASH_GLUED_TO_WORD.sub("--", text)
     return text.translate(_SMART_QUOTE_MAP)
 
@@ -55,8 +55,8 @@ def clean_message(raw_text: str) -> str:
     # Phone punctuation repaired first, then a trailing client signature and a single leading
     # Slack mention removed, so the first word is the one the person typed after `@pan` and
     # the last word is theirs too.
-    text = _strip_signature(_normalize_punctuation(raw_text.strip()))
-    return _LEADING_MENTION.sub("", text, count=1).strip()
+    text = _strip_signature(normalize_punctuation(raw_text.strip()))
+    return LEADING_MENTION.sub("", text, count=1).strip()
 
 
 # Safety gates on the person's own message, as pan recorded it (pan send --to, pan done

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterable
 from typing import Any, TextIO
 
 from pydantic import BaseModel
@@ -75,26 +76,26 @@ def _find_link(value: Any, depth: int = 0) -> InboxLink | None:
     if depth > _MAX_SEARCH_DEPTH:
         return None
     if isinstance(value, str):
-        for decoded in _embedded_json_values(value):
-            if isinstance(decoded, dict | list):
-                found = _find_link(decoded, depth + 1)
-                if found is not None:
-                    return found
-        return None
+        decoded_values = [
+            decoded for decoded in _embedded_json_values(value) if isinstance(decoded, dict | list)
+        ]
+        return _first_link(decoded_values, depth + 1)
     if isinstance(value, dict):
         thread_id, url = value.get("thread_id"), value.get("url")
         if isinstance(thread_id, str) and thread_id and isinstance(url, str) and url:
             return InboxLink(thread_id=thread_id, url=url)
-        for nested in value.values():
-            found = _find_link(nested, depth + 1)
-            if found is not None:
-                return found
-        return None
+        return _first_link(value.values(), depth + 1)
     if isinstance(value, list):
-        for nested in value:
-            found = _find_link(nested, depth + 1)
-            if found is not None:
-                return found
+        return _first_link(value, depth + 1)
+    return None
+
+
+def _first_link(values: Iterable[Any], depth: int) -> InboxLink | None:
+    # The first link found in `values`, searched in order.
+    for value in values:
+        found = _find_link(value, depth)
+        if found is not None:
+            return found
     return None
 
 
