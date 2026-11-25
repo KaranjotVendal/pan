@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pan.models import (
+from pan.core.models import (
     InboxItem,
     PanConfig,
     SlackConfig,

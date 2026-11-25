@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from pan.config import (
+from pan.frontend.help import HelpRequest, parse_help_request, render_cli_help
+from pan.utils.config import (
     HELP_ECHOED_COMMAND_MAX_LENGTH,
     HELP_USER_FACING_COMMANDS,
     SLACK_DIRECTIVE_FLAGS_FOOTER,
 )
-from pan.help import HelpRequest, parse_help_request, render_cli_help
 
 _INFRA_COMMANDS = (
     "gateway",

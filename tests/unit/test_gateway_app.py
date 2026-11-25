@@ -11,16 +11,16 @@ import pytest
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 
-from pan.errors import SlackPostError
-from pan.gateway.app import BoltSlackAdapter
-from pan.models import (
+from pan.core.errors import SlackPostError
+from pan.core.models import (
     InboxItem,
     PanConfig,
     SlackCredentials,
     ThreadRecord,
     ThreadSource,
 )
-from pan.threadmap import FileThreadMap
+from pan.data.threadmap import FileThreadMap
+from pan.frontend.gateway.app import BoltSlackAdapter
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 
@@ -121,7 +121,7 @@ def _make_adapter(
 
 @pytest.fixture
 def app_logger_capture(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
-    logger = logging.getLogger("pan.gateway.app")
+    logger = logging.getLogger("pan.frontend.gateway.app")
     logger.addHandler(caplog.handler)
     try:
         yield
@@ -188,7 +188,7 @@ def test_denied_sender_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
         "text": "let me in",
     }
 
-    with caplog.at_level(logging.WARNING, logger="pan.gateway.app"):
+    with caplog.at_level(logging.WARNING, logger="pan.frontend.gateway.app"):
         adapter.handle_event(event, "Ev789")
 
     assert inbox.items == []
@@ -376,7 +376,7 @@ def test_forwarded_reply_does_not_mark_its_thread_as_mentioned(tmp_path: Path) -
 def test_mentioned_threads_keep_only_the_newest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("pan.gateway.app._MENTIONED_THREADS_LIMIT", 2)
+    monkeypatch.setattr("pan.frontend.gateway.app._MENTIONED_THREADS_LIMIT", 2)
     adapter, _inbox = _forwarding_adapter(_thread_map(tmp_path, "unknown"))
     thread_stamps = ["1700000000.000301", "1700000000.000302", "1700000000.000303"]
 
@@ -423,7 +423,7 @@ def test_ignored_untagged_reply_logs_thread_and_channel_only(
 ) -> None:
     adapter, _inbox = _forwarding_adapter(_thread_map(tmp_path, thread_state))
 
-    with caplog.at_level(logging.DEBUG, logger="pan.gateway.app"):
+    with caplog.at_level(logging.DEBUG, logger="pan.frontend.gateway.app"):
         adapter._should_forward_message(_reply(text="secret words"), "Bbot")
 
     assert expected_level in [record.levelno for record in caplog.records]

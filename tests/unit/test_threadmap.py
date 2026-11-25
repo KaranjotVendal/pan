@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from pan.errors import ThreadNotFoundError
-from pan.models import ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
-from pan.threadmap import FileThreadMap, tie_note
+from pan.core.errors import ThreadNotFoundError
+from pan.core.models import ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
+from pan.data.threadmap import FileThreadMap, tie_note
 
 
 class FakeClock:
@@ -184,10 +184,10 @@ def test_read_tolerates_unparseable_legacy_record(
     thread_map = FileThreadMap(threads_path, clock)
 
     # propagate=False on this logger, so attach caplog's handler directly.
-    threadmap_logger = logging.getLogger("pan.threadmap")
+    threadmap_logger = logging.getLogger("pan.data.threadmap")
     threadmap_logger.addHandler(caplog.handler)
     try:
-        with caplog.at_level(logging.WARNING, logger="pan.threadmap"):
+        with caplog.at_level(logging.WARNING, logger="pan.data.threadmap"):
             loaded_valid = thread_map.get(valid_ts)
             loaded_legacy = thread_map.get(legacy_ts)
             found = thread_map.get_by_worktree(Path("/wt/pan-valid"))

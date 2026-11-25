@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import pan
-from pan.orchestrating_skill import (
+from pan.backend.orchestrating_skill import (
     ORCHESTRATING_SKILL_PATH,
     SkillVersion,
     orchestrating_skill,

@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.errors import TargetAmbiguousError, TargetBlockedError, TargetNotFoundError
-from pan.interface import (
+from pan.backend.interface import (
     FULL_HISTORY_NOTICE,
     INCOMPLETE_READ_NOTICE,
     read_session,
     relay_to_session,
     resolve_target,
 )
-from pan.models import Terminal, TerminalRead, ThreadRecord
+from pan.core.errors import TargetAmbiguousError, TargetBlockedError, TargetNotFoundError
+from pan.core.models import Terminal, TerminalRead, ThreadRecord
 
 _NOW = datetime(2026, 7, 19, 10, 0, 0, tzinfo=UTC)
 

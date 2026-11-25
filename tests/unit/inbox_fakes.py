@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pan.models import InboxThread
+from pan.core.models import InboxThread
 
 
 class FakeInboxDirectory:

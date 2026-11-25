@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.models import AgentStatus, ReplyMode, TerminalState, ThreadRecord, WorkerStatus
-from pan.sessions import collect_sessions, session_drift, worker_status_for
-from pan.spawn import worker_brief
+from pan.backend.sessions import collect_sessions, session_drift, worker_status_for
+from pan.backend.spawn import worker_brief
+from pan.core.models import AgentStatus, ReplyMode, TerminalState, ThreadRecord, WorkerStatus
 
 _FIXED_NOW = datetime(2026, 7, 19, 10, 0, 0, tzinfo=UTC)
 

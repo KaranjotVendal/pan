@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from pan.logging import LOG_DIR_ENV
+from pan.utils.logging import LOG_DIR_ENV
 
 _test_log_dir: str | None = None
 

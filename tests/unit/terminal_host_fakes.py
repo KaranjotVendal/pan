@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pan.errors import TerminalGoneError, TerminalHostError
-from pan.models import AgentStatus, Terminal, TerminalRead, TerminalState
+from pan.core.errors import TerminalGoneError, TerminalHostError
+from pan.core.models import AgentStatus, Terminal, TerminalRead, TerminalState
 
 
 @dataclass

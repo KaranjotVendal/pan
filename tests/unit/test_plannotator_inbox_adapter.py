@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from pan.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter, find_thread_in_listing
-from pan.models import InboxThread
+from pan.core.models import InboxThread
+from pan.data.adapters.plannotator_inbox import ShellPlannotatorInboxAdapter, find_thread_in_listing
 
 # The envelope and row fields of a live `plannotator inbox call read_thread` listing (ids,
 # names and paths replaced): the project, its threads newest first, and a total.

@@ -10,17 +10,7 @@ from git_worktree_fakes import FakeGitWorktree
 from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.adapters.hc import HcError
-from pan.errors import (
-    NotPanSessionError,
-    PanError,
-    SpawnError,
-    TerminalHostError,
-    TerminalNameTakenError,
-)
-from pan.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
-from pan.slack_format import to_slack_mrkdwn
-from pan.spawn import (
+from pan.backend.spawn import (
     RELAYED_FOLLOW_UP_SENTENCE,
     ClaudeLauncher,
     desk_session_ended_reply,
@@ -31,6 +21,16 @@ from pan.spawn import (
     worker_brief,
     worker_terminal_name,
 )
+from pan.core.errors import (
+    NotPanSessionError,
+    PanError,
+    SpawnError,
+    TerminalHostError,
+    TerminalNameTakenError,
+)
+from pan.core.models import ReplyMode, TerminalState, ThreadRecord, ThreadSource, WorkerStatus
+from pan.data.adapters.hc import HcError
+from pan.frontend.slack_format import to_slack_mrkdwn
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1718000000.000200"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pan.adapters.clock import SystemClock, UuidGen
+from pan.utils.clock import SystemClock, UuidGen
 
 
 def test_system_clock_returns_timezone_aware_datetime() -> None:

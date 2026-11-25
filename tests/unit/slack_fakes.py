@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pan.errors import SlackPostError
+from pan.core.errors import SlackPostError
 
 
 class StatusPost:

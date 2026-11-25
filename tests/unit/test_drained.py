@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from pan.drained import FileDrainedLog, drained_log_path
-from pan.models import InboxItem
+from pan.core.models import InboxItem
+from pan.data.drained import FileDrainedLog, drained_log_path
 
 _NOW = datetime(2026, 11, 24, 10, 0, 0, tzinfo=UTC)
 
@@ -47,7 +47,7 @@ def test_drained_log_finds_a_recorded_item_and_drops_old_ones(tmp_path: Path) ->
 def test_drained_log_keeps_only_the_newest_items(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("pan.drained.DRAINED_LOG_MAX_ITEMS", 2)
+    monkeypatch.setattr("pan.data.drained.DRAINED_LOG_MAX_ITEMS", 2)
     log = _log(tmp_path)
     log.record([_item("Ev1"), _item("Ev2"), _item("Ev3")], _NOW)
 

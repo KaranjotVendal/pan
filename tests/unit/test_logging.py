@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pan.logging import LOG_DIR_ENV, initialise_logger
+from pan.utils.logging import LOG_DIR_ENV, initialise_logger
 
 
 def _unique_name() -> str:

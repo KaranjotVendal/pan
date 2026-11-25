@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import make_terminal
 
-from pan.models import (
+from pan.core.models import (
     AgentStatus,
     SessionSummary,
     StatusState,
@@ -14,7 +14,7 @@ from pan.models import (
     ThreadRecord,
     WorkerStatus,
 )
-from pan.slack_render import (
+from pan.frontend.slack_render import (
     SESSIONS_EMPTY_TEXT,
     SESSIONS_HEADER,
     SESSIONS_NONE_SHOWN_TEXT,

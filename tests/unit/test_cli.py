@@ -16,12 +16,10 @@ from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 from typer.testing import CliRunner
 
-import pan.cli as cli
-from pan.adapters.hc import HcError, ShellHcAdapter
-from pan.confirmations import FilePendingConfirmations, confirmations_path
-from pan.directive import asks_to_discard
-from pan.drained import FileDrainedLog, drained_log_path
-from pan.errors import (
+import pan.frontend.cli as cli
+from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
+from pan.backend.directive import asks_to_discard
+from pan.core.errors import (
     ConfigMissingError,
     CredentialsError,
     DiscardNotRequestedError,
@@ -48,10 +46,7 @@ from pan.errors import (
     UnsavedWorkError,
     XSourceRefusedError,
 )
-from pan.hooks.notification import notification_hook
-from pan.hooks.stop import stop_hook
-from pan.inbox import FileInboxStore
-from pan.models import (
+from pan.core.models import (
     AgentStatus,
     BranchStatus,
     ConfirmationCandidate,
@@ -67,7 +62,12 @@ from pan.models import (
     WorkerStatus,
     WorktreeStatus,
 )
-from pan.threadmap import FileThreadMap
+from pan.data.adapters.hc import HcError, ShellHcAdapter
+from pan.data.drained import FileDrainedLog, drained_log_path
+from pan.data.inbox import FileInboxStore
+from pan.data.threadmap import FileThreadMap
+from pan.frontend.hooks.notification import notification_hook
+from pan.frontend.hooks.stop import stop_hook
 
 runner = CliRunner()
 

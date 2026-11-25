@@ -5,8 +5,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from pan.errors import SlackPostError
-from pan.gateway.slack_post import slack_post
+from pan.core.errors import SlackPostError
+from pan.frontend.gateway.slack_post import slack_post
 
 
 class FakeSlackAdapter:
@@ -28,7 +28,7 @@ class FakeSlackAdapter:
 
 @pytest.fixture
 def slack_post_logger_capture(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
-    logger = logging.getLogger("pan.gateway.slack_post")
+    logger = logging.getLogger("pan.frontend.gateway.slack_post")
     logger.addHandler(caplog.handler)
     try:
         yield
@@ -66,7 +66,7 @@ def test_log_is_value_free(caplog: pytest.LogCaptureFixture) -> None:
     adapter = FakeSlackAdapter()
     secret_body = "super secret result body"
 
-    with caplog.at_level(logging.INFO, logger="pan.gateway.slack_post"):
+    with caplog.at_level(logging.INFO, logger="pan.frontend.gateway.slack_post"):
         slack_post(adapter, "C1", "1718000000.000200", secret_body)
 
     assert caplog.records, "expected a log record"

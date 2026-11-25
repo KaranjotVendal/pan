@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from pan.errors import InboxError
-from pan.inbox import FileInboxStore
-from pan.models import InboxItem
+from pan.core.errors import InboxError
+from pan.core.models import InboxItem
+from pan.data.inbox import FileInboxStore
 
 _BASE_TIME = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 
