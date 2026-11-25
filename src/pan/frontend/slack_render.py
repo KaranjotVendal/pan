@@ -397,8 +397,9 @@ def closed_reply(closed: SessionClosed) -> str:
     return f"Closed {name}; its worktree was already gone."
 
 
-def line_text(event: LineEvent) -> str:
-    # The one line pan posts in the thread for `event`.
+def line_text(event: LineEvent) -> str:  # noqa: C901 - one flat case per LineEvent type
+    # The one line pan posts in the thread for `event`. One case per event type keeps the
+    # match exhaustive (assert_never); splitting it would only move cases elsewhere.
     match event:
         case QuestionAsked():
             return question_text(event.candidate_labels)

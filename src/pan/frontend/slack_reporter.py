@@ -95,12 +95,13 @@ class SlackReporter:
                 self._slack.update_message(
                     conversation.slack_channel(), status.status_message_id, blocks, fallback_text
                 )
-                return None
             except SlackPostError as e:
                 logger.warning(
                     f"status message could not be edited, posting a new one "
                     f"conversation={conversation.key}: {e}"
                 )
+            else:
+                return None
         return self._slack.post_blocks(
             conversation.slack_channel(), conversation.id, blocks, fallback_text
         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -87,7 +87,7 @@ def test_conversation_slack_channel_needs_a_place() -> None:
 
 
 def test_thread_record_defaults_to_spawning() -> None:
-    now = datetime(2026, 7, 16, 10, 0, 0)
+    now = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
     record = ThreadRecord(
         conversation=Conversation.slack("1718000000.000100", "C0001"),
         terminal_name="pan-task-3",

@@ -323,7 +323,7 @@ def test_should_forward_message_by_thread_state(
 ) -> None:
     adapter, _inbox = _forwarding_adapter(_thread_map(tmp_path, thread_state))
 
-    assert adapter._should_forward_message(event, "Bbot") is expected
+    assert adapter.should_forward_message(event, "Bbot") is expected
 
 
 @pytest.mark.parametrize(
@@ -348,13 +348,13 @@ def test_should_forward_message_by_thread_state(
 def test_cheap_checks_drop_before_reading_the_thread_map(event: dict[str, Any]) -> None:
     adapter, _inbox = _forwarding_adapter(ExplodingThreadMap())
 
-    assert adapter._should_forward_message(event, "Bbot") is False
+    assert adapter.should_forward_message(event, "Bbot") is False
 
 
 def test_adapter_without_a_thread_map_forwards_no_untagged_reply() -> None:
     adapter, _client, _inbox, _timeline = _make_adapter(_ALLOWED_USERS)
 
-    assert adapter._should_forward_message(_reply(), "Bbot") is False
+    assert adapter.should_forward_message(_reply(), "Bbot") is False
 
 
 def test_reply_right_after_a_mention_is_forwarded_before_the_tie(tmp_path: Path) -> None:
@@ -362,8 +362,8 @@ def test_reply_right_after_a_mention_is_forwarded_before_the_tie(tmp_path: Path)
 
     adapter.handle_event(_mention(), "Ev1")
 
-    assert adapter._should_forward_message(_reply(), "Bbot") is True
-    assert adapter._should_forward_message(_reply(channel=_OTHER_CHANNEL), "Bbot") is False
+    assert adapter.should_forward_message(_reply(), "Bbot") is True
+    assert adapter.should_forward_message(_reply(channel=_OTHER_CHANNEL), "Bbot") is False
 
 
 def test_forwarded_reply_does_not_mark_its_thread_as_mentioned(tmp_path: Path) -> None:
@@ -371,7 +371,7 @@ def test_forwarded_reply_does_not_mark_its_thread_as_mentioned(tmp_path: Path) -
 
     adapter.handle_event(_reply(), "Ev1")
 
-    assert adapter._should_forward_message(_reply(), "Bbot") is False
+    assert adapter.should_forward_message(_reply(), "Bbot") is False
 
 
 def test_mentioned_threads_keep_only_the_newest(
@@ -385,7 +385,7 @@ def test_mentioned_threads_keep_only_the_newest(
         adapter.handle_event(_mention(thread_ts), f"Ev{idx}")
 
     forwarded = [
-        adapter._should_forward_message(_reply(thread_ts=thread_ts), "Bbot")
+        adapter.should_forward_message(_reply(thread_ts=thread_ts), "Bbot")
         for thread_ts in thread_stamps
     ]
     assert forwarded == [False, True, True]
@@ -425,7 +425,7 @@ def test_ignored_untagged_reply_logs_thread_and_channel_only(
     adapter, _inbox = _forwarding_adapter(_thread_map(tmp_path, thread_state))
 
     with caplog.at_level(logging.DEBUG, logger="pan.frontend.gateway.app"):
-        adapter._should_forward_message(_reply(text="secret words"), "Bbot")
+        adapter.should_forward_message(_reply(text="secret words"), "Bbot")
 
     assert expected_level in [record.levelno for record in caplog.records]
     assert f"thread={_TEST_THREAD_TS}" in caplog.text

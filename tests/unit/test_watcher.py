@@ -19,7 +19,7 @@ from watchdog.events import (
 from pan.backend.orchestrating_skill import SkillVersion, orchestrating_skill, wake_instruction
 from pan.core.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
 from pan.data.adapters.hc import HcError
-from pan.frontend.watcher import WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
+from pan.frontend.watcher import WakeDebouncer, WatchdogInboxWatcher
 from pan.utils.config import WATCHER_DEBOUNCE_SECONDS
 
 
@@ -169,7 +169,6 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     # (non-recursive) and the observer is started.
     assert inbox_dir.is_dir()
     (handler, path), kwargs = observer.schedule.call_args
-    assert isinstance(handler, _InboxEventHandler)
     assert path == str(inbox_dir)
     assert kwargs == {"recursive": False}
     observer.start.assert_called_once_with()
@@ -210,10 +209,18 @@ _INBOX = "/inbox"
         (DirModifiedEvent(_INBOX), False),
     ],
 )
-def test_inbox_event_handler_forwards_only_new_entries(event: FileSystemEvent, wakes: bool) -> None:
-    received: list[bool] = []
-    handler = _InboxEventHandler(lambda: received.append(True))
+def test_inbox_event_handler_forwards_only_new_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, event: FileSystemEvent, wakes: bool
+) -> None:
+    # The handler the watcher schedules on the inbox: a forwarded event starts the debounce.
+    observer = Mock()
+    monkeypatch.setattr("pan.frontend.watcher.Observer", lambda: observer)
+    timer_factory = FakeTimerFactory()
+    WatchdogInboxWatcher(
+        FakeTerminalHost(), "pan-orchestrator", tmp_path / "inbox", timer_factory=timer_factory
+    ).start()
+    (handler, _path), _kwargs = observer.schedule.call_args
 
     handler.on_any_event(event)
 
-    assert received == ([True] if wakes else [])
+    assert len(timer_factory.timers) == (1 if wakes else 0)

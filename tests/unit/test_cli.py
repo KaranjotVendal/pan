@@ -71,10 +71,7 @@ from pan.data.adapters.hc import HcError, ShellHcAdapter
 from pan.data.drained import FileDrainedLog, drained_log_path
 from pan.data.inbox import FileInboxStore
 from pan.data.threadmap import FileThreadMap
-from pan.frontend.hooks.notification import notification_hook
-from pan.frontend.hooks.stop import stop_hook
 from pan.frontend.slack_render import NOT_SENT_REPLY, UNUSABLE_ITEM_REPLY
-from pan.frontend.slack_reporter import SlackReporter
 from pan.utils.clock import SystemClock
 
 runner = CliRunner()
@@ -706,7 +703,6 @@ def test_relay_sends_only_to_a_session_the_person_named(
         assert result.exit_code != 0
     else:
         assert isinstance(result.exception, expected_error)
-        assert cli._exit_code_for(result.exception) == 28
     assert terminal_host.sent == []
     assert [text for _channel, _thread, text in slack.posts] == expected_posts
 
@@ -929,95 +925,75 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (PanError("x"), 1),
     ],
 )
-def test_exit_code_for(error: PanError, expected_code: int) -> None:
-    assert cli._exit_code_for(error) == expected_code
+def test_main_exits_with_the_documented_code_for_each_error(
+    monkeypatch: pytest.MonkeyPatch, error: PanError, expected_code: int
+) -> None:
+    def raise_error(**_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(cli, "app", raise_error)
+
+    assert _main_exit_code(monkeypatch, []) == expected_code
 
 
-def test_run_maps_pan_error_to_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(**_kwargs: Any) -> None:
-        raise SpawnError("kaboom")
-
-    monkeypatch.setattr(cli, "app", boom)
-
-    assert cli._run() == 15
-
-
-class _HookThreadMap:
-    def __init__(self, record: ThreadRecord) -> None:
-        self._record = record
-        self.status_updates: list[tuple[str, WorkerStatus]] = []
-
-    def get(
-        self, conversation: Conversation, *, session_name: str | None = None
-    ) -> ThreadRecord | None:
-        if conversation.key != self._record.conversation.key:
-            return None
-        if session_name is not None and session_name != self._record.terminal_name:
-            return None
-        return self._record
-
-    def get_by_worktree(self, worktree_path: Path) -> ThreadRecord | None:
-        return self._record if worktree_path == self._record.worktree_path else None
-
-    def put(self, record: ThreadRecord) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def update_status(
-        self, conversation: Conversation, status: WorkerStatus, *, session_name: str | None = None
-    ) -> None:
-        self.status_updates.append((conversation.id, status))
-
-    def record_status_message(
-        self, conversation: Conversation, message_ts: str, *, session_name: str | None = None
-    ) -> None:
-        self._record = self._record.model_copy(update={"status_message_ts": message_ts})
+def _main_exit_code(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> int | str | None:
+    # Runs pan the way the installed binary does (`pan <arguments>`) and returns its exit code.
+    monkeypatch.setattr(sys, "argv", ["pan", *arguments])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    return exit_info.value.code
 
 
-class _HookSlack(RecordingSlack):
-    pass
-
-
-def _hook_payload(cwd: str, event: str) -> str:
-    return json.dumps({"hook_event_name": event, "cwd": cwd, "transcript_path": None})
-
-
-def test_hook_stop_resolves_by_cwd_updates_the_status_and_marks_idle() -> None:
-    record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
+def _tie_hook_record(config: PanConfig, worktree: Path) -> FileThreadMap:
+    thread_map = FileThreadMap(config.paths.threads, SystemClock())
+    record = _record("t-1", worktree_path=worktree).model_copy(
         update={"reply_mode": ReplyMode.SLACK}
     )
-    thread_map, slack = _HookThreadMap(record), _HookSlack()
-
-    cli._dispatch_completion_hook(
-        stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, SlackReporter(slack)
-    )
-
-    assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
-        ("C1", "t-1", "Finished")
-    ]
-    assert thread_map.status_updates == [("t-1", WorkerStatus.IDLE)]
+    thread_map.tie(record)
+    return thread_map
 
 
-def test_hook_notification_resolves_by_cwd_updates_the_status_and_marks_blocked() -> None:
-    record = _record("t-1", worktree_path=Path("/wt/pan-a")).model_copy(
-        update={"reply_mode": ReplyMode.SLACK}
-    )
-    thread_map, slack = _HookThreadMap(record), _HookSlack()
-    payload = json.dumps(
-        {
-            "hook_event_name": "Notification",
-            "notification_type": "permission_prompt",
-            "cwd": "/wt/pan-a",
-            "message": "need input",
-        }
-    )
+@pytest.mark.parametrize(
+    "command, payload_fields, expected_text, expected_status",
+    [
+        ("stop", {"hook_event_name": "Stop", "transcript_path": None}, "Finished", "idle"),
+        (
+            "notification",
+            {
+                "hook_event_name": "Notification",
+                "notification_type": "permission_prompt",
+                "message": "need input",
+            },
+            "Waiting for you",
+            "blocked",
+        ),
+    ],
+    ids=["stop-marks-idle", "notification-marks-blocked"],
+)
+def test_completion_hook_resolves_by_cwd_and_updates_the_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+    payload_fields: dict[str, Any],
+    expected_text: str,
+    expected_status: str,
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    slack = _use_slack(monkeypatch)
+    worktree = tmp_path / "wt" / "pan-a"
+    thread_map = _tie_hook_record(config, worktree)
+    payload = json.dumps({**payload_fields, "cwd": str(worktree)})
 
-    cli._dispatch_completion_hook(notification_hook, payload, thread_map, SlackReporter(slack))
+    result = runner.invoke(cli.app, ["hook", command], input=payload)
 
+    assert result.exit_code == 0, result.output
     assert slack.posts == []
     assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
-        ("C1", "t-1", "Waiting for you")
+        ("C1", "t-1", expected_text)
     ]
-    assert thread_map.status_updates == [("t-1", WorkerStatus.BLOCKED)]
+    recorded = thread_map.get(Conversation.slack("t-1"))
+    assert recorded is not None
+    assert recorded.status is WorkerStatus(expected_status)
 
 
 @pytest.mark.parametrize(
@@ -1025,15 +1001,21 @@ def test_hook_notification_resolves_by_cwd_updates_the_status_and_marks_blocked(
     ['{"hook_event_name": "Stop", "cwd": "/wt/other", "transcript_path": null}', "not json"],
     ids=["cwd-matches-no-record", "unparseable-stdin"],
 )
-def test_hook_exits_cleanly_without_posting(raw_stdin: str) -> None:
-    record = _record("t-1", worktree_path=Path("/wt/pan-a"))
-    thread_map, slack = _HookThreadMap(record), _HookSlack()
+def test_hook_exits_cleanly_without_posting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw_stdin: str
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    slack = _use_slack(monkeypatch)
+    thread_map = _tie_hook_record(config, tmp_path / "wt" / "pan-a")
+    tied = thread_map.get(Conversation.slack("t-1"))
 
-    cli._dispatch_completion_hook(stop_hook, raw_stdin, thread_map, SlackReporter(slack))
+    result = runner.invoke(cli.app, ["hook", "stop"], input=raw_stdin)
 
+    assert result.exit_code == 0
+    assert result.exception is None
     assert slack.posts == []
     assert slack.status_posts == []
-    assert thread_map.status_updates == []
+    assert thread_map.get(Conversation.slack("t-1")) == tied
 
 
 def test_hook_subcommands_are_registered() -> None:
@@ -1344,7 +1326,6 @@ def test_sessions_posts_nothing_publicly_when_the_private_list_fails(
     result = runner.invoke(cli.app, [*_SESSIONS_FOR_REQUESTER, "--show", "t12"])
 
     assert isinstance(result.exception, PrivateMessageError)
-    assert cli._exit_code_for(result.exception) == 32
     assert slack.posts == []
     assert slack.ephemerals == []
 
@@ -1551,13 +1532,12 @@ def test_done_command_refuses_discard_the_person_did_not_send(
     slack = _use_slack(monkeypatch)
     monkeypatch.setattr(cli, "done_thread", lambda **kwargs: pytest.fail("must not close"))
 
-    result = runner.invoke(
-        cli.app,
+    exit_code = _main_exit_code(
+        monkeypatch,
         ["done", "--thread", _GATE_THREAD, "--channel", "C000TEST", "--discard", *item_args],
     )
 
-    assert isinstance(result.exception, DiscardNotRequestedError)
-    assert cli._exit_code_for(result.exception) == 33
+    assert exit_code == 33  # DiscardNotRequestedError
     assert terminal_host.removed == []
     # An unusable item gets a one-line reply; a message that is not `done --discard` gets none.
     unusable = asks_to_discard(drained_text)
@@ -1588,10 +1568,9 @@ def test_done_command_keeps_a_worktree_with_unsaved_work(
     monkeypatch.setattr(wiring, "ShellGitWorktreeAdapter", lambda: git)
     slack = _use_slack(monkeypatch)
 
-    result = runner.invoke(cli.app, ["done", "--thread", "t-1", "--channel", "C0TEST"])
+    exit_code = _main_exit_code(monkeypatch, ["done", "--thread", "t-1", "--channel", "C0TEST"])
 
-    assert isinstance(result.exception, UnsavedWorkError)
-    assert cli._exit_code_for(result.exception) == 29
+    assert exit_code == 29  # UnsavedWorkError
     assert terminal_host.removed == []
     assert slack.posts == [
         (
@@ -1686,7 +1665,6 @@ def test_send_command_sends_only_to_a_session_the_person_named(
     assert sent == ([selector] if expected_sent else [])
     if not expected_sent:
         assert isinstance(result.exception, NoExactMatchError)
-        assert cli._exit_code_for(result.exception) == 28
     assert slack.posts == []
 
 
@@ -1714,10 +1692,7 @@ def test_send_command_to_a_session_refuses_without_the_persons_recorded_message(
     _use_terminal_host(monkeypatch, FakeTerminalHost())
     monkeypatch.setattr(cli, "send_to_session", lambda **kwargs: pytest.fail("must not send"))
 
-    result = runner.invoke(cli.app, _send_to("pan-7", *extra_args))
-
-    assert isinstance(result.exception, NoExactMatchError)
-    assert cli._exit_code_for(result.exception) == 28
+    assert _main_exit_code(monkeypatch, _send_to("pan-7", *extra_args)) == 28  # NoExactMatchError
 
 
 @pytest.mark.parametrize(
@@ -1773,7 +1748,6 @@ def test_x_threads_never_reach_an_existing_session(
     result = runner.invoke(cli.app, arguments)
 
     assert isinstance(result.exception, XSourceRefusedError)
-    assert cli._exit_code_for(result.exception) == 35
     assert str(result.exception) == (
         "messages from X cannot use to <name>: yet; they can only start new sessions"
     )
@@ -2111,7 +2085,6 @@ def test_confirm_command_sends_only_on_the_requesters_own_answer(
         assert [address for address, _text in terminal_host.sent] == ["t3"]
     else:
         assert isinstance(result.exception, UnansweredQuestionError)
-        assert cli._exit_code_for(result.exception) == 34
         assert terminal_host.sent == []
         assert slack.posts == []
 
@@ -2180,6 +2153,4 @@ def test_service_install_failure_maps_to_service_exit_code(
     monkeypatch: pytest.MonkeyPatch, service_manager: FakeServiceManager
 ) -> None:
     service_manager.fail_bootstrap_for = "com.pan.gateway"
-    monkeypatch.setattr(sys, "argv", ["pan", "service", "install"])
-
-    assert cli._run() == 27
+    assert _main_exit_code(monkeypatch, ["service", "install"]) == 27

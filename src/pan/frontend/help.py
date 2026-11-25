@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typer._click.core import Command
 from typer.core import TyperCommand, TyperGroup
 
-from pan.backend.directive import _LEADING_MENTION, _normalize_punctuation
+from pan.backend.directive import LEADING_MENTION, normalize_punctuation
 from pan.utils.config import (
     HELP_ECHOED_COMMAND_MAX_LENGTH,
     HELP_FLAG_TOKENS,
@@ -45,8 +45,8 @@ class HelpRequest(BaseModel, frozen=True):
 def parse_help_request(raw_text: str) -> HelpRequest | None:
     # Pure and deterministic (INV-3): a fixed token set plus the two normalization rules
     # reused from directive.py, never model judgment.
-    normalized_text = _normalize_punctuation(raw_text.strip())
-    normalized_text = _LEADING_MENTION.sub("", normalized_text, count=1)
+    normalized_text = normalize_punctuation(raw_text.strip())
+    normalized_text = LEADING_MENTION.sub("", normalized_text, count=1)
 
     tokens = [token.lower() for token in normalized_text.split()]
     if not tokens or len(tokens) > _MAX_HELP_TOKENS:

@@ -31,7 +31,7 @@ def save_credentials(credentials: SlackCredentials, path: Path | None = None) ->
     # Write the secret to a fresh temp file that is 0600 from the instant it is
     # created (O_EXCL refuses to open an existing path, so a truncated pre-existing
     # loose-perm file — or a planted symlink — can never receive the token bytes),
-    # then atomically swap it into place with os.replace, which carries the temp
+    # then atomically swap it into place with Path.replace, which carries the temp
     # file's 0600 mode. This closes the write-window race a create-then-chmod on the
     # destination would leave open when the destination already existed at looser perms.
     temp_path = credentials_path.with_name(credentials_path.name + ".tmp")
@@ -40,7 +40,7 @@ def save_credentials(credentials: SlackCredentials, path: Path | None = None) ->
     try:
         with os.fdopen(descriptor, "w") as credentials_file:
             json.dump(payload, credentials_file)
-        os.replace(temp_path, credentials_path)
+        temp_path.replace(credentials_path)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise

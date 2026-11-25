@@ -129,7 +129,7 @@ def test_install_with_a_missing_template_changes_nothing(
 def test_install_surfaces_a_launchctl_failure(home: Path, manager: FakeServiceManager) -> None:
     manager.fail_bootstrap_for = "com.pan.watcher"
 
-    with pytest.raises(ServiceError, match="com.pan.watcher"):
+    with pytest.raises(ServiceError, match=r"com\.pan\.watcher"):
         install_services(manager, home=home, pan_binary=_PAN_BINARY)
 
     assert "com.pan.up" not in manager.plists
