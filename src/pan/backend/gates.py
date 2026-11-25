@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import NoReturn
 
 from pan.backend.directive import asks_to_discard, names_selector
@@ -12,24 +11,16 @@ from pan.core.errors import (
     SlackPostError,
     XSourceRefusedError,
 )
+from pan.core.events import ThreadNotice, ThreadNoticeReason
 from pan.core.models import Conversation, InboxItem, ThreadRecord, ThreadSource
-from pan.core.seams import DrainedLog, ThreadMap
+from pan.core.seams import DrainedLog, OpenReporter, ThreadMap
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
 
-# Posted when an action is refused because the message it rests on (--item) cannot be used:
-# unknown, not the sender's newest in the thread, or not from the requester. No session names
-# or paths, so it is safe in any thread.
-UNUSABLE_ITEM_REPLY = "I couldn't act on that message; please send the request again."
-
 # Text from X is someone else's text, so it must never steer a session that already exists:
 # until the X safety gate (MOB-87) is in place, X may only start new sessions.
 X_TO_ROUTE_NOTICE = "messages from X cannot use to <name>: yet; they can only start new sessions"
-
-# Posts one line in the thread the action was asked in. It may raise CredentialsError or
-# SlackPostError; a gate only logs those, since its refusal stands either way.
-ThreadReply = Callable[[str], None]
 
 
 def newest_drained_item(
@@ -81,14 +72,14 @@ def require_named_target(
     target: str,
     requester: str | None,
     conversation: Conversation,
-    reply: ThreadReply,
+    open_reporter: OpenReporter,
 ) -> InboxItem:
     """The item a send --to or relay (`action`) rests on, when it is usable (from `requester`, if given)
     and names `target` as a whole word or phrase; otherwise NoExactMatchError (exit 28). An
-    unusable item also gets UNUSABLE_ITEM_REPLY in the thread."""
+    unusable item also gets a MESSAGE_UNUSABLE notice in the thread."""
     if item is None or (requester is not None and item.author != requester):
         _refuse_unusable_item(
-            reply, conversation, NoExactMatchError(f"item {item_id} cannot be used")
+            open_reporter, conversation, NoExactMatchError(f"item {item_id} cannot be used")
         )
     if not names_selector(item.raw_text, target):
         logger.info(
@@ -99,13 +90,17 @@ def require_named_target(
 
 
 def require_requesters_message(
-    item: InboxItem | None, *, requester: str, conversation: Conversation, reply: ThreadReply
+    item: InboxItem | None,
+    *,
+    requester: str,
+    conversation: Conversation,
+    open_reporter: OpenReporter,
 ) -> InboxItem:
     """The requester's own item a propose rests on; otherwise NoExactMatchError (exit 28) after
-    UNUSABLE_ITEM_REPLY in the thread."""
+    a MESSAGE_UNUSABLE notice in the thread."""
     if item is None or item.author != requester:
         _refuse_unusable_item(
-            reply,
+            open_reporter,
             conversation,
             NoExactMatchError(
                 f"no message from {requester} to propose for in thread {conversation.id}"
@@ -119,28 +114,32 @@ def require_discard_request(
     record: ThreadRecord | None,
     *,
     conversation: Conversation,
-    reply: ThreadReply,
+    open_reporter: OpenReporter,
 ) -> None:
     """Allow done --discard only on the thread requester's own message that is exactly
     done --discard; otherwise DiscardNotRequestedError (exit 33). An unusable item (missing, or
-    not from the thread's requester) also gets UNUSABLE_ITEM_REPLY in the thread."""
+    not from the thread's requester) also gets a MESSAGE_UNUSABLE notice in the thread."""
     refusal = DiscardNotRequestedError(
         f"--discard refused for thread {conversation.id}: its requester did not send done --discard"
     )
     requester = record.requester if record is not None else None
     if item is None or requester is None or item.author != requester:
-        _refuse_unusable_item(reply, conversation, refusal)
+        _refuse_unusable_item(open_reporter, conversation, refusal)
     if not asks_to_discard(item.raw_text):
         raise refusal
 
 
 def _refuse_unusable_item(
-    reply: ThreadReply, conversation: Conversation, error: PanError
+    open_reporter: OpenReporter, conversation: Conversation, error: PanError
 ) -> NoReturn:
-    # Says so in the thread, so a refusal is never silent, then raises `error`. A failed post
-    # is only logged: the refusal and its exit code stand either way.
+    # Says so in the thread (MESSAGE_UNUSABLE names no session or path, so it is safe in any
+    # thread), so a refusal is never silent, then raises `error`. A reporter that cannot be
+    # built (CredentialsError) or a failed post is only logged: the refusal and its exit code
+    # stand either way.
     try:
-        reply(UNUSABLE_ITEM_REPLY)
+        open_reporter().report(
+            conversation, ThreadNotice(reason=ThreadNoticeReason.MESSAGE_UNUSABLE)
+        )
     except (CredentialsError, SlackPostError) as e:
         logger.warning(
             f"could not post the refusal conversation={conversation.key}: {type(e).__name__}"

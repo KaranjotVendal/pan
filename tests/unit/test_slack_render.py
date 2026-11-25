@@ -4,22 +4,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from terminal_host_fakes import make_terminal
 
+from pan.core.events import PrivateDetails
 from pan.core.models import (
     AgentStatus,
-    Conversation,
     SessionSummary,
     StatusState,
-    TerminalState,
-    ThreadRecord,
     WorkerStatus,
 )
 from pan.frontend.slack_render import (
     SESSIONS_EMPTY_TEXT,
     SESSIONS_HEADER,
     SESSIONS_NONE_SHOWN_TEXT,
-    check_state,
     elapsed_text,
     escape_mrkdwn,
     plain_mrkdwn,
@@ -30,40 +26,11 @@ from pan.frontend.slack_render import (
     sessions_to_show,
     slack_time,
     status_blocks,
-    status_label,
     status_text,
 )
 
 _NOW = datetime(2026, 7, 16, 10, 30, 0, tzinfo=UTC)
 _NOW_SLACK_TIME = "<!date^1784197800^{time}|10:30 UTC>"
-
-
-def _record(**updates: object) -> ThreadRecord:
-    record = ThreadRecord(
-        conversation=Conversation.slack("1700000000.000100", "C0TEST"),
-        terminal_name="pan-login",
-        terminal_address="t7",
-        worktree_path=Path("/tmp/wt/pan-login"),
-        created_at=_NOW,
-        updated_at=_NOW,
-        inbox_thread_name="pan-login: fix the login page",
-    )
-    return record.model_copy(update=updates)
-
-
-@pytest.mark.parametrize(
-    "task, max_length, expected",
-    [
-        ("fix the login page", 80, "fix the login page"),
-        ("  fix\n the   login\tpage ", 80, "fix the login page"),
-        ("fix the login page", 10, "fix the..."),
-        ("abcdefghij", 10, "abcdefghij"),
-        ("", 80, ""),
-    ],
-    ids=["short", "whitespace-collapsed", "cut", "exactly-max", "empty"],
-)
-def test_status_label(task: str, max_length: int, expected: str) -> None:
-    assert status_label(task, max_length) == expected
 
 
 @pytest.mark.parametrize(
@@ -100,58 +67,6 @@ def test_slack_time_renders_in_the_readers_zone_with_a_utc_fallback() -> None:
 )
 def test_escape_mrkdwn(text: str, expected: str) -> None:
     assert escape_mrkdwn(text) == expected
-
-
-@pytest.mark.parametrize(
-    "terminal_state, agent_status, recorded, expected_state",
-    [
-        (TerminalState.LIVE, AgentStatus.WORKING, WorkerStatus.IDLE, StatusState.WORKING),
-        (TerminalState.LIVE, AgentStatus.BLOCKED, WorkerStatus.RUNNING, StatusState.WAITING),
-        (TerminalState.LIVE, AgentStatus.IDLE, WorkerStatus.RUNNING, StatusState.FINISHED),
-        (TerminalState.LIVE, AgentStatus.DONE, WorkerStatus.IDLE, StatusState.FINISHED),
-        (TerminalState.LIVE, AgentStatus.DONE, WorkerStatus.DONE, StatusState.FINISHED),
-        (TerminalState.LIVE, AgentStatus.ERROR, WorkerStatus.RUNNING, StatusState.STOPPED),
-        (TerminalState.LIVE, AgentStatus.UNKNOWN, WorkerStatus.RUNNING, StatusState.WORKING),
-        (TerminalState.LIVE, AgentStatus.UNKNOWN, WorkerStatus.IDLE, StatusState.FINISHED),
-        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.SPAWNING, StatusState.WORKING),
-        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.FAILED, StatusState.FINISHED),
-        (TerminalState.LIVE, AgentStatus.NONE, WorkerStatus.BLOCKED, StatusState.WAITING),
-        (TerminalState.FINISHED, AgentStatus.DONE, WorkerStatus.IDLE, StatusState.STOPPED),
-        (None, None, WorkerStatus.IDLE, StatusState.STOPPED),
-        (None, None, WorkerStatus.FAILED, StatusState.STOPPED),
-        (None, None, WorkerStatus.DONE, StatusState.CLOSED),
-    ],
-    ids=[
-        "working",
-        "blocked-on-a-prompt",
-        "idle",
-        "hc-done-is-a-finished-turn",
-        "hc-done-never-closed-while-live",
-        "agent-error",
-        "unknown-while-running",
-        "unknown-while-idle",
-        "no-status-while-starting",
-        "no-status-never-stopped-while-live",
-        "no-status-blocked-record",
-        "terminal-finished",
-        "terminal-gone",
-        "terminal-gone-failed",
-        "terminal-gone-after-pan-done",
-    ],
-)
-def test_check_state(
-    terminal_state: TerminalState | None,
-    agent_status: AgentStatus | None,
-    recorded: WorkerStatus,
-    expected_state: StatusState,
-) -> None:
-    terminal = (
-        make_terminal("t7", name="pan-login", state=terminal_state, agent_status=agent_status)
-        if terminal_state is not None and agent_status is not None
-        else None
-    )
-
-    assert check_state(terminal, recorded) is expected_state
 
 
 @pytest.mark.parametrize(
@@ -255,6 +170,17 @@ def test_status_blocks_optional_parts(
     assert blocks[1]["elements"][0]["text"] == expected_context
 
 
+def _details(**updates: object) -> PrivateDetails:
+    details = PrivateDetails(
+        requester="U0TEST",
+        session_name="pan-login",
+        terminal_address="t7",
+        inbox_thread_name="pan-login: fix the login page",
+        inbox_thread_known=True,
+    )
+    return details.model_copy(update=updates)
+
+
 @pytest.mark.parametrize(
     "updates, expected_inbox_line",
     [
@@ -268,34 +194,23 @@ def test_status_blocks_optional_parts(
         ),
         ({}, 'Inbox thread: "pan-login: fix the login page"'),
         (
-            {"started_by_pan": False},
+            {"inbox_thread_known": False},
             'Inbox thread: its existing one, or "pan-login: fix the login page"',
-        ),
-        (
-            {"started_by_pan": False, "inbox_thread_id": "thr_1"},
-            'Inbox thread: "pan-login: fix the login page"',
         ),
         ({"inbox_thread_name": None}, "Inbox thread: none yet"),
     ],
-    ids=[
-        "link",
-        "link-without-name",
-        "own-session-name",
-        "desk-session-suggested-name",
-        "desk-session-found-thread",
-        "none",
-    ],
+    ids=["link", "link-without-name", "known-name", "suggested-name", "none"],
 )
 def test_private_details_text_names_the_inbox_thread(
     updates: dict[str, object], expected_inbox_line: str
 ) -> None:
-    assert private_details_text(_record(**updates)) == (
+    assert private_details_text(_details(**updates)) == (
         f"Details for pan-login (only visible to you)\n{expected_inbox_line}\nTerminal: t7"
     )
 
 
 def test_private_details_text_without_a_terminal_address() -> None:
-    assert private_details_text(_record(terminal_address="")) == (
+    assert private_details_text(_details(terminal_address="")) == (
         'Details for pan-login (only visible to you)\nInbox thread: "pan-login: fix the login page"'
     )
 

@@ -2,27 +2,33 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, assert_never
 
-from pan.backend.sessions import inbox_thread_known
-from pan.core.models import (
-    AgentStatus,
-    SessionSummary,
-    StatusState,
-    Terminal,
-    TerminalState,
-    ThreadRecord,
-    WorkerStatus,
+from pan.backend.spawn import start_failed_text
+from pan.core.events import (
+    ChoiceUnclear,
+    CleanupFailed,
+    NoSessionMatches,
+    NotDelivered,
+    NotDeliveredReason,
+    PrivateDetails,
+    QuestionAsked,
+    SessionClosed,
+    SessionNotice,
+    SessionNoticeReason,
+    StartFailed,
+    ThreadNotice,
+    ThreadNoticeReason,
+    WorkKept,
 )
-from pan.utils.config import (
-    CLAUDE_AGENT_NAMES,
-    SESSIONS_SLACK_MAX_COUNT,
-    STATUS_LABEL_MAX_LENGTH,
-)
+from pan.core.models import AgentStatus, SessionSummary, StatusState, WorkerStatus
+from pan.utils.config import CLAUDE_AGENT_NAMES, SESSIONS_SLACK_MAX_COUNT
+from pan.utils.text import status_label
 
-# What pan's status message in a thread looks like. Everything here is pure: the blocks and
-# texts are built from a record and the time, and the gateway adapter only sends them. The
-# answer itself is converted to Slack mrkdwn at the single egress (slack_format.to_slack_mrkdwn).
+# What pan's messages in a thread look like, from the events the backend reports
+# (core.events). Everything here is pure: the blocks and texts are built from an event and the
+# time, and frontend.slack_reporter only sends them. Every plain line is converted to Slack
+# mrkdwn at the single egress (slack_format.to_slack_mrkdwn, through slack_post).
 
 STATUS_TITLES: dict[StatusState, str] = {
     StatusState.WORKING: "Working",
@@ -32,45 +38,8 @@ STATUS_TITLES: dict[StatusState, str] = {
     StatusState.STOPPED: "Stopped",
 }
 
-# The state `check` shows for a live terminal, from the agent status hc reports. hc's `done`
-# means the turn finished, not that the session was closed: Closed comes only from `@pan done`.
-_STATE_FOR_LIVE_AGENT: dict[AgentStatus, StatusState] = {
-    AgentStatus.WORKING: StatusState.WORKING,
-    AgentStatus.BLOCKED: StatusState.WAITING,
-    AgentStatus.IDLE: StatusState.FINISHED,
-    AgentStatus.DONE: StatusState.FINISHED,
-    AgentStatus.ERROR: StatusState.STOPPED,
-}
-# A live terminal reporting no status or an unknown one (a fresh Claude session before its
-# first turn, say) shows what pan recorded; the terminal is live, so never Closed or Stopped.
-_STATE_FOR_LIVE_RECORD: dict[WorkerStatus, StatusState] = {
-    WorkerStatus.SPAWNING: StatusState.WORKING,
-    WorkerStatus.RUNNING: StatusState.WORKING,
-    WorkerStatus.BLOCKED: StatusState.WAITING,
-    WorkerStatus.IDLE: StatusState.FINISHED,
-    WorkerStatus.DONE: StatusState.FINISHED,
-    WorkerStatus.FAILED: StatusState.FINISHED,
-}
-
 _SECONDS_PER_MINUTE = 60
 _MINUTES_PER_HOUR = 60
-
-
-def check_state(terminal: Terminal | None, recorded: WorkerStatus) -> StatusState:
-    # The status message's state on `check`. A terminal that is gone (or finished) is Stopped,
-    # unless pan recorded the session as closed by `@pan done` (DONE is only set there).
-    if terminal is None or terminal.state is TerminalState.FINISHED:
-        return StatusState.CLOSED if recorded is WorkerStatus.DONE else StatusState.STOPPED
-    live_state = _STATE_FOR_LIVE_AGENT.get(terminal.agent_status)
-    return live_state if live_state is not None else _STATE_FOR_LIVE_RECORD[recorded]
-
-
-def status_label(task: str, max_length: int = STATUS_LABEL_MAX_LENGTH) -> str:
-    # The task on one line: whitespace collapsed, cut short with "..." past max_length.
-    short_task = " ".join(task.split())
-    if len(short_task) > max_length:
-        short_task = short_task[: max_length - 3].rstrip() + "..."
-    return short_task
 
 
 def escape_mrkdwn(text: str) -> str:
@@ -148,27 +117,27 @@ def status_blocks(
     ]
 
 
-def _inbox_line(record: ThreadRecord) -> str:
+def _inbox_line(details: PrivateDetails) -> str:
     # The session's Inbox thread: a link once captured, else its name; a name pan only
     # suggested to a desk session is shown as the alternative it is.
-    name = record.inbox_thread_name
-    if record.inbox_thread_url:
+    name = details.inbox_thread_name
+    if details.inbox_thread_url:
         shown_name = escape_mrkdwn(name) if name else "open"
-        return f"Inbox thread: <{record.inbox_thread_url}|{shown_name}>"
-    if name and inbox_thread_known(record):
+        return f"Inbox thread: <{details.inbox_thread_url}|{shown_name}>"
+    if name and details.inbox_thread_known:
         return f'Inbox thread: "{escape_mrkdwn(name)}"'
     if name:
         return f'Inbox thread: its existing one, or "{escape_mrkdwn(name)}"'
     return "Inbox thread: none yet"
 
 
-def private_details_text(record: ThreadRecord) -> str:
+def private_details_text(details: PrivateDetails) -> str:
     # The details only the requester sees (an ephemeral message): the session, its terminal
     # and its Inbox thread, whose link is on this machine and useless to anyone else.
-    lines = [f"Details for {escape_mrkdwn(record.terminal_name)} (only visible to you)"]
-    lines.append(_inbox_line(record))
-    if record.terminal_address:
-        lines.append(f"Terminal: {escape_mrkdwn(record.terminal_address)}")
+    lines = [f"Details for {escape_mrkdwn(details.session_name)} (only visible to you)"]
+    lines.append(_inbox_line(details))
+    if details.terminal_address:
+        lines.append(f"Terminal: {escape_mrkdwn(details.terminal_address)}")
     return "\n".join(lines)
 
 
@@ -189,7 +158,7 @@ _SESSIONS_GROUP_FOR_AGENT: dict[AgentStatus, str] = {
     AgentStatus.ERROR: STATUS_TITLES[StatusState.STOPPED],
 }
 # For a live agent hc reports no known status for: what pan recorded. The terminal is live,
-# so never Stopped (as in _STATE_FOR_LIVE_RECORD): a recorded failure reads as idle.
+# so never Stopped (as in status_message._STATE_FOR_LIVE_RECORD): a recorded failure reads as idle.
 _SESSIONS_GROUP_FOR_PAN_STATUS: dict[WorkerStatus, str] = {
     WorkerStatus.SPAWNING: STATUS_TITLES[StatusState.WORKING],
     WorkerStatus.RUNNING: STATUS_TITLES[StatusState.WORKING],
@@ -288,3 +257,173 @@ def render_sessions_for_slack(
     return "\n".join(
         [SESSIONS_HEADER, *(_session_line(summary, permalinks) for summary in selected)]
     )
+
+
+def screen_text(screen: str) -> str:
+    # A session's cleaned screen lines (ScreenCaptured), labelled as what they are.
+    return f"Screen text (no transcript yet):\n```\n{screen}\n```"
+
+
+# The one-line notices pan posts in a thread. None carries markup of its own beyond the GFM
+# slack_post converts, so they read the same in any thread.
+UNTIED_THREAD_REPLY = "this thread isn't tied to a session; @pan sessions lists them"
+NO_SESSION_REPLY = "This thread has no session."
+NOT_SENT_REPLY = "Not sent."
+EXPIRED_REPLY = "Not sent: that question expired. Send the message again."
+# An action refused because the message it rests on (--item) cannot be used: unknown, not the
+# sender's newest in the thread, or not from the requester. No session names or paths.
+UNUSABLE_ITEM_REPLY = "I couldn't act on that message; please send the request again."
+# How to start new work instead, offered when a `to` selector matches no session at all.
+NEW_WORK_HINT = "@pan new: <your text>"
+
+_THREAD_NOTICE_TEXTS: dict[ThreadNoticeReason, str] = {
+    ThreadNoticeReason.THREAD_NOT_TIED: UNTIED_THREAD_REPLY,
+    ThreadNoticeReason.NO_SESSION: NO_SESSION_REPLY,
+    ThreadNoticeReason.QUESTION_EXPIRED: EXPIRED_REPLY,
+    ThreadNoticeReason.NOT_SENT: NOT_SENT_REPLY,
+    ThreadNoticeReason.MESSAGE_UNUSABLE: UNUSABLE_ITEM_REPLY,
+}
+
+# Each takes the session's name as {name}.
+_SESSION_NOTICE_TEMPLATES: dict[SessionNoticeReason, str] = {
+    SessionNoticeReason.DESK_SESSION_ENDED: (
+        "{name} has ended, and pan does not reopen sessions it did not start; "
+        "start one with @pan new: <task>, or send to another with @pan to <name>: <task>"
+    ),
+    SessionNoticeReason.THREAD_UNTIED: (
+        "untied this thread from {name}; the session was not stopped"
+    ),
+    SessionNoticeReason.DESK_SESSION_UNTIED: (
+        "Untied this thread from {name}; pan never closes sessions it didn't start."
+    ),
+    SessionNoticeReason.NOT_CLOSED_WORKING: (
+        "{name} is still working; send `@pan done` when it finishes, "
+        "or `@pan done --discard` to stop it now."
+    ),
+    SessionNoticeReason.NOT_CLOSED_WAITING_ON_PROMPT: (
+        "{name} is waiting on a prompt; answer it at the terminal and send `@pan done` again, "
+        "or `@pan done --discard` to stop it now."
+    ),
+    SessionNoticeReason.FOLDER_OUTSIDE_WORKTREES: (
+        "{name}'s folder is not in pan's worktree folder; pan never removes it."
+    ),
+    SessionNoticeReason.FOLDER_IS_MAIN_REPOSITORY: (
+        "{name}'s folder is a main repository; pan never removes it."
+    ),
+    SessionNoticeReason.WORKTREE_UNREADABLE: "Could not read {name}'s worktree; kept it.",
+    SessionNoticeReason.PROPOSED_SESSION_GONE: "{name} is no longer running; not sent",
+}
+
+# The events slack_reporter posts as one plain line in the thread.
+LineEvent = (
+    QuestionAsked
+    | ChoiceUnclear
+    | ThreadNotice
+    | SessionNotice
+    | NotDelivered
+    | StartFailed
+    | NoSessionMatches
+    | WorkKept
+    | CleanupFailed
+    | SessionClosed
+)
+
+
+def _numbers_phrase(count: int) -> str:
+    numbers = [str(number) for number in range(1, count + 1)]
+    return f"{', '.join(numbers[:-1])} or {numbers[-1]}"
+
+
+def question_text(candidate_labels: list[str]) -> str:
+    if len(candidate_labels) == 1:
+        return f"Send this to {candidate_labels[0]}? Reply yes."
+    numbered = "\n".join(
+        f"{number}. {label}" for number, label in enumerate(candidate_labels, start=1)
+    )
+    return f"Which session? Reply {_numbers_phrase(len(candidate_labels))}:\n{numbered}"
+
+
+def reask_text(candidate_count: int) -> str:
+    if candidate_count == 1:
+        return "Reply yes to send it, or anything else to cancel."
+    return f"Reply {_numbers_phrase(candidate_count)} to choose, or anything else to cancel."
+
+
+def not_delivered_text(refusal: NotDelivered) -> str:
+    # A refused answer to pan's question says to send the same choice again later.
+    retry_hint = (
+        f"reply {refusal.retry_choice} again later, or anything else to cancel."
+        if refusal.retry_choice
+        else None
+    )
+    name = refusal.session_name
+    if refusal.reason is NotDeliveredReason.BUSY:
+        return f"{name} is busy; {retry_hint or 'try again, or @pan check'}"
+    reply = f"{name} is waiting on a prompt at the terminal; nothing was sent"
+    return f"{reply}; {retry_hint}" if retry_hint else reply
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def kept_reply(kept: WorkKept) -> str:
+    unsaved = [
+        _counted(count, noun)
+        for count, noun in (
+            (kept.uncommitted_files, "uncommitted file"),
+            (kept.unpushed_commits, "unpushed commit"),
+        )
+        if count
+    ]
+    return (
+        f"{kept.session_name} has {' and '.join(unsaved)}; kept it. "
+        "Push or commit them, or send `@pan done --discard`."
+    )
+
+
+def closed_reply(closed: SessionClosed) -> str:
+    # Says what this run removed and nothing more, so a retry after a half-finished cleanup
+    # reports only the part it did.
+    name = closed.session_name
+    if closed.worktree_removed and closed.branch_deleted:
+        return f"Closed {name} and removed its worktree and branch."
+    if closed.worktree_removed:
+        return f"Closed {name} and removed its worktree."
+    if closed.branch_deleted:
+        return f"Closed {name} and removed its branch; its worktree was already gone."
+    if closed.repo_known:
+        return f"Closed {name}; its worktree and branch were already gone."
+    return f"Closed {name}; its worktree was already gone."
+
+
+def line_text(event: LineEvent) -> str:
+    # The one line pan posts in the thread for `event`.
+    match event:
+        case QuestionAsked():
+            return question_text(event.candidate_labels)
+        case ChoiceUnclear():
+            return reask_text(event.candidate_count)
+        case ThreadNotice():
+            return _THREAD_NOTICE_TEXTS[event.reason]
+        case SessionNotice():
+            return _SESSION_NOTICE_TEMPLATES[event.reason].format(name=event.session_name)
+        case NotDelivered():
+            return not_delivered_text(event)
+        case StartFailed():
+            return start_failed_text(event)
+        case NoSessionMatches():
+            return (
+                f'no session matches "{event.selector}"; to start new work send `{NEW_WORK_HINT}`'
+            )
+        case WorkKept():
+            return kept_reply(event)
+        case CleanupFailed():
+            return (
+                f"Closed {event.session_name}, but could not remove its worktree or branch; "
+                f"send `@pan done` to try again, or remove {event.worktree_path} by hand."
+            )
+        case SessionClosed():
+            return closed_reply(event)
+        case _:
+            assert_never(event)

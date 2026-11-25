@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from pan.core.events import Event
 from pan.core.models import (
     BranchStatus,
     Conversation,
@@ -44,6 +46,20 @@ class SlackAdapter(Protocol):
     def permalink(self, channel: str, ts: str) -> str | None: ...
 
     def start(self) -> None: ...
+
+
+class Reporter(Protocol):
+    # Shows what happened in a conversation to the people in it (Slack today: see
+    # frontend.slack_reporter). The backend reports events (core.events), never wording. For a
+    # StatusChanged it returns the id of the status message when it posted a new one, None
+    # when it edited the one it was given; every other event returns None. A failed delivery
+    # raises SlackPostError.
+    def report(self, conversation: Conversation, event: Event) -> str | None: ...
+
+
+# A Reporter built only when something is reported, for work that must finish even when the
+# reporter cannot be built (its credentials are missing: CredentialsError).
+OpenReporter = Callable[[], Reporter]
 
 
 class Clock(Protocol):

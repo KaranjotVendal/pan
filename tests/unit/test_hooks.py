@@ -15,6 +15,7 @@ from pan.frontend.hooks.inbox_link import InboxLink, inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.session_start import session_start_hook
 from pan.frontend.hooks.stop import stop_hook
+from pan.frontend.slack_reporter import SlackReporter
 
 
 class FakeThreadMap:
@@ -123,7 +124,7 @@ def test_stop_hook_marks_idle_and_posts_a_finished_status_without_an_answer(
     thread_map, slack = FakeThreadMap(reply_mode=reply_mode), FakeSlack()
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
 
     assert slack.posts == []
     assert slack.status_texts() == ["Finished"]
@@ -138,7 +139,7 @@ def test_stop_hook_edits_the_status_message_the_thread_already_has() -> None:
     )
     payload = json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None})
 
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
 
     assert slack.status_posts == []
     assert [(channel, ts, text) for channel, ts, _blocks, text in slack.status_updates] == [
@@ -173,7 +174,7 @@ def test_hook_of_a_session_whose_thread_moved_on_only_updates_its_own_record(
     hook(  # type: ignore[operator]
         _CONVERSATION,
         thread_map,
-        slack,
+        SlackReporter(slack),
         stdin=io.StringIO(json.dumps(payload)),
         session_name="pan-task",
     )
@@ -194,7 +195,7 @@ def test_stop_hook_posts_no_answer_when_the_transcript_is_missing(tmp_path: Path
         }
     )
 
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
 
     assert slack.posts == []
     assert slack.status_texts() == ["Finished"]
@@ -230,7 +231,7 @@ def test_stop_hook_extracts_last_assistant_text_from_transcript(tmp_path: Path) 
         {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
     )
 
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
 
     # Only the answer, converted to Slack mrkdwn: no session name, no Inbox link.
     assert slack.posts == [("C1", _THREAD, "*Done.* See <https://x.test/1|the PR>")]
@@ -267,7 +268,10 @@ def test_notification_hook_marks_blocked_and_shows_the_prompt_in_the_status(
         payload_fields["message"] = message
 
     notification_hook(
-        _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
+        _CONVERSATION,
+        thread_map,
+        SlackReporter(slack),
+        stdin=io.StringIO(json.dumps(payload_fields)),
     )
 
     assert slack.posts == []
@@ -315,7 +319,10 @@ def test_notification_hook_marks_blocked_only_for_a_prompt_waiting_on_the_person
         payload_fields["message"] = message
 
     notification_hook(
-        _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload_fields))
+        _CONVERSATION,
+        thread_map,
+        SlackReporter(slack),
+        stdin=io.StringIO(json.dumps(payload_fields)),
     )
 
     assert [status for _, status in thread_map.status_updates] == expected_statuses
@@ -335,7 +342,7 @@ def test_hook_raises_when_thread_unknown(hook: object, payload: dict) -> None:
 
     with pytest.raises(ThreadNotFoundError):
         hook(  # type: ignore[operator]
-            _CONVERSATION, thread_map, slack, stdin=io.StringIO(json.dumps(payload))
+            _CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(json.dumps(payload))
         )
 
     # Nothing is posted or transitioned when the thread is unknown.
@@ -808,8 +815,8 @@ def test_stop_hook_never_posts_the_same_answer_twice(tmp_path: Path) -> None:
         {"session_id": "s1", "hook_event_name": "Stop", "transcript_path": str(transcript)}
     )
 
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
-    stop_hook(_CONVERSATION, thread_map, slack, stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
+    stop_hook(_CONVERSATION, thread_map, SlackReporter(slack), stdin=io.StringIO(payload))
 
     assert slack.posts == [("C1", _THREAD, "same")]
     assert len(thread_map.posted_answers) == 1

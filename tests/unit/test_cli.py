@@ -20,7 +20,6 @@ import pan.frontend.cli as cli
 import pan.frontend.wiring as wiring
 from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
 from pan.backend.directive import asks_to_discard
-from pan.backend.gates import UNUSABLE_ITEM_REPLY
 from pan.core.errors import (
     ConfigMissingError,
     CredentialsError,
@@ -48,6 +47,7 @@ from pan.core.errors import (
     UnsavedWorkError,
     XSourceRefusedError,
 )
+from pan.core.events import ThreadNotice, ThreadNoticeReason
 from pan.core.models import (
     AgentStatus,
     BranchStatus,
@@ -71,6 +71,8 @@ from pan.data.inbox import FileInboxStore
 from pan.data.threadmap import FileThreadMap
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.stop import stop_hook
+from pan.frontend.slack_render import NOT_SENT_REPLY, UNUSABLE_ITEM_REPLY
+from pan.frontend.slack_reporter import SlackReporter
 from pan.utils.clock import SystemClock
 
 runner = CliRunner()
@@ -982,7 +984,9 @@ def test_hook_stop_resolves_by_cwd_updates_the_status_and_marks_idle() -> None:
     )
     thread_map, slack = _HookThreadMap(record), _HookSlack()
 
-    cli._dispatch_completion_hook(stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, slack)
+    cli._dispatch_completion_hook(
+        stop_hook, _hook_payload("/wt/pan-a", "Stop"), thread_map, SlackReporter(slack)
+    )
 
     assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
         ("C1", "t-1", "Finished")
@@ -1004,7 +1008,7 @@ def test_hook_notification_resolves_by_cwd_updates_the_status_and_marks_blocked(
         }
     )
 
-    cli._dispatch_completion_hook(notification_hook, payload, thread_map, slack)
+    cli._dispatch_completion_hook(notification_hook, payload, thread_map, SlackReporter(slack))
 
     assert slack.posts == []
     assert [(post.channel, post.thread_ts, post.text) for post in slack.status_posts] == [
@@ -1022,7 +1026,7 @@ def test_hook_exits_cleanly_without_posting(raw_stdin: str) -> None:
     record = _record("t-1", worktree_path=Path("/wt/pan-a"))
     thread_map, slack = _HookThreadMap(record), _HookSlack()
 
-    cli._dispatch_completion_hook(stop_hook, raw_stdin, thread_map, slack)
+    cli._dispatch_completion_hook(stop_hook, raw_stdin, thread_map, SlackReporter(slack))
 
     assert slack.posts == []
     assert slack.status_posts == []
@@ -1228,6 +1232,14 @@ def test_reopen_unknown_thread_raises(monkeypatch: pytest.MonkeyPatch, tmp_path:
     result = runner.invoke(cli.app, ["reopen", "--thread", "nope", "--task", "x"])
 
     assert isinstance(result.exception, ThreadNotFoundError)
+
+
+def _assert_reports_to(reporter: Any, slack: RecordingSlack) -> None:
+    # The reporter the command passed on posts through this Slack adapter.
+    reporter.report(
+        Conversation.slack("t-check", "C0CHECK"), ThreadNotice(reason=ThreadNoticeReason.NOT_SENT)
+    )
+    assert slack.posts[-1] == ("C0CHECK", "t-check", NOT_SENT_REPLY)
 
 
 class _RecordingSlack(RecordingSlack):
@@ -1641,7 +1653,7 @@ def test_send_command_wires_to_send_to_session(
     assert captured["requester"] == "U000TEST"
     assert captured["reply_in_slack"] is True
     assert captured["terminal_host"] is terminal_host
-    assert captured["slack"] is slack
+    _assert_reports_to(captured["reporter"], slack)
 
 
 @pytest.mark.parametrize(
@@ -1801,7 +1813,7 @@ def test_send_command_without_a_session_name_follows_up_to_the_tied_session(
     assert captured["conversation"] == Conversation.slack("t-1", "C0TEST")
     assert captured["text"] == "and the docs"
     assert captured["terminal_host"] is terminal_host
-    assert captured["slack"] is slack
+    _assert_reports_to(captured["reporter"], slack)
     assert captured["reply_in_slack"] is expected_reply_in_slack
 
 
@@ -1994,7 +2006,7 @@ def test_propose_command_wires_to_propose_sessions(
     assert captured["requester"] == "U000TEST"
     assert captured["reply_in_slack"] is False
     assert captured["terminal_host"] is terminal_host
-    assert captured["slack"] is slack
+    _assert_reports_to(captured["reporter"], slack)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from pathlib import Path
 
 from pan.backend.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
@@ -12,12 +11,16 @@ from pan.backend.sessions import (
 )
 from pan.backend.spawn import (
     RELAYED_FOLLOW_UP_SENTENCE,
-    desk_session_ended_reply,
     inbox_thread_name,
     slack_reply_sentence,
     upgraded_reply_mode,
 )
-from pan.backend.status_message import post_answer, publish_status, send_private_details
+from pan.backend.status_message import (
+    check_state,
+    post_answer,
+    publish_status,
+    send_private_details,
+)
 from pan.core.errors import (
     CredentialsError,
     GitWorktreeError,
@@ -32,6 +35,18 @@ from pan.core.errors import (
     ThreadNotFoundError,
     UnsafeWorktreeError,
     UnsavedWorkError,
+)
+from pan.core.events import (
+    CleanupFailed,
+    NotDelivered,
+    NotDeliveredReason,
+    ScreenCaptured,
+    SessionClosed,
+    SessionNotice,
+    SessionNoticeReason,
+    ThreadNotice,
+    ThreadNoticeReason,
+    WorkKept,
 )
 from pan.core.models import (
     AgentStatus,
@@ -50,13 +65,12 @@ from pan.core.seams import (
     Clock,
     GitWorktreeAdapter,
     InboxDirectory,
-    SlackAdapter,
+    OpenReporter,
+    Reporter,
     TerminalHost,
     ThreadMap,
 )
 from pan.data.transcript import last_assistant_text
-from pan.frontend.gateway.slack_post import slack_post, slack_post_parts  # noqa: TID251
-from pan.frontend.slack_render import check_state, status_label  # noqa: TID251
 from pan.utils.config import (
     CHECK_SCREEN_MAX_LINES,
     CLAUDE_AGENT_NAMES,
@@ -64,10 +78,10 @@ from pan.utils.config import (
     WORKER_SETTINGS_RELATIVE_PATH,
 )
 from pan.utils.logging import initialise_logger
+from pan.utils.text import status_label
 
 logger = initialise_logger(__name__)
 
-UNTIED_THREAD_REPLY = "this thread isn't tied to a session; @pan sessions lists them"
 # The line on top of text typed into a session from Slack (see from_slack_text), when pan
 # knows the session's Inbox thread.
 FROM_SLACK_HEADER = (
@@ -122,15 +136,6 @@ def from_slack_text(
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
 
 
-def _busy_reply(name: str, retry_hint: str | None = None) -> str:
-    return f"{name} is busy; {retry_hint or 'try again, or @pan check'}"
-
-
-def _blocked_reply(name: str, retry_hint: str | None = None) -> str:
-    reply = f"{name} is waiting on a prompt at the terminal; nothing was sent"
-    return f"{reply}; {retry_hint}" if retry_hint else reply
-
-
 def _is_ready(terminal: Terminal) -> bool:
     # A Claude session reports no status until its first turn ends, so a brand-new one reads
     # NONE while it waits at its prompt. NONE counts as ready only for a known Claude agent
@@ -150,26 +155,30 @@ def _deliver(
     terminal: Terminal,
     text: str,
     *,
-    slack: SlackAdapter,
+    reporter: Reporter,
     conversation: Conversation,
-    retry_hint: str | None = None,
+    retry_choice: str | None = None,
 ) -> None:
     # Type the text only into a session that is ready for it. Busy, or a state pan cannot
     # read, is refused (typing could land in the middle of someone's work there); waiting on
-    # a person is refused too, by pan here or by the host at the send. A refusal posts a
-    # short reply and raises, with nothing typed; `retry_hint`, when given, is what that reply
-    # tells the person to do next.
-    name = _session_name(terminal)
+    # a person is refused too, by pan here or by the host at the send. A refusal is reported
+    # and raises, with nothing typed; `retry_choice`, when given, is the person's answer to
+    # pan's question, which the refusal tells them to send again later.
+    def refusal(reason: NotDeliveredReason) -> NotDelivered:
+        return NotDelivered(
+            reason=reason, session_name=_session_name(terminal), retry_choice=retry_choice
+        )
+
     if terminal.agent_status is AgentStatus.BLOCKED:
-        slack_post(slack, conversation, _blocked_reply(name, retry_hint))
+        reporter.report(conversation, refusal(NotDeliveredReason.WAITING_ON_PROMPT))
         raise TargetBlockedError(f"{terminal.address} is waiting on a person")
     if not _is_ready(terminal):
-        slack_post(slack, conversation, _busy_reply(name, retry_hint))
+        reporter.report(conversation, refusal(NotDeliveredReason.BUSY))
         raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
     try:
         terminal_host.send(terminal.address, text)
     except TargetBlockedError:
-        slack_post(slack, conversation, _blocked_reply(name, retry_hint))
+        reporter.report(conversation, refusal(NotDeliveredReason.WAITING_ON_PROMPT))
         raise
 
 
@@ -221,9 +230,9 @@ def send_to_session(
     terminal_host: TerminalHost,
     thread_map: ThreadMap,
     inbox_directory: InboxDirectory,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
-    retry_hint: str | None = None,
+    retry_choice: str | None = None,
 ) -> ThreadRecord:
     # `pan send --to <selector>`: send the task to the live session the selector names exactly
     # (address, name, or Herdr label or space; see resolve_target), pan's own or a desk
@@ -231,7 +240,8 @@ def send_to_session(
     # goes under the "from Slack" line naming its Inbox thread. With no exact match, or a label
     # several sessions share, nothing is sent or posted: NoExactMatchError tells the
     # orchestrator to propose a session for the person to confirm (`pan propose`). A busy
-    # session or one waiting on a prompt gets a short reply and raises, with nothing sent.
+    # session or one waiting on a prompt is reported as not delivered and raises, with nothing
+    # sent.
     # On success the thread's status message says Working, and the session's Inbox thread and
     # terminal go to the requester only.
     terminals = terminal_host.list_terminals()
@@ -266,9 +276,9 @@ def send_to_session(
         terminal_host,
         target,
         from_slack_text(inbox_thread, text, reply_mode, thread_known=thread_known),
-        slack=slack,
+        reporter=reporter,
         conversation=conversation,
-        retry_hint=retry_hint,
+        retry_choice=retry_choice,
     )
 
     now = clock.now()
@@ -317,13 +327,13 @@ def send_to_session(
         # Not looked up yet in this send (a lookup that just missed would miss again).
         tied_record = _with_inbox_link(tied_record, inbox_directory, thread_map)
     tied_record = publish_status(
-        slack=slack,
+        reporter=reporter,
         thread_map=thread_map,
         record=tied_record,
         state=StatusState.WORKING,
         clock=clock,
     )
-    send_private_details(slack=slack, record=tied_record)
+    send_private_details(reporter=reporter, record=tied_record)
     logger.info(
         f"sent to session terminal={target.address} conversation={conversation.key} "
         f"started_by_pan={tied_record.started_by_pan} len={len(text)}"
@@ -337,7 +347,7 @@ def follow_up_to_session(
     text: str,
     terminal_host: TerminalHost,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
@@ -352,12 +362,18 @@ def follow_up_to_session(
     # typed, the follow-up is the thread's task and its status message says Working.
     record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
+        reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED))
         raise ThreadNotFoundError(f"no tied session for thread_ts={conversation.id}")
     terminal = _live_terminal(terminal_host, record)
     if terminal is None:
         if not record.started_by_pan:
-            slack_post(slack, conversation, desk_session_ended_reply(record.terminal_name))
+            reporter.report(
+                conversation,
+                SessionNotice(
+                    reason=SessionNoticeReason.DESK_SESSION_ENDED,
+                    session_name=record.terminal_name,
+                ),
+            )
         raise TerminalGoneError(f"the session {record.terminal_name} has ended")
     reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
 
@@ -367,7 +383,7 @@ def follow_up_to_session(
         typed = from_slack_text(
             inbox_thread, text, reply_mode, thread_known=inbox_thread_known(record)
         )
-    _deliver(terminal_host, terminal, typed, slack=slack, conversation=conversation)
+    _deliver(terminal_host, terminal, typed, reporter=reporter, conversation=conversation)
     if reply_mode is not record.reply_mode:
         thread_map.set_reply_mode(conversation, reply_mode, session_name=record.terminal_name)
         logger.info(f"reply mode set to {reply_mode} conversation={conversation.key}")
@@ -379,7 +395,7 @@ def follow_up_to_session(
     label, started_at = status_label(text), clock.now()
     thread_map.record_task(conversation, label, started_at, session_name=record.terminal_name)
     record = publish_status(
-        slack=slack,
+        reporter=reporter,
         thread_map=thread_map,
         record=record.model_copy(update={"status_label": label, "task_started_at": started_at}),
         state=StatusState.WORKING,
@@ -391,19 +407,16 @@ def follow_up_to_session(
     return record
 
 
-def forget_thread(
-    *, conversation: Conversation, thread_map: ThreadMap, slack: SlackAdapter
-) -> None:
+def forget_thread(*, conversation: Conversation, thread_map: ThreadMap, reporter: Reporter) -> None:
     # Untie the thread. The session is never stopped or touched.
     record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
+        reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED))
         return
     thread_map.untie(conversation)
-    slack_post(
-        slack,
+    reporter.report(
         conversation,
-        f"untied this thread from {record.terminal_name}; the session was not stopped",
+        SessionNotice(reason=SessionNoticeReason.THREAD_UNTIED, session_name=record.terminal_name),
     )
     logger.info(f"forget conversation={conversation.key}")
 
@@ -413,7 +426,7 @@ def stop_thread(
     conversation: Conversation,
     thread_map: ThreadMap,
     terminal_host: TerminalHost,
-    open_slack: Callable[[], SlackAdapter],
+    open_reporter: OpenReporter,
     clock: Clock,
 ) -> None:
     """Kill switch: remove the worker's terminal, mark its record FAILED and edit the thread's
@@ -433,23 +446,24 @@ def stop_thread(
         terminal_host.remove(record.terminal_address)
     thread_map.update_status(conversation, WorkerStatus.FAILED, session_name=record.terminal_name)
     if record.tied:
-        _publish_stopped(open_slack, thread_map, record, clock)
+        _publish_stopped(open_reporter, thread_map, record, clock)
 
 
 def _publish_stopped(
-    open_slack: Callable[[], SlackAdapter],
-    thread_map: ThreadMap,
-    record: ThreadRecord,
-    clock: Clock,
+    open_reporter: OpenReporter, thread_map: ThreadMap, record: ThreadRecord, clock: Clock
 ) -> None:
     # Best effort: the kill switch has done its work whether or not Slack can be reached.
     try:
-        slack = open_slack()
+        reporter = open_reporter()
     except CredentialsError as e:
         logger.warning(f"stop could not update the status message: {type(e).__name__}")
         return
     publish_status(
-        slack=slack, thread_map=thread_map, record=record, state=StatusState.STOPPED, clock=clock
+        reporter=reporter,
+        thread_map=thread_map,
+        record=record,
+        state=StatusState.STOPPED,
+        clock=clock,
     )
 
 
@@ -513,7 +527,7 @@ def screen_answer(
     screen_lines: int,
 ) -> str | None:
     # For a session with no transcript (a desk session has no hooks): its recent screen lines,
-    # cleaned and labelled as such. None when there is no live terminal or nothing to show.
+    # cleaned. None when there is no live terminal or nothing to show.
     if terminal is None:
         return None
     try:
@@ -530,9 +544,7 @@ def screen_answer(
         logger.info(f"check could not read the screen conversation={record.conversation.key}")
         return None
     cleaned = clean_screen_text(screen)
-    if not cleaned:
-        return None
-    return f"Screen text (no transcript yet):\n```\n{cleaned}\n```"
+    return cleaned or None
 
 
 def check_thread(
@@ -541,7 +553,7 @@ def check_thread(
     thread_map: ThreadMap,
     terminal_host: TerminalHost,
     inbox_directory: InboxDirectory,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
     screen_lines: int,
 ) -> None:
@@ -550,32 +562,25 @@ def check_thread(
     # the session's Inbox thread and terminal to the requester only.
     record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, conversation, UNTIED_THREAD_REPLY)
+        reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED))
         return
     record = _with_inbox_link(record, inbox_directory, thread_map)
     terminal = _live_terminal(terminal_host, record)
     state = check_state(terminal, record.status)
     record = publish_status(
-        slack=slack, thread_map=thread_map, record=record, state=state, clock=clock
+        reporter=reporter, thread_map=thread_map, record=record, state=state, clock=clock
     )
     # The last answer in the transcript, posted alone unless pan already posted that same
     # answer (the Stop hook, in the reply-in-Slack mode); without a transcript, screen text.
     answer = last_assistant_text(record.transcript_path) if record.transcript_path else None
     if answer is not None:
-        post_answer(slack=slack, thread_map=thread_map, record=record, answer=answer)
+        post_answer(reporter=reporter, thread_map=thread_map, record=record, answer=answer)
     else:
         screen = screen_answer(record, terminal, terminal_host, screen_lines=screen_lines)
         if screen is not None:
-            slack_post_parts(slack, conversation, screen)
-    send_private_details(slack=slack, record=record)
+            reporter.report(conversation, ScreenCaptured(text=screen))
+    send_private_details(reporter=reporter, record=record)
     logger.info(f"check conversation={conversation.key} session={record.terminal_name}")
-
-
-NO_SESSION_REPLY = "This thread has no session."
-
-
-def _counted(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def uncommitted_paths(status: WorktreeStatus) -> list[str]:
@@ -602,55 +607,6 @@ def force_branch_delete(branch: BranchStatus, *, discard: bool) -> bool:
     # and deleted remotely, so -d would compare against nothing). Otherwise -d, which deletes
     # a branch whose commits are all on its upstream.
     return discard or branch.commits_not_in_base == 0 or branch.upstream_gone
-
-
-def kept_reply(name: str, uncommitted_count: int, unpushed_count: int) -> str:
-    unsaved = [
-        _counted(count, noun)
-        for count, noun in (
-            (uncommitted_count, "uncommitted file"),
-            (unpushed_count, "unpushed commit"),
-        )
-        if count
-    ]
-    return (
-        f"{name} has {' and '.join(unsaved)}; kept it. "
-        "Push or commit them, or send `@pan done --discard`."
-    )
-
-
-def done_busy_reply(name: str) -> str:
-    return (
-        f"{name} is still working; send `@pan done` when it finishes, "
-        "or `@pan done --discard` to stop it now."
-    )
-
-
-def done_blocked_reply(name: str) -> str:
-    return (
-        f"{name} is waiting on a prompt; answer it at the terminal and send `@pan done` again, "
-        "or `@pan done --discard` to stop it now."
-    )
-
-
-def desk_session_done_reply(name: str) -> str:
-    return f"Untied this thread from {name}; pan never closes sessions it didn't start."
-
-
-def closed_reply(
-    name: str, *, worktree_removed: bool, branch_deleted: bool, repo_known: bool
-) -> str:
-    # Says what this run removed and nothing more, so a retry after a half-finished cleanup
-    # reports only the part it did.
-    if worktree_removed and branch_deleted:
-        return f"Closed {name} and removed its worktree and branch."
-    if worktree_removed:
-        return f"Closed {name} and removed its worktree."
-    if branch_deleted:
-        return f"Closed {name} and removed its branch; its worktree was already gone."
-    if repo_known:
-        return f"Closed {name}; its worktree and branch were already gone."
-    return f"Closed {name}; its worktree was already gone."
 
 
 def _is_pan_worktree(worktree_path: Path, worktree_base: Path) -> bool:
@@ -686,7 +642,7 @@ def done_thread(
     thread_map: ThreadMap,
     terminal_host: TerminalHost,
     git: GitWorktreeAdapter,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
 ) -> None:
     # `done`: close the thread's tied session. A session pan did not start is only untied.
@@ -698,22 +654,26 @@ def done_thread(
     # message says Closed.
     record = thread_map.get(conversation)
     if record is None or not record.tied:
-        slack_post(slack, conversation, NO_SESSION_REPLY)
+        reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.NO_SESSION))
         return
     name = record.terminal_name
+
+    def notice(reason: SessionNoticeReason) -> SessionNotice:
+        return SessionNotice(reason=reason, session_name=name)
+
     if not record.started_by_pan:
         thread_map.untie(conversation)
-        slack_post(slack, conversation, desk_session_done_reply(name))
+        reporter.report(conversation, notice(SessionNoticeReason.DESK_SESSION_UNTIED))
         logger.info(f"done untied desk session={name} conversation={conversation.key}")
         return
 
     terminal = _session_terminal(terminal_host, record)
     if terminal is not None and terminal.state is TerminalState.LIVE and not discard:
         if terminal.agent_status is AgentStatus.WORKING:
-            slack_post(slack, conversation, done_busy_reply(name))
+            reporter.report(conversation, notice(SessionNoticeReason.NOT_CLOSED_WORKING))
             raise SessionBusyError(f"{name} is still working; not closed")
         if terminal.agent_status is AgentStatus.BLOCKED:
-            slack_post(slack, conversation, done_blocked_reply(name))
+            reporter.report(conversation, notice(SessionNoticeReason.NOT_CLOSED_WAITING_ON_PROMPT))
             raise TargetBlockedError(f"{name} is waiting on a prompt; not closed")
 
     worktree_path = record.worktree_path
@@ -722,19 +682,11 @@ def done_thread(
     try:
         if worktree_path.exists():
             if not _is_pan_worktree(worktree_path, worktree_base):
-                slack_post(
-                    slack,
-                    conversation,
-                    f"{name}'s folder is not in pan's worktree folder; pan never removes it.",
-                )
+                reporter.report(conversation, notice(SessionNoticeReason.FOLDER_OUTSIDE_WORKTREES))
                 raise UnsafeWorktreeError(f"{worktree_path} is not under {worktree_base}")
             worktree = git.worktree_status(worktree_path)
             if worktree.is_main_worktree:
-                slack_post(
-                    slack,
-                    conversation,
-                    f"{name}'s folder is a main repository; pan never removes it.",
-                )
+                reporter.report(conversation, notice(SessionNoticeReason.FOLDER_IS_MAIN_REPOSITORY))
                 raise UnsafeWorktreeError(f"{worktree_path} is a main worktree")
             repo = worktree.main_repo
         else:
@@ -742,7 +694,7 @@ def done_thread(
         if repo is not None:
             branch = git.branch_status(repo, name)
     except GitWorktreeError:
-        slack_post(slack, conversation, f"Could not read {name}'s worktree; kept it.")
+        reporter.report(conversation, notice(SessionNoticeReason.WORKTREE_UNREADABLE))
         raise
 
     uncommitted_count = len(uncommitted_paths(worktree)) if worktree is not None else 0
@@ -750,7 +702,14 @@ def done_thread(
     if worktree is not None:
         unpushed_count += worktree.detached_commits
     if (uncommitted_count or unpushed_count) and not discard:
-        slack_post(slack, conversation, kept_reply(name, uncommitted_count, unpushed_count))
+        reporter.report(
+            conversation,
+            WorkKept(
+                session_name=name,
+                uncommitted_files=uncommitted_count,
+                unpushed_commits=unpushed_count,
+            ),
+        )
         raise UnsavedWorkError(
             f"{name} has {uncommitted_count} uncommitted file(s) and "
             f"{unpushed_count} unpushed commit(s); not closed"
@@ -776,24 +735,22 @@ def done_thread(
         # and its tie (so `@pan done` retries from where it stopped), and forgets the removed
         # terminal's address, so nothing is ever sent to a terminal now at that address.
         thread_map.put(record.model_copy(update={"terminal_address": ""}))
-        slack_post(
-            slack,
-            conversation,
-            f"Closed {name}, but could not remove its worktree or branch; "
-            f"send `@pan done` to try again, or remove {worktree_path} by hand.",
-        )
+        reporter.report(conversation, CleanupFailed(session_name=name, worktree_path=worktree_path))
         raise
 
     thread_map.update_status(conversation, WorkerStatus.DONE, session_name=name)
     thread_map.untie(conversation)
     publish_status(
-        slack=slack, thread_map=thread_map, record=record, state=StatusState.CLOSED, clock=clock
+        reporter=reporter,
+        thread_map=thread_map,
+        record=record,
+        state=StatusState.CLOSED,
+        clock=clock,
     )
-    slack_post(
-        slack,
+    reporter.report(
         conversation,
-        closed_reply(
-            name,
+        SessionClosed(
+            session_name=name,
             worktree_removed=worktree_removed,
             branch_deleted=branch_deleted,
             repo_known=repo is not None,

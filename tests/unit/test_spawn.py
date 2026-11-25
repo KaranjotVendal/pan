@@ -7,13 +7,12 @@ from pathlib import Path
 
 import pytest
 from git_worktree_fakes import FakeGitWorktree
-from slack_fakes import RecordingSlack
+from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.backend.spawn import (
     RELAYED_FOLLOW_UP_SENTENCE,
     ClaudeLauncher,
-    desk_session_ended_reply,
     inbox_thread_name,
     reopen_worker,
     slack_thread_paragraph,
@@ -28,15 +27,23 @@ from pan.core.errors import (
     TerminalHostError,
     TerminalNameTakenError,
 )
+from pan.core.events import (
+    PrivateDetails,
+    SessionNotice,
+    SessionNoticeReason,
+    StartAction,
+    StartFailed,
+    StatusChanged,
+)
 from pan.core.models import (
     Conversation,
     ReplyMode,
+    StatusState,
     TerminalState,
     ThreadRecord,
     WorkerStatus,
 )
 from pan.data.adapters.hc import HcError
-from pan.frontend.slack_format import to_slack_mrkdwn
 
 _FIXED_NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1718000000.000200"
@@ -70,10 +77,6 @@ class FakeThreadMap:
         self.records[conversation.id] = record.model_copy(update={"status_message_ts": message_ts})
 
 
-class FakeSlack(RecordingSlack):
-    pass
-
-
 class FakeClock:
     def now(self) -> datetime:
         return _FIXED_NOW
@@ -90,7 +93,7 @@ def _spawn(
     terminal_host: FakeTerminalHost,
     git: FakeGitWorktree,
     thread_map: FakeThreadMap | None = None,
-    slack: FakeSlack | None = None,
+    reporter: RecordingReporter | None = None,
     stream: str | None = "backend",
     app_space: str | None = None,
     task: str = "do the thing",
@@ -109,7 +112,7 @@ def _spawn(
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map if thread_map is not None else FakeThreadMap(),
-        slack=slack if slack is not None else FakeSlack(),
+        reporter=reporter if reporter is not None else RecordingReporter(),
         clock=FakeClock(),
         id_gen=FakeIdGen(),
         requester="U0TEST",
@@ -122,10 +125,14 @@ def _spawn(
 def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path: Path) -> None:
     terminal_host = FakeTerminalHost()
     git = _fake_git(terminal_host.timeline)
-    thread_map, slack = FakeThreadMap(), FakeSlack()
+    thread_map, reporter = FakeThreadMap(), RecordingReporter()
 
     record = _spawn(
-        base=tmp_path, terminal_host=terminal_host, git=git, thread_map=thread_map, slack=slack
+        base=tmp_path,
+        terminal_host=terminal_host,
+        git=git,
+        thread_map=thread_map,
+        reporter=reporter,
     )
 
     assert terminal_host.timeline == ["worktree", "run"]
@@ -157,27 +164,33 @@ def test_spawn_worker_runs_claude_in_a_labelled_terminal_and_records_it(tmp_path
     assert record.inbox_thread_id is None
     assert record.status_label == "do the thing"
     assert record.task_started_at == _FIXED_NOW
-    # The record ties the thread to the session (INV-7). The thread gets one status message
-    # (Working) and no plain post; the Inbox thread and terminal go only to the requester.
+    # The record ties the thread to the session (INV-7). The thread gets one status (Working)
+    # and nothing else; the Inbox thread and terminal go only to the requester.
     assert record.status_message_ts == "status-1"
     assert thread_map.records[_THREAD] == record
     assert thread_map.ties == [_THREAD]
-    assert slack.posts == []
-    (status_post,) = slack.status_posts
-    assert (status_post.channel, status_post.thread_ts) == ("C1", _THREAD)
-    assert status_post.text == "Working: do the thing"
-    assert status_post.blocks[0]["text"]["text"] == "*Working*\ndo the thing"
-    assert slack.ephemerals == [
+    assert reporter.reports == [
         (
-            "C1",
-            _THREAD,
-            "U0TEST",
-            "Details for pan-backend (only visible to you)\n"
-            'Inbox thread: "pan-backend: do the thing"\n'
-            "Terminal: t101",
-        )
+            Conversation.slack(_THREAD, "C1"),
+            StatusChanged(
+                state=StatusState.WORKING,
+                session_name="pan-backend",
+                label="do the thing",
+                task_started_at=_FIXED_NOW,
+                updated_at=_FIXED_NOW,
+            ),
+        ),
+        (
+            Conversation.slack(_THREAD, "C1"),
+            PrivateDetails(
+                requester="U0TEST",
+                session_name="pan-backend",
+                terminal_address="t101",
+                inbox_thread_name="pan-backend: do the thing",
+                inbox_thread_known=True,
+            ),
+        ),
     ]
-    assert "localhost" not in status_post.text
 
 
 @pytest.mark.parametrize(
@@ -203,21 +216,21 @@ def test_spawn_sets_the_reply_mode_from_the_request(
     expected_mode: ReplyMode,
 ) -> None:
     terminal_host = FakeTerminalHost()
-    slack = FakeSlack()
+    reporter = RecordingReporter()
 
     record = _spawn(
         base=tmp_path,
         terminal_host=terminal_host,
         git=_fake_git(terminal_host.timeline),
-        slack=slack,
+        reporter=reporter,
         task=task,
         request_text=request_text,
         reply_in_slack=reply_in_slack,
     )
 
     assert record.reply_mode is expected_mode
-    context_text = slack.status_posts[0].blocks[1]["elements"][0]["text"]
-    assert context_text.endswith("answers posted here") is (expected_mode is ReplyMode.SLACK)
+    (status,) = reporter.of_type(StatusChanged)
+    assert status.replies_in_thread is (expected_mode is ReplyMode.SLACK)
     (run,) = terminal_host.runs
     assert run.argv[1] == worker_brief(record.inbox_thread_name or "", task, expected_mode)
 
@@ -327,7 +340,7 @@ def test_worker_inbox_link_matcher_matches_the_inbox_tool_and_the_repl_tool(
 def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Path) -> None:
     terminal_host = FakeTerminalHost()
     terminal_host.add(make_terminal("t5", name="pan-backend"))
-    thread_map, slack = FakeThreadMap(), FakeSlack()
+    thread_map, reporter = FakeThreadMap(), RecordingReporter()
 
     with pytest.raises(SpawnError, match="stream name in use"):
         _spawn(
@@ -335,7 +348,7 @@ def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Pa
             terminal_host=terminal_host,
             git=_fake_git(terminal_host.timeline),
             thread_map=thread_map,
-            slack=slack,
+            reporter=reporter,
         )
 
     assert terminal_host.timeline == []
@@ -343,8 +356,8 @@ def test_a_live_terminal_holding_the_name_fails_before_any_worktree(tmp_path: Pa
     # No session started, so the thread is left untied.
     assert thread_map.records[_THREAD].tied is False
     assert thread_map.ties == []
-    assert slack.posts == [
-        ("C1", _THREAD, "spawn failed for stream pan-backend: stream name in use")
+    assert reporter.events() == [
+        StartFailed(action=StartAction.SPAWN, session_name="pan-backend", name_in_use=True)
     ]
 
 
@@ -367,7 +380,7 @@ def test_terminal_host_failure_wraps_as_spawn_error_and_marks_failed(
     tmp_path: Path, run_error: TerminalHostError
 ) -> None:
     terminal_host = FakeTerminalHost(errors={"run": run_error})
-    thread_map, slack = FakeThreadMap(), FakeSlack()
+    thread_map, reporter = FakeThreadMap(), RecordingReporter()
 
     with pytest.raises(SpawnError):
         _spawn(
@@ -375,15 +388,22 @@ def test_terminal_host_failure_wraps_as_spawn_error_and_marks_failed(
             terminal_host=terminal_host,
             git=_fake_git(terminal_host.timeline),
             thread_map=thread_map,
-            slack=slack,
+            reporter=reporter,
         )
 
     failed = thread_map.records[_THREAD]
     assert failed.status is WorkerStatus.FAILED
     assert failed.terminal_address == ""
     assert failed.conversation == Conversation.slack(_THREAD, "C1")
-    assert len(slack.posts) == 1
-    assert slack.posts[0][0:2] == ("C1", _THREAD)
+    name_in_use = isinstance(run_error, TerminalNameTakenError)
+    assert reporter.reports == [
+        (
+            Conversation.slack(_THREAD, "C1"),
+            StartFailed(
+                action=StartAction.SPAWN, session_name="pan-backend", name_in_use=name_in_use
+            ),
+        )
+    ]
 
 
 def test_git_failure_wraps_as_spawn_error_and_never_runs(tmp_path: Path) -> None:
@@ -427,7 +447,7 @@ def _reopen(
     record: ThreadRecord,
     terminal_host: FakeTerminalHost,
     thread_map: FakeThreadMap,
-    slack: FakeSlack,
+    reporter: RecordingReporter,
     *,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
@@ -438,7 +458,7 @@ def _reopen(
         terminal_host=terminal_host,
         launcher=ClaudeLauncher(terminal_host),
         thread_map=thread_map,
-        slack=slack,
+        reporter=reporter,
         clock=LaterClock(),
         reply_in_slack=reply_in_slack,
     )
@@ -448,10 +468,10 @@ def _reopen(
 def test_reopen_continues_the_conversation_in_the_same_worktree(
     tmp_path: Path, status: WorkerStatus
 ) -> None:
-    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, reporter = FakeTerminalHost(), FakeThreadMap(), RecordingReporter()
     record = _finished_record(tmp_path, status)
 
-    reopened = _reopen(record, terminal_host, thread_map, slack)
+    reopened = _reopen(record, terminal_host, thread_map, reporter)
 
     (run,) = terminal_host.runs
     assert run.name == "pan-backend"
@@ -465,63 +485,66 @@ def test_reopen_continues_the_conversation_in_the_same_worktree(
     assert reopened.status_label == "also update the docs"
     assert thread_map.records[_THREAD] == reopened
     assert thread_map.ties == [_THREAD]
-    # The thread's status message says Working again; no plain ack is posted.
-    assert slack.posts == []
-    assert slack.status_texts() == ["Working: also update the docs"]
+    # The thread's status message says Working again; nothing else is reported.
+    assert reporter.states() == [StatusState.WORKING]
+    assert [status.label for status in reporter.of_type(StatusChanged)] == ["also update the docs"]
+    assert len(reporter.events()) == 1
 
 
 def test_reopen_edits_the_status_message_the_thread_already_has(tmp_path: Path) -> None:
-    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, reporter = FakeTerminalHost(), FakeThreadMap(), RecordingReporter()
     record = _finished_record(tmp_path).model_copy(
         update={"status_message_ts": "1718000000.000300"}
     )
 
-    reopened = _reopen(record, terminal_host, thread_map, slack)
+    reopened = _reopen(record, terminal_host, thread_map, reporter)
 
-    assert slack.status_posts == []
-    assert [(ts, text) for _channel, ts, _blocks, text in slack.status_updates] == [
-        ("1718000000.000300", "Working: also update the docs")
+    assert [status.status_message_id for status in reporter.of_type(StatusChanged)] == [
+        "1718000000.000300"
     ]
     assert reopened.status_message_ts == "1718000000.000300"
 
 
 @pytest.mark.parametrize(
-    "missing_worktree, live_name_holder, expected_notice",
-    [
-        (True, False, "reopen failed for stream pan-backend"),
-        (False, True, "reopen failed for stream pan-backend: stream name in use"),
-    ],
+    "missing_worktree, live_name_holder",
+    [(True, False), (False, True)],
     ids=["worktree-missing", "name-in-use"],
 )
-def test_reopen_failure_posts_and_leaves_the_record(
-    tmp_path: Path, missing_worktree: bool, live_name_holder: bool, expected_notice: str
+def test_reopen_failure_is_reported_and_leaves_the_record(
+    tmp_path: Path, missing_worktree: bool, live_name_holder: bool
 ) -> None:
-    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, reporter = FakeTerminalHost(), FakeThreadMap(), RecordingReporter()
     if live_name_holder:
         terminal_host.add(make_terminal("t5", name="pan-backend"))
     worktree = tmp_path / "gone" if missing_worktree else tmp_path
     record = _finished_record(worktree)
 
     with pytest.raises(SpawnError):
-        _reopen(record, terminal_host, thread_map, slack)
+        _reopen(record, terminal_host, thread_map, reporter)
 
     assert terminal_host.runs == []
     assert thread_map.records == {}
-    assert slack.posts == [("C1", _THREAD, expected_notice)]
+    assert reporter.events() == [
+        StartFailed(
+            action=StartAction.REOPEN, session_name="pan-backend", name_in_use=live_name_holder
+        )
+    ]
 
 
 def test_reopen_never_restarts_a_session_pan_did_not_start(tmp_path: Path) -> None:
-    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, reporter = FakeTerminalHost(), FakeThreadMap(), RecordingReporter()
     record = _finished_record(tmp_path).model_copy(
         update={"terminal_name": "desk-api", "started_by_pan": False}
     )
 
     with pytest.raises(NotPanSessionError):
-        _reopen(record, terminal_host, thread_map, slack)
+        _reopen(record, terminal_host, thread_map, reporter)
 
     assert terminal_host.runs == []
     assert thread_map.records == {}
-    assert slack.posts == [("C1", _THREAD, to_slack_mrkdwn(desk_session_ended_reply("desk-api")))]
+    assert reporter.events() == [
+        SessionNotice(reason=SessionNoticeReason.DESK_SESSION_ENDED, session_name="desk-api")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -611,16 +634,18 @@ def test_reopen_reply_in_slack_is_saved_only_when_the_launch_succeeds(
     worktree_exists: bool,
     expected_mode: ReplyMode,
 ) -> None:
-    terminal_host, thread_map, slack = FakeTerminalHost(), FakeThreadMap(), FakeSlack()
+    terminal_host, thread_map, reporter = FakeTerminalHost(), FakeThreadMap(), RecordingReporter()
     worktree = tmp_path if worktree_exists else tmp_path / "gone"
     record = _finished_record(worktree).model_copy(update={"reply_mode": initial_mode})
     thread_map.put(record)
 
     if worktree_exists:
-        reopened = _reopen(record, terminal_host, thread_map, slack, reply_in_slack=reply_in_slack)
+        reopened = _reopen(
+            record, terminal_host, thread_map, reporter, reply_in_slack=reply_in_slack
+        )
         assert reopened.reply_mode is expected_mode
     else:
         with pytest.raises(SpawnError):
-            _reopen(record, terminal_host, thread_map, slack, reply_in_slack=reply_in_slack)
+            _reopen(record, terminal_host, thread_map, reporter, reply_in_slack=reply_in_slack)
 
     assert thread_map.records[_THREAD].reply_mode is expected_mode

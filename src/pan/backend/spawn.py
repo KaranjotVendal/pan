@@ -13,6 +13,7 @@ from pan.core.errors import (
     TerminalHostError,
     TerminalNameTakenError,
 )
+from pan.core.events import SessionNotice, SessionNoticeReason, StartAction, StartFailed
 from pan.core.models import (
     Conversation,
     ReplyMode,
@@ -27,12 +28,10 @@ from pan.core.seams import (
     Clock,
     GitWorktreeAdapter,
     IdGen,
-    SlackAdapter,
+    Reporter,
     TerminalHost,
     ThreadMap,
 )
-from pan.frontend.gateway.slack_post import slack_post  # noqa: TID251
-from pan.frontend.slack_render import status_label  # noqa: TID251
 from pan.utils.config import (
     HERDR_SPACE_LABEL,
     INBOX_THREAD_TASK_MAX_LENGTH,
@@ -49,6 +48,7 @@ from pan.utils.config import (
     WORKER_SETTINGS_RELATIVE_PATH,
 )
 from pan.utils.logging import initialise_logger
+from pan.utils.text import status_label
 
 logger = initialise_logger(__name__)
 
@@ -167,11 +167,11 @@ def worker_brief(
     return f"{preamble}{WORKER_BRIEF_TASK_MARKER}{task}"
 
 
-def desk_session_ended_reply(name: str) -> str:
-    return (
-        f"{name} has ended, and pan does not reopen sessions it did not start; "
-        "start one with @pan new: <task>, or send to another with @pan to <name>: <task>"
-    )
+def start_failed_text(failure: StartFailed) -> str:
+    # The one wording of a failed spawn or reopen: the SpawnError message, and the line the
+    # reporter posts in the thread.
+    notice = f"{failure.action.value} failed for stream {failure.session_name}"
+    return f"{notice}: stream name in use" if failure.name_in_use else notice
 
 
 def worker_labels(conversation: Conversation, app_space: str | None) -> dict[str, str]:
@@ -227,7 +227,7 @@ def spawn_worker(
     terminal_host: TerminalHost,
     launcher: AgentLauncher,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
     id_gen: IdGen,
     requester: str | None = None,
@@ -268,7 +268,7 @@ def spawn_worker(
         # Record the failed attempt so the thread map still reflects it (the worktree may
         # not exist, so record its intended path) and surface it. No session started, so the
         # thread stays untied: a later plain request starts a new session.
-        reason = "stream name in use" if isinstance(error, TerminalNameTakenError) else None
+        name_in_use = isinstance(error, TerminalNameTakenError)
         failed_record = ThreadRecord(
             conversation=conversation,
             terminal_name=name,
@@ -282,10 +282,9 @@ def spawn_worker(
             reply_mode=reply_mode,
         )
         thread_map.put(failed_record)
-        notice = f"spawn failed for stream {name}"
-        if reason is not None:
-            notice = f"{notice}: {reason}"
-        slack_post(slack, conversation, notice)
+        failure = StartFailed(action=StartAction.SPAWN, session_name=name, name_in_use=name_in_use)
+        notice = start_failed_text(failure)
+        reporter.report(conversation, failure)
         logger.info(f"spawn failed stream={name} conversation={conversation.key}")
         raise SpawnError(notice) from error
 
@@ -310,13 +309,13 @@ def spawn_worker(
     # The thread's status message (Working), and the Inbox thread and terminal only to the
     # requester: they are on this machine and mean nothing to anyone else in the channel.
     record = publish_status(
-        slack=slack,
+        reporter=reporter,
         thread_map=thread_map,
         record=record,
         state=StatusState.WORKING,
         clock=clock,
     )
-    send_private_details(slack=slack, record=record)
+    send_private_details(reporter=reporter, record=record)
     logger.info(f"spawn stream={name} terminal={terminal.address} conversation={conversation.key}")
     return record
 
@@ -336,7 +335,7 @@ def reopen_worker(
     terminal_host: TerminalHost,
     launcher: AgentLauncher,
     thread_map: ThreadMap,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
     reply_in_slack: bool = False,
 ) -> ThreadRecord:
@@ -349,7 +348,10 @@ def reopen_worker(
     # it is, and a failed reopen changes nothing.
     name = record.terminal_name
     if not record.started_by_pan:
-        slack_post(slack, record.conversation, desk_session_ended_reply(name))
+        reporter.report(
+            record.conversation,
+            SessionNotice(reason=SessionNoticeReason.DESK_SESSION_ENDED, session_name=name),
+        )
         raise NotPanSessionError(f"{name} was not started by pan; not reopened")
     reply_mode = upgraded_reply_mode(record, reply_in_slack=reply_in_slack)
     try:
@@ -364,10 +366,10 @@ def reopen_worker(
             continue_session=True,
         )
     except (SpawnError, TerminalHostError) as error:
-        notice = f"reopen failed for stream {name}"
-        if isinstance(error, TerminalNameTakenError):
-            notice = f"{notice}: stream name in use"
-        slack_post(slack, record.conversation, notice)
+        name_in_use = isinstance(error, TerminalNameTakenError)
+        failure = StartFailed(action=StartAction.REOPEN, session_name=name, name_in_use=name_in_use)
+        notice = start_failed_text(failure)
+        reporter.report(record.conversation, failure)
         logger.info(f"reopen failed stream={name} conversation={record.conversation.key}")
         raise SpawnError(notice) from error
 
@@ -384,7 +386,7 @@ def reopen_worker(
     )
     thread_map.tie(reopened)
     reopened = publish_status(
-        slack=slack,
+        reporter=reporter,
         thread_map=thread_map,
         record=reopened,
         state=StatusState.WORKING,

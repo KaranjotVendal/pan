@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from slack_fakes import RecordingSlack
+from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost
 
 from pan.backend.session_control import done_thread
 from pan.core.errors import GitWorktreeError, PanError, SpawnError, UnsavedWorkError
-from pan.core.models import BranchStatus, Conversation, ThreadRecord, WorkerStatus
+from pan.core.events import Event, SessionClosed, StatusChanged, WorkKept
+from pan.core.models import BranchStatus, Conversation, StatusState, ThreadRecord, WorkerStatus
 from pan.data.adapters.git_worktree import ShellGitWorktreeAdapter
 from pan.data.threadmap import FileThreadMap
 
@@ -424,35 +425,29 @@ def _delete_folder(worktree: Path, main_repo: Path) -> None:
     shutil.rmtree(worktree)
 
 
+def _closed(*, worktree_removed: bool) -> SessionClosed:
+    # The branch is always deleted from the known repository.
+    return SessionClosed(
+        session_name=_BRANCH,
+        worktree_removed=worktree_removed,
+        branch_deleted=True,
+        repo_known=True,
+    )
+
+
 @pytest.mark.parametrize(
-    "prepare, discard, expected_reply, expect_closed",
+    "prepare, discard, expected_event, expect_closed",
     [
-        (_no_change, False, f"Closed {_BRANCH} and removed its worktree and branch.", True),
-        (
-            _commit_only,
-            True,
-            f"Closed {_BRANCH} and removed its worktree and branch.",
-            True,
-        ),
+        (_no_change, False, _closed(worktree_removed=True), True),
+        (_commit_only, True, _closed(worktree_removed=True), True),
         (
             _commit_only,
             False,
-            f"{_BRANCH} has 1 unpushed commit; kept it. "
-            "Push or commit them, or send `@pan done --discard`.",
+            WorkKept(session_name=_BRANCH, uncommitted_files=0, unpushed_commits=1),
             False,
         ),
-        (
-            _commit_then_delete_remote_branch,
-            False,
-            f"Closed {_BRANCH} and removed its worktree and branch.",
-            True,
-        ),
-        (
-            _delete_folder,
-            False,
-            f"Closed {_BRANCH} and removed its branch; its worktree was already gone.",
-            True,
-        ),
+        (_commit_then_delete_remote_branch, False, _closed(worktree_removed=True), True),
+        (_delete_folder, False, _closed(worktree_removed=False), True),
     ],
     ids=[
         "clean",
@@ -468,7 +463,7 @@ def test_done_thread_with_real_git(
     tmp_path: Path,
     prepare: Callable[[Path, Path], None],
     discard: bool,
-    expected_reply: str,
+    expected_event: Event,
     expect_closed: bool,
 ) -> None:
     prepare(worktree, main_repo)
@@ -485,7 +480,7 @@ def test_done_thread_with_real_git(
             updated_at=clock.now(),
         )
     )
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     try:
         done_thread(
@@ -496,14 +491,16 @@ def test_done_thread_with_real_git(
             thread_map=thread_map,
             terminal_host=FakeTerminalHost(),
             git=ShellGitWorktreeAdapter(),
-            slack=slack,
+            reporter=reporter,
             clock=clock,
         )
     except UnsavedWorkError:
         assert not expect_closed
 
-    assert slack.texts() == [expected_reply]
-    assert slack.status_texts() == (["Closed"] if expect_closed else [])
+    assert [event for event in reporter.events() if not isinstance(event, StatusChanged)] == [
+        expected_event
+    ]
+    assert reporter.states() == ([StatusState.CLOSED] if expect_closed else [])
     assert worktree.exists() is not expect_closed
     branch_listing = _git(main_repo, "branch", "--list", _BRANCH)
     assert (branch_listing == "") is expect_closed

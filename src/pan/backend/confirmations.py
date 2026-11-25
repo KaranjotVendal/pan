@@ -15,6 +15,15 @@ from pan.core.errors import (
     TargetNotFoundError,
     UnansweredQuestionError,
 )
+from pan.core.events import (
+    ChoiceUnclear,
+    NoSessionMatches,
+    QuestionAsked,
+    SessionNotice,
+    SessionNoticeReason,
+    ThreadNotice,
+    ThreadNoticeReason,
+)
 from pan.core.models import (
     ConfirmationCandidate,
     Conversation,
@@ -27,20 +36,15 @@ from pan.core.seams import (
     Clock,
     InboxDirectory,
     PendingConfirmations,
-    SlackAdapter,
+    Reporter,
     TerminalHost,
     ThreadMap,
 )
-from pan.frontend.gateway.slack_post import slack_post  # noqa: TID251
 from pan.utils.config import CONFIRMATION_MAX_CANDIDATES, CONFIRMATION_TIMEOUT
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
 
-# How to start new work instead, offered when a `to` selector matches no session at all.
-NEW_WORK_HINT = "@pan new: <your text>"
-NOT_SENT_REPLY = "Not sent."
-EXPIRED_REPLY = "Not sent: that question expired. Send the message again."
 # `pan confirm --choice`: `yes` (or `y`) picks the only proposed session, a number picks one.
 CONFIRM_YES = "yes"
 _YES_WORDS = frozenset({"yes", "y"})
@@ -185,30 +189,6 @@ def candidate_label(terminal: Terminal) -> str:
     return f"{name} ({shown})" if shown else name
 
 
-def no_match_reply(selector: str) -> str:
-    return f'no session matches "{selector}"; to start new work send `{NEW_WORK_HINT}`'
-
-
-def _numbers_phrase(count: int) -> str:
-    numbers = [str(number) for number in range(1, count + 1)]
-    return f"{', '.join(numbers[:-1])} or {numbers[-1]}"
-
-
-def question_text(candidates: list[ConfirmationCandidate]) -> str:
-    if len(candidates) == 1:
-        return f"Send this to {candidates[0].label}? Reply yes."
-    numbered = "\n".join(
-        f"{number}. {candidate.label}" for number, candidate in enumerate(candidates, start=1)
-    )
-    return f"Which session? Reply {_numbers_phrase(len(candidates))}:\n{numbered}"
-
-
-def _reask_text(candidates: list[ConfirmationCandidate]) -> str:
-    if len(candidates) == 1:
-        return "Reply yes to send it, or anything else to cancel."
-    return f"Reply {_numbers_phrase(len(candidates))} to choose, or anything else to cancel."
-
-
 def _live_terminals(terminal_host: TerminalHost) -> list[Terminal]:
     return [
         terminal
@@ -257,7 +237,7 @@ def propose_sessions(
     candidate_addresses: list[str],
     terminal_host: TerminalHost,
     confirmations: PendingConfirmations,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
 ) -> PendingConfirmation | None:
     # The orchestrator's guess for a named session with no exact match: store the task and
@@ -267,7 +247,7 @@ def propose_sessions(
     candidates = _valid_candidates(candidate_addresses, _live_terminals(terminal_host))
     if not candidates:
         confirmations.clear(conversation)
-        slack_post(slack, conversation, no_match_reply(selector))
+        reporter.report(conversation, NoSessionMatches(selector=selector))
         logger.info(f"proposal found no session conversation={conversation.key}")
         return None
     pending = PendingConfirmation(
@@ -281,7 +261,10 @@ def propose_sessions(
     )
     pending = pending.model_copy(update={"asked_at": pending.created_at})
     confirmations.put(pending)
-    slack_post(slack, conversation, question_text(candidates))
+    reporter.report(
+        conversation,
+        QuestionAsked(candidate_labels=[candidate.label for candidate in candidates]),
+    )
     logger.info(f"proposed sessions conversation={conversation.key} count={len(candidates)}")
     return pending
 
@@ -308,10 +291,6 @@ def _still_live(candidate: ConfirmationCandidate, terminals: list[Terminal]) -> 
     return False
 
 
-def _retry_hint(choice: str) -> str:
-    return f"reply {choice} again later, or anything else to cancel."
-
-
 def confirm_session(
     *,
     conversation: Conversation,
@@ -320,7 +299,7 @@ def confirm_session(
     thread_map: ThreadMap,
     inbox_directory: InboxDirectory,
     confirmations: PendingConfirmations,
-    slack: SlackAdapter,
+    reporter: Reporter,
     clock: Clock,
 ) -> ThreadRecord | None:
     # The person's `yes` or number for the thread's open question, as the orchestrator read
@@ -338,19 +317,21 @@ def confirm_session(
     pending = live_pending(stored, clock.now())
     if pending is None:
         confirmations.clear(conversation)
-        slack_post(slack, conversation, EXPIRED_REPLY)
+        reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.QUESTION_EXPIRED))
         return None
     _require_answer_for(pending, choice)
     chosen_index = _chosen_index(choice, len(pending.candidates))
     if chosen_index is None:
         confirmations.clear_answer(conversation, clock.now())
-        slack_post(slack, conversation, _reask_text(pending.candidates))
+        reporter.report(conversation, ChoiceUnclear(candidate_count=len(pending.candidates)))
         return None
     candidate = pending.candidates[chosen_index]
-    gone_reply = f"{candidate.label} is no longer running; not sent"
+    gone_notice = SessionNotice(
+        reason=SessionNoticeReason.PROPOSED_SESSION_GONE, session_name=candidate.label
+    )
     if not _still_live(candidate, _live_terminals(terminal_host)):
         confirmations.clear(conversation)
-        slack_post(slack, conversation, gone_reply)
+        reporter.report(conversation, gone_notice)
         raise TargetNotFoundError(f"proposed session {candidate.address} is gone")
     logger.info(f"confirmed session conversation={conversation.key} terminal={candidate.address}")
     try:
@@ -363,18 +344,18 @@ def confirm_session(
             terminal_host=terminal_host,
             thread_map=thread_map,
             inbox_directory=inbox_directory,
-            slack=slack,
+            reporter=reporter,
             clock=clock,
-            retry_hint=_retry_hint(choice),
+            retry_choice=choice,
         )
     except SessionBusyError, TargetBlockedError:
-        # The question stays open and the reply asked for an answer later: a new one.
+        # The question stays open and the refusal asked for an answer later: a new one.
         confirmations.clear_answer(conversation, clock.now())
         raise
     except NoExactMatchError as error:
         # Gone between the check and the send.
         confirmations.clear(conversation)
-        slack_post(slack, conversation, gone_reply)
+        reporter.report(conversation, gone_notice)
         raise TargetNotFoundError(f"proposed session {candidate.address} is gone") from error
     confirmations.clear(conversation)
     return tied
@@ -405,12 +386,12 @@ def _require_answer_for(pending: PendingConfirmation, choice: str) -> None:
 
 
 def cancel_confirmation(
-    *, conversation: Conversation, confirmations: PendingConfirmations, slack: SlackAdapter
+    *, conversation: Conversation, confirmations: PendingConfirmations, reporter: Reporter
 ) -> bool:
     # The person declined or moved on: drop the question and say nothing was sent. True when
     # there was one.
     if confirmations.get(conversation) is None:
         return False
     confirmations.clear(conversation)
-    slack_post(slack, conversation, NOT_SENT_REPLY)
+    reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.NOT_SENT))
     return True

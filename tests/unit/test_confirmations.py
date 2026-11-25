@@ -6,12 +6,10 @@ from pathlib import Path
 
 import pytest
 from inbox_fakes import FakeInboxDirectory
-from slack_fakes import RecordingSlack
+from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
 from pan.backend.confirmations import (
-    EXPIRED_REPLY,
-    NOT_SENT_REPLY,
     FilePendingConfirmations,
     cancel_confirmation,
     candidate_label,
@@ -20,7 +18,6 @@ from pan.backend.confirmations import (
     live_pending,
     normalize_choice,
     propose_sessions,
-    question_text,
 )
 from pan.core.errors import (
     SessionBusyError,
@@ -28,11 +25,26 @@ from pan.core.errors import (
     TargetNotFoundError,
     UnansweredQuestionError,
 )
+from pan.core.events import (
+    ChoiceUnclear,
+    Event,
+    NoSessionMatches,
+    NotDelivered,
+    NotDeliveredReason,
+    PrivateDetails,
+    QuestionAsked,
+    SessionNotice,
+    SessionNoticeReason,
+    StatusChanged,
+    ThreadNotice,
+    ThreadNoticeReason,
+)
 from pan.core.models import (
     AgentStatus,
     ConfirmationCandidate,
     Conversation,
     PendingConfirmation,
+    StatusState,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -110,7 +122,7 @@ _DOCS_CANDIDATE = ConfirmationCandidate(
 
 
 def _propose(
-    tmp_path: Path, terminal_host: FakeTerminalHost, slack: RecordingSlack, *addresses: str
+    tmp_path: Path, terminal_host: FakeTerminalHost, reporter: RecordingReporter, *addresses: str
 ) -> PendingConfirmation | None:
     return propose_sessions(
         conversation=_CONVERSATION,
@@ -121,7 +133,7 @@ def _propose(
         candidate_addresses=list(addresses),
         terminal_host=terminal_host,
         confirmations=_store(tmp_path),
-        slack=slack,
+        reporter=reporter,
         clock=SettableClock(),
     )
 
@@ -129,7 +141,7 @@ def _propose(
 def _confirm(
     tmp_path: Path,
     terminal_host: FakeTerminalHost,
-    slack: RecordingSlack,
+    reporter: RecordingReporter,
     choice: str,
     *,
     clock: SettableClock | None = None,
@@ -141,7 +153,7 @@ def _confirm(
         thread_map=FileThreadMap(tmp_path / "threads.json", SettableClock()),
         inbox_directory=FakeInboxDirectory(),
         confirmations=_store(tmp_path),
-        slack=slack,
+        reporter=reporter,
         clock=clock if clock is not None else SettableClock(),
     )
 
@@ -300,23 +312,6 @@ def test_candidate_label(terminal: Terminal, expected_label: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "candidates, expected_text",
-    [
-        ([_PAN_CANDIDATE], "Send this to stream-pan (work / 1, folder pan)? Reply yes."),
-        (
-            [_PAN_CANDIDATE, _DOCS_CANDIDATE],
-            "Which session? Reply 1 or 2:\n"
-            "1. stream-pan (work / 1, folder pan)\n"
-            "2. t4 (work / 2, folder docs)",
-        ),
-    ],
-    ids=["one", "two"],
-)
-def test_question_text(candidates: list[ConfirmationCandidate], expected_text: str) -> None:
-    assert question_text(candidates) == expected_text
-
-
-@pytest.mark.parametrize(
     "addresses, expected_candidates",
     [
         (["t3"], [_PAN_CANDIDATE]),
@@ -328,22 +323,24 @@ def test_propose_stores_the_question_and_asks_types_nothing(
     tmp_path: Path, addresses: list[str], expected_candidates: list[ConfirmationCandidate]
 ) -> None:
     terminal_host = _host(_pan_session(), _docs_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    _propose(tmp_path, terminal_host, slack, *addresses)
+    _propose(tmp_path, terminal_host, reporter, *addresses)
 
     stored = _store(tmp_path).get(_CONVERSATION)
     assert stored is not None
     assert stored.candidates == expected_candidates
     assert stored.task == "add the tests"
-    assert slack.texts() == [question_text(expected_candidates)]
+    assert reporter.events() == [
+        QuestionAsked(candidate_labels=[candidate.label for candidate in expected_candidates])
+    ]
     assert terminal_host.sent == []
 
 
 def test_propose_names_at_most_three_sessions(tmp_path: Path) -> None:
     terminals = [make_terminal(f"t{number}") for number in range(1, 6)]
 
-    pending = _propose(tmp_path, _host(*terminals), RecordingSlack(), "t1", "t2", "t3", "t4")
+    pending = _propose(tmp_path, _host(*terminals), RecordingReporter(), "t1", "t2", "t3", "t4")
 
     assert pending is not None
     assert [candidate.address for candidate in pending.candidates] == ["t1", "t2", "t3"]
@@ -357,14 +354,12 @@ def test_propose_with_no_live_candidate_says_no_session_matches(
 ) -> None:
     _store(tmp_path).put(_question(_PAN_CANDIDATE))
     terminal_host = _host(_pan_session(), make_terminal("t5", state=TerminalState.FINISHED))
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    assert _propose(tmp_path, terminal_host, slack, *addresses) is None
+    assert _propose(tmp_path, terminal_host, reporter, *addresses) is None
 
     assert _store(tmp_path).get(_CONVERSATION) is None
-    assert slack.texts() == [
-        'no session matches "pan docs"; to start new work send `@pan new: <your text>`'
-    ]
+    assert reporter.events() == [NoSessionMatches(selector="pan docs")]
 
 
 @pytest.mark.parametrize(
@@ -383,9 +378,9 @@ def test_confirm_sends_the_stored_task_and_ties_the_thread(
 ) -> None:
     _store(tmp_path).put(_question(*candidates, answer=choice))
     terminal_host = _host(_pan_session(), _docs_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    tied = _confirm(tmp_path, terminal_host, slack, choice)
+    tied = _confirm(tmp_path, terminal_host, reporter, choice)
 
     assert tied is not None
     assert tied.terminal_address == expected_address
@@ -395,33 +390,27 @@ def test_confirm_sends_the_stored_task_and_ties_the_thread(
     assert sent_text.startswith("From Slack via pan.")
     assert sent_text.endswith("add the tests")
     assert _store(tmp_path).get(_CONVERSATION) is None
-    assert slack.status_texts() == ["Working: add the tests"]
-    assert [ephemeral[2] for ephemeral in slack.ephemerals] == ["U0TEST"]
+    assert reporter.states() == [StatusState.WORKING]
+    assert [status.label for status in reporter.of_type(StatusChanged)] == ["add the tests"]
+    assert [details.requester for details in reporter.of_type(PrivateDetails)] == ["U0TEST"]
 
 
 @pytest.mark.parametrize(
-    "candidates, choice, expected_reply",
-    [
-        (
-            [_PAN_CANDIDATE, _DOCS_CANDIDATE],
-            "yes",
-            "Reply 1 or 2 to choose, or anything else to cancel.",
-        ),
-        ([_PAN_CANDIDATE], "2", "Reply yes to send it, or anything else to cancel."),
-    ],
+    "candidates, choice",
+    [([_PAN_CANDIDATE, _DOCS_CANDIDATE], "yes"), ([_PAN_CANDIDATE], "2")],
     ids=["yes-to-several", "number-out-of-range"],
 )
 def test_confirm_with_a_reply_that_picks_nothing_asks_again(
-    tmp_path: Path, candidates: list[ConfirmationCandidate], choice: str, expected_reply: str
+    tmp_path: Path, candidates: list[ConfirmationCandidate], choice: str
 ) -> None:
     _store(tmp_path).put(_question(*candidates, answer=choice))
     terminal_host = _host(_pan_session(), _docs_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    assert _confirm(tmp_path, terminal_host, slack, choice) is None
+    assert _confirm(tmp_path, terminal_host, reporter, choice) is None
 
     assert terminal_host.sent == []
-    assert slack.texts() == [expected_reply]
+    assert reporter.events() == [ChoiceUnclear(candidate_count=len(candidates))]
     # Asked again, so the reply that picked nothing no longer answers it.
     assert _store(tmp_path).get(_CONVERSATION) == _question(
         *candidates, answer=None, asked_again_at=_ASKED_AT
@@ -478,36 +467,36 @@ def test_confirm_refuses_without_an_answer_that_picks_the_choice(
 ) -> None:
     _store(tmp_path).put(_question(_PAN_CANDIDATE, _DOCS_CANDIDATE, answer=answer))
     terminal_host = _host(_pan_session(), _docs_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(UnansweredQuestionError):
-        _confirm(tmp_path, terminal_host, slack, choice)
+        _confirm(tmp_path, terminal_host, reporter, choice)
 
     assert terminal_host.sent == []
-    assert slack.texts() == []
+    assert reporter.events() == []
     assert _store(tmp_path).get(_CONVERSATION) is not None
 
 
 def test_confirm_with_no_question_posts_nothing(tmp_path: Path) -> None:
     terminal_host = _host(_pan_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    assert _confirm(tmp_path, terminal_host, slack, "yes") is None
+    assert _confirm(tmp_path, terminal_host, reporter, "yes") is None
 
     assert terminal_host.sent == []
-    assert slack.texts() == []
+    assert reporter.events() == []
 
 
 def test_confirm_after_the_question_expired_sends_nothing(tmp_path: Path) -> None:
     _store(tmp_path).put(_question(_PAN_CANDIDATE))
     terminal_host = _host(_pan_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     clock = SettableClock(_ASKED_AT + timedelta(minutes=31))
-    assert _confirm(tmp_path, terminal_host, slack, "yes", clock=clock) is None
+    assert _confirm(tmp_path, terminal_host, reporter, "yes", clock=clock) is None
 
     assert terminal_host.sent == []
-    assert slack.texts() == [EXPIRED_REPLY]
+    assert reporter.events() == [ThreadNotice(reason=ThreadNoticeReason.QUESTION_EXPIRED)]
     assert _store(tmp_path).get(_CONVERSATION) is None
 
 
@@ -533,33 +522,36 @@ def test_confirm_to_a_session_no_longer_running_sends_nothing(
 ) -> None:
     _store(tmp_path).put(_question(candidate))
     terminal_host = _host(*terminals)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(TargetNotFoundError):
-        _confirm(tmp_path, terminal_host, slack, "yes")
+        _confirm(tmp_path, terminal_host, reporter, "yes")
 
     assert terminal_host.sent == []
-    assert slack.texts() == [f"{candidate.label} is no longer running; not sent"]
+    assert reporter.events() == [
+        SessionNotice(
+            reason=SessionNoticeReason.PROPOSED_SESSION_GONE, session_name=candidate.label
+        )
+    ]
     assert _store(tmp_path).get(_CONVERSATION) is None
 
 
 @pytest.mark.parametrize(
-    "candidates, choice, session, expected_error, expected_reply",
+    "candidates, choice, session, expected_error, expected_reason",
     [
         (
             [_PAN_CANDIDATE],
             "yes",
             _pan_session(agent_status=AgentStatus.WORKING),
             SessionBusyError,
-            "stream-pan is busy; reply yes again later, or anything else to cancel.",
+            NotDeliveredReason.BUSY,
         ),
         (
             [_DOCS_CANDIDATE, _PAN_CANDIDATE],
             "2",
             _pan_session(agent_status=AgentStatus.BLOCKED),
             TargetBlockedError,
-            "stream-pan is waiting on a prompt at the terminal; nothing was sent; "
-            "reply 2 again later, or anything else to cancel.",
+            NotDeliveredReason.WAITING_ON_PROMPT,
         ),
     ],
     ids=["busy", "waiting-on-a-prompt"],
@@ -570,17 +562,20 @@ def test_confirm_to_a_session_not_ready_keeps_the_question_open(
     choice: str,
     session: Terminal,
     expected_error: type[Exception],
-    expected_reply: str,
+    expected_reason: NotDeliveredReason,
 ) -> None:
     _store(tmp_path).put(_question(*candidates, answer=choice))
     terminal_host = _host(session, _docs_session())
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     with pytest.raises(expected_error):
-        _confirm(tmp_path, terminal_host, slack, choice)
+        _confirm(tmp_path, terminal_host, reporter, choice)
 
     assert terminal_host.sent == []
-    assert slack.texts() == [expected_reply]
+    # The refusal says to send the same choice again later.
+    assert reporter.events() == [
+        NotDelivered(reason=expected_reason, session_name="stream-pan", retry_choice=choice)
+    ]
     # Still open, but the person must answer again.
     assert _store(tmp_path).get(_CONVERSATION) == _question(
         *candidates, answer=None, asked_again_at=_ASKED_AT
@@ -588,26 +583,29 @@ def test_confirm_to_a_session_not_ready_keeps_the_question_open(
 
 
 @pytest.mark.parametrize(
-    "question, expected_cancelled, expected_texts",
-    [(_question(_PAN_CANDIDATE), True, [NOT_SENT_REPLY]), (None, False, [])],
+    "question, expected_cancelled, expected_events",
+    [
+        (_question(_PAN_CANDIDATE), True, [ThreadNotice(reason=ThreadNoticeReason.NOT_SENT)]),
+        (None, False, []),
+    ],
     ids=["open-question", "no-question"],
 )
 def test_cancel_confirmation(
     tmp_path: Path,
     question: PendingConfirmation | None,
     expected_cancelled: bool,
-    expected_texts: list[str],
+    expected_events: list[Event],
 ) -> None:
     if question is not None:
         _store(tmp_path).put(question)
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
     cancelled = cancel_confirmation(
-        conversation=_CONVERSATION, confirmations=_store(tmp_path), slack=slack
+        conversation=_CONVERSATION, confirmations=_store(tmp_path), reporter=reporter
     )
 
     assert cancelled is expected_cancelled
-    assert slack.texts() == expected_texts
+    assert reporter.events() == expected_events
     assert _store(tmp_path).get(_CONVERSATION) is None
 
 
@@ -628,9 +626,9 @@ def test_is_answer_counts_only_replies_after_pan_last_asked(
 
 
 def test_propose_records_when_it_asked(tmp_path: Path) -> None:
-    slack = RecordingSlack()
+    reporter = RecordingReporter()
 
-    pending = _propose(tmp_path, _host(_pan_session()), slack, "t3")
+    pending = _propose(tmp_path, _host(_pan_session()), reporter, "t3")
 
     assert pending is not None
     assert pending.asked_at == _ASKED_AT

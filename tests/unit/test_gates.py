@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from reporter_fakes import RecordingReporter
 
 from pan.backend.gates import (
-    UNUSABLE_ITEM_REPLY,
     X_TO_ROUTE_NOTICE,
     newest_drained_item,
     refuse_x_source,
@@ -22,6 +22,7 @@ from pan.core.errors import (
     SlackPostError,
     XSourceRefusedError,
 )
+from pan.core.events import Event, ThreadNotice, ThreadNoticeReason
 from pan.core.models import Conversation, InboxItem, ThreadRecord, ThreadSource
 from pan.data.drained import FileDrainedLog
 from pan.data.threadmap import FileThreadMap
@@ -66,15 +67,26 @@ def _record(**updates: object) -> ThreadRecord:
     ).model_copy(update=updates)
 
 
-class _RecordingReply:
-    def __init__(self, error: PanError | None = None) -> None:
-        self.lines: list[str] = []
-        self._error = error
+_UNUSABLE = ThreadNotice(reason=ThreadNoticeReason.MESSAGE_UNUSABLE)
 
-    def __call__(self, text: str) -> None:
-        if self._error is not None:
-            raise self._error
-        self.lines.append(text)
+
+class _ReporterOpener:
+    # The OpenReporter a gate is given: opening it raises `open_error` (no credentials), else
+    # it hands out its recording reporter, whose reports raise `report_error` when set.
+    def __init__(
+        self, *, open_error: PanError | None = None, report_error: SlackPostError | None = None
+    ) -> None:
+        self.reporter = RecordingReporter()
+        self.reporter.error = report_error
+        self._open_error = open_error
+
+    def __call__(self) -> RecordingReporter:
+        if self._open_error is not None:
+            raise self._open_error
+        return self.reporter
+
+    def events(self) -> list[Event]:
+        return self.reporter.events()
 
 
 @pytest.mark.parametrize(
@@ -163,7 +175,7 @@ def test_refuse_x_source_refuses_an_item_or_a_thread_from_x(
 def test_require_named_target_returns_a_usable_item_that_names_the_target(
     item: InboxItem, requester: str | None
 ) -> None:
-    reply = _RecordingReply()
+    opener = _ReporterOpener()
 
     usable = require_named_target(
         item,
@@ -172,11 +184,11 @@ def test_require_named_target_returns_a_usable_item_that_names_the_target(
         target="pan-7",
         requester=requester,
         conversation=_CONVERSATION,
-        reply=reply,
+        open_reporter=opener,
     )
 
     assert usable is item
-    assert reply.lines == []
+    assert opener.events() == []
 
 
 @pytest.mark.parametrize(
@@ -187,7 +199,7 @@ def test_require_named_target_returns_a_usable_item_that_names_the_target(
 def test_require_named_target_refuses_an_unusable_item_in_the_thread(
     item: InboxItem | None, requester: str | None
 ) -> None:
-    reply = _RecordingReply()
+    opener = _ReporterOpener()
 
     with pytest.raises(NoExactMatchError, match="item Ev1 cannot be used"):
         require_named_target(
@@ -197,14 +209,14 @@ def test_require_named_target_refuses_an_unusable_item_in_the_thread(
             target="pan-7",
             requester=requester,
             conversation=_CONVERSATION,
-            reply=reply,
+            open_reporter=opener,
         )
 
-    assert reply.lines == [UNUSABLE_ITEM_REPLY]
+    assert opener.events() == [_UNUSABLE]
 
 
-def test_require_named_target_refuses_a_target_not_named_without_a_reply() -> None:
-    reply = _RecordingReply()
+def test_require_named_target_refuses_a_target_not_named_without_a_notice() -> None:
+    opener = _ReporterOpener()
 
     with pytest.raises(NoExactMatchError, match="'pan-7' is not named"):
         require_named_target(
@@ -214,18 +226,21 @@ def test_require_named_target_refuses_a_target_not_named_without_a_reply() -> No
             target="pan-7",
             requester=_REQUESTER,
             conversation=_CONVERSATION,
-            reply=reply,
+            open_reporter=opener,
         )
 
-    assert reply.lines == []
+    assert opener.events() == []
 
 
 @pytest.mark.parametrize(
-    "post_error",
-    [SlackPostError("not delivered"), CredentialsError("no credentials")],
+    "opener",
+    [
+        _ReporterOpener(report_error=SlackPostError("not delivered")),
+        _ReporterOpener(open_error=CredentialsError("no credentials")),
+    ],
     ids=["post-failed", "no-credentials"],
 )
-def test_a_refusal_stands_when_its_reply_cannot_be_posted(post_error: PanError) -> None:
+def test_a_refusal_stands_when_its_notice_cannot_be_posted(opener: _ReporterOpener) -> None:
     with pytest.raises(NoExactMatchError):
         require_named_target(
             None,
@@ -234,7 +249,7 @@ def test_a_refusal_stands_when_its_reply_cannot_be_posted(post_error: PanError) 
             target="pan-7",
             requester=None,
             conversation=_CONVERSATION,
-            reply=_RecordingReply(post_error),
+            open_reporter=opener,
         )
 
 
@@ -244,34 +259,34 @@ def test_a_refusal_stands_when_its_reply_cannot_be_posted(post_error: PanError) 
     ids=["requesters-message", "no-item", "other-sender"],
 )
 def test_require_requesters_message(item: InboxItem | None, refused: bool) -> None:
-    reply = _RecordingReply()
+    opener = _ReporterOpener()
 
     if refused:
         with pytest.raises(NoExactMatchError, match=f"no message from {_REQUESTER}"):
             require_requesters_message(
-                item, requester=_REQUESTER, conversation=_CONVERSATION, reply=reply
+                item, requester=_REQUESTER, conversation=_CONVERSATION, open_reporter=opener
             )
-        assert reply.lines == [UNUSABLE_ITEM_REPLY]
+        assert opener.events() == [_UNUSABLE]
     else:
         assert (
             require_requesters_message(
-                item, requester=_REQUESTER, conversation=_CONVERSATION, reply=reply
+                item, requester=_REQUESTER, conversation=_CONVERSATION, open_reporter=opener
             )
             is item
         )
-        assert reply.lines == []
+        assert opener.events() == []
 
 
 _DISCARD = "<@U000BOT> done --discard"
 
 
 @pytest.mark.parametrize(
-    "item, record, expected_replies",
+    "item, record, expected_events",
     [
-        (None, _record(), [UNUSABLE_ITEM_REPLY]),
-        (_item(_DISCARD), None, [UNUSABLE_ITEM_REPLY]),
-        (_item(_DISCARD), _record(requester=None), [UNUSABLE_ITEM_REPLY]),
-        (_item(_DISCARD, author="U000OTHER"), _record(), [UNUSABLE_ITEM_REPLY]),
+        (None, _record(), [_UNUSABLE]),
+        (_item(_DISCARD), None, [_UNUSABLE]),
+        (_item(_DISCARD), _record(requester=None), [_UNUSABLE]),
+        (_item(_DISCARD, author="U000OTHER"), _record(), [_UNUSABLE]),
         (_item("<@U000BOT> done"), _record(), []),
         (_item("<@U000BOT> just close it, throw the changes away"), _record(), []),
     ],
@@ -285,22 +300,24 @@ _DISCARD = "<@U000BOT> done --discard"
     ],
 )
 def test_require_discard_request_refuses_what_the_requester_did_not_send(
-    item: InboxItem | None, record: ThreadRecord | None, expected_replies: list[str]
+    item: InboxItem | None, record: ThreadRecord | None, expected_events: list[Event]
 ) -> None:
-    reply = _RecordingReply()
+    opener = _ReporterOpener()
 
     with pytest.raises(DiscardNotRequestedError):
-        require_discard_request(item, record, conversation=_CONVERSATION, reply=reply)
+        require_discard_request(item, record, conversation=_CONVERSATION, open_reporter=opener)
 
-    assert reply.lines == expected_replies
+    assert opener.events() == expected_events
 
 
 @pytest.mark.parametrize(
     "raw_text", [_DISCARD, "<@U000BOT> Done  —discard"], ids=["typed", "phone-dash"]
 )
 def test_require_discard_request_allows_the_requesters_done_discard(raw_text: str) -> None:
-    reply = _RecordingReply()
+    opener = _ReporterOpener()
 
-    require_discard_request(_item(raw_text), _record(), conversation=_CONVERSATION, reply=reply)
+    require_discard_request(
+        _item(raw_text), _record(), conversation=_CONVERSATION, open_reporter=opener
+    )
 
-    assert reply.lines == []
+    assert opener.events() == []
