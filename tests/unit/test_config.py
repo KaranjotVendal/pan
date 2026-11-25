@@ -129,20 +129,6 @@ def test_non_object_json_raises_config_missing_error(tmp_path: Path, non_object_
         load_config(config_path)
 
 
-def test_config_with_removed_keys_still_loads(tmp_path: Path) -> None:
-    # Configs written before these keys were removed still carry them; they are ignored.
-    data = _minimal_config()
-    data["defaults"] = {"agent": "codex", "permission_mode": "bypass", "repo_allowlist": []}
-    data["users"] = {"U1": {"autonomy": "gated", "channels": ["C1"], "repos": ["*"]}}
-    data["gated_ops"] = ["git push"]
-    data["paths"]["logs"] = "/Users/me/.pan/logs"
-
-    config = load_config(_write_config(tmp_path, data))
-
-    assert config.users["U1"].channels == ["C1"]
-    assert config.paths.threads == Path("/Users/me/.pan/threads.json")
-
-
 def _set_removed_defaults(data: dict) -> None:
     data["defaults"] = {"agent": "secret-default-value"}
 

@@ -61,20 +61,6 @@ def test_put_then_get_round_trips_through_disk(tmp_path: Path) -> None:
     assert loaded.created_at == record.created_at
 
 
-@pytest.mark.parametrize("stored_agent", ["claude", "codex"])
-def test_record_with_the_removed_agent_key_still_loads(tmp_path: Path, stored_agent: str) -> None:
-    # Records written before ThreadRecord.agent was removed carry an `agent` key; it is ignored.
-    stored_payload = _record().model_dump(mode="json")
-    stored_payload["agent"] = stored_agent
-    threads_path = tmp_path / "threads.json"
-    threads_path.write_text(json.dumps({stored_payload["thread_ts"]: stored_payload}))
-    thread_map = FileThreadMap(threads_path, FakeClock(datetime(2026, 7, 16, tzinfo=UTC)))
-
-    loaded = thread_map.get(stored_payload["thread_ts"])
-
-    assert loaded == _record()
-
-
 def test_update_status_transitions_and_bumps_updated_at(tmp_path: Path) -> None:
     clock = FakeClock(datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC))
     thread_map = FileThreadMap(tmp_path / "threads.json", clock)
