@@ -6,9 +6,7 @@ from pathlib import Path
 import pytest
 from service_manager_fakes import FakeServiceManager
 
-from pan.errors import ServiceError
-from pan.models import LaunchdJobState, ServiceStatus
-from pan.service import (
+from pan.backend.service import (
     UninstallResult,
     install_services,
     packaged_templates,
@@ -18,6 +16,8 @@ from pan.service import (
     service_statuses,
     uninstall_services,
 )
+from pan.core.errors import ServiceError
+from pan.core.models import LaunchdJobState, ServiceStatus
 
 _LABELS = ("com.pan.gateway", "com.pan.watcher", "com.pan.up")
 _PAN_BINARY = Path("/opt/tools/bin/pan")

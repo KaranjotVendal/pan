@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pan.errors import PanError
-from pan.models import BranchStatus, WorktreeStatus
+from pan.core.errors import PanError
+from pan.core.models import BranchStatus, WorktreeStatus
 
 
 @dataclass

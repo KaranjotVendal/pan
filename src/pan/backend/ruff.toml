@@ -1,0 +1,6 @@
+extend = "../../../pyproject.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+"pan.frontend".msg = "backend must not import frontend (see decisions/0001-layers.md)"
+"slack_bolt".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
+"slack_sdk".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"

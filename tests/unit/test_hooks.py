@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 from slack_fakes import RecordingSlack
 
-from pan.errors import ThreadNotFoundError
-from pan.hooks.inbox_link import InboxLink, inbox_link_hook
-from pan.hooks.notification import notification_hook
-from pan.hooks.session_start import session_start_hook
-from pan.hooks.stop import stop_hook
-from pan.models import ReplyMode, ThreadRecord, WorkerStatus
+from pan.core.errors import ThreadNotFoundError
+from pan.core.models import ReplyMode, ThreadRecord, WorkerStatus
+from pan.frontend.hooks.inbox_link import InboxLink, inbox_link_hook
+from pan.frontend.hooks.notification import notification_hook
+from pan.frontend.hooks.session_start import session_start_hook
+from pan.frontend.hooks.stop import stop_hook
 
 
 class FakeThreadMap:

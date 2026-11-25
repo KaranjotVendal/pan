@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pan.transcript import last_assistant_text, last_user_text, render_transcript
+from pan.data.transcript import last_assistant_text, last_user_text, render_transcript
 
 
 def _write_transcript(path: Path, entries: list[object]) -> Path:

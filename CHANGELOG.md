@@ -9,8 +9,25 @@ as it works.
 
 ### Changed
 
+- `src/pan` is split into five layer packages, with imports allowed only downward:
+  `frontend` (`cli`, `gateway/`, `help`, `hooks/`, `watcher`, `slack_format`, `slack_render`)
+  -> `backend` (`spawn`, `session_control`, `sessions`, `lifecycle`, `interface`,
+  `confirmations`, `directive`, `status_message`, `service`, `orchestrating_skill`) -> `data`
+  (`adapters/`, `inbox`, `threadmap`, `drained`, `transcript`) -> `utils` (`logging`, `config`,
+  `credentials`, `clock`, formerly `adapters/clock`) -> `core` (`models`, `errors`, `seams`).
+  Module paths and logger names change with the move (`pan.cli` is now `pan.frontend.cli`, and
+  the `pan` console script points there); behaviour does not. Ruff's banned-api check (`TID251`)
+  now fails on an upward import and on `slack_bolt` or `slack_sdk` outside `frontend/gateway`
+  (`tests/unit/test_gateway_app.py` is also exempt from the Slack-library ban). The layer rules
+  live in a `ruff.toml` in each layer package and apply when ruff discovers its config normally,
+  from the repo root. Seven backend imports of Slack posting and rendering (in `confirmations`,
+  `session_control`, `spawn` and `status_message`) are a temporary allow-list: each carries
+  `# noqa: TID251`, and the typed-events step removes them. The decision and its options are
+  recorded in `decisions/0001-layers.md`, the first record in the new `decisions/` folder.
+  Upgrade: an existing install's `pan` wrapper still imports `pan.cli`, which no longer exists, so
+  run `uv tool install <checkout> --force` and then `pan service install`.
 - The orchestrator follows the orchestrating skill installed with the running pan, not a path
-  relative to its folder. `pan.orchestrating_skill` gives the packaged `SKILL.md`'s absolute
+  relative to its folder. `pan.backend.orchestrating_skill` gives the packaged `SKILL.md`'s absolute
   path and a version (the first 12 hex characters of its sha256). The boot brief
   (`orchestrator_boot_brief`, formerly `ORCHESTRATOR_BOOT_BRIEF`) and every wake from the watcher
   and `pan up` (`wake_instruction`, formerly `WAKE_INSTRUCTION`) name both, and the wake tells
@@ -263,7 +280,7 @@ as it works.
   again reinstalls. `uninstall` boots each out (a job that is not loaded is skipped) and deletes its
   plist. `status` prints, per agent, whether its plist is installed, whether it is loaded, its pid and
   its last exit code (from `launchctl print`). launchctl and the plist files sit behind the
-  `ServiceManager` seam (`src/pan/adapters/launchd.py`); a launchctl failure raises `ServiceError`
+  `ServiceManager` seam (`src/pan/data/adapters/launchd.py`); a launchctl failure raises `ServiceError`
   (exit 27). The templates moved from `launchd/` into the package (`src/pan/launchd/`) so an
   installed pan finds them, and the program path is now a `<PAN_BIN>` placeholder. `service` is
   left out of the Slack help listing, like `gateway` and `watcher`.
@@ -281,7 +298,7 @@ as it works.
 - Text typed into a session from `to <name>:`, and every follow-up to a desk session, gets one line
   on top: "From Slack via pan", the Plannotator Inbox thread to use (`<name>: <short task>`, or the
   one pan named before), and that Slack hears back only when asked (`from_slack_text`).
-- The `InboxDirectory` seam and `ShellPlannotatorInboxAdapter` (`src/pan/adapters/plannotator_inbox.py`)
+- The `InboxDirectory` seam and `ShellPlannotatorInboxAdapter` (`src/pan/data/adapters/plannotator_inbox.py`)
   look an Inbox thread up by name with `plannotator inbox call read_thread` (`asked_by: "anyone"`,
   the session's folder as `project_path`). Read only, never sends; any failure returns nothing.
   `check` and the "Sent to …" notice use it for sessions whose Inbox thread id is unknown; the
@@ -289,7 +306,7 @@ as it works.
 - Messages from X may not use `to <name>:` until the X safety gate (MOB-87): `parse_route` takes the
   source and `route_for_source` turns such a route into a notice, at parse time and again at drain.
 
-- Route words, parsed in code by `parse_route` (`src/pan/directive.py`): `new: <task>`,
+- Route words, parsed in code by `parse_route` (`src/pan/backend/directive.py`): `new: <task>`,
   `to <name>: <task>`, and the whole-message words `check`, `sessions` and `forget`. Strict: the
   route word is the first word after the mention, spelled exactly, in any letter case, after the
   phone-punctuation repair; anything else is task text. "reply in slack" anywhere sets
@@ -302,7 +319,7 @@ as it works.
   in its transcript, or its recent screen lines labelled as screen text. It names the Inbox thread
   (link, or name before the link is known) and says when the session is still working, waiting on a
   prompt at the terminal, or ended. Long answers are posted in labelled parts (`split_for_slack` in
-  `src/pan/slack_format.py`, `slack_post_parts` in `src/pan/gateway/slack_post.py`). An untied thread
+  `src/pan/frontend/slack_format.py`, `slack_post_parts` in `src/pan/frontend/gateway/slack_post.py`). An untied thread
   gets "this thread isn't tied to a session; @pan sessions lists them".
 - `pan send --thread … --channel … --to <name> --task …` (the `to <name>:` route) sends the task to
   a live session and ties the thread to it, posting "Sent to <name> · Inbox: …". An unknown name gets
@@ -313,7 +330,7 @@ as it works.
 - `pan forget --thread … --channel …` unties the thread and says so; it never stops the session.
 - `pan sessions` shows the last thing each session was asked (`last_ask`, from its transcript when
   pan knows it; a worker's brief is cut back to its task), and with `--thread` and `--channel` posts
-  the table to a Slack thread. `last_user_text` in `src/pan/transcript.py` reads it, skipping tool
+  the table to a Slack thread. `last_user_text` in `src/pan/data/transcript.py` reads it, skipping tool
   results, meta and sidechain entries, and text Claude Code writes itself.
 
 - Thread records carry session-control fields: `source` (`slack`; room for `x`), `tied`,
@@ -325,7 +342,7 @@ as it works.
   settings. It reads the Inbox thread id and link from the tool result and stores them on the
   worker's thread record. It never posts to Slack and always exits 0. The payload shape needs a live
   check.
-- `wants_slack_reply` (`src/pan/directive.py`): "reply in slack" anywhere in a request, any letter
+- `wants_slack_reply` (`src/pan/backend/directive.py`): "reply in slack" anywhere in a request, any letter
   case, sets the new thread's reply mode to `slack`. `pan spawn` takes `--requester`,
   `--request-text` and `--reply-in-slack`.
 - An `idle` worker status: the session's turn ended and it waits for a follow-up.
@@ -352,8 +369,8 @@ as it works.
   ts, the task label and the task's start are stored on the `ThreadRecord`
   (`status_message_ts`, `status_label`, `task_started_at`; None on older records). When it cannot
   be edited, pan posts a new one and stores that ts. A plain `text` fallback is always set. The
-  rendering is pure, in `src/pan/slack_render.py`; posting and editing are in
-  `src/pan/status_message.py`, best effort (a Slack failure is logged, never raised).
+  rendering is pure, in `src/pan/frontend/slack_render.py`; posting and editing are in
+  `src/pan/backend/status_message.py`, best effort (a Slack failure is logged, never raised).
 - The answer is its own message. In reply-in-Slack mode the Stop hook posts only the session's
   final answer, converted to Slack mrkdwn (now also `__bold__`), and nothing when there is no
   answer (no more "Worker finished."). `check` edits the status message and posts the latest
@@ -416,8 +433,8 @@ as it works.
 ### Changed
 
 - Put hc behind a neutral terminal host seam, with no behaviour change. The `HcAdapter` protocol is
-  now `TerminalHost` (`src/pan/seams.py`); `ShellHcAdapter` is its hc implementation, built by
-  `build_terminal_host` (`src/pan/adapters/terminal_host.py`) from the new config key
+  now `TerminalHost` (`src/pan/core/seams.py`); `ShellHcAdapter` is its hc implementation, built by
+  `build_terminal_host` (`src/pan/data/adapters/terminal_host.py`) from the new config key
   `terminal_host` (only `"hc"`, the default; any other value is a config error, exit 11). Callers
   outside the adapter catch the new neutral `TerminalHostError` (exit 16); `HcError` moved into the
   hc adapter as its subclass, and `TerminalGoneError`, `TargetBlockedError` and
@@ -426,7 +443,7 @@ as it works.
   `pan relay` now loads the config, to pick the terminal host.
 - Migrated from the herdr TUI CLI and morcli to herdr-core (`hc`). herdr is no longer installed and
   `morcli streams` depends on it, so spawn, sessions, relay, read, status, stop and the watcher wake
-  were all broken. A new `ShellHcAdapter` (`src/pan/adapters/hc.py`, seam `HcAdapter`) is the only
+  were all broken. A new `ShellHcAdapter` (`src/pan/data/adapters/hc.py`, seam `HcAdapter`) is the only
   place `hc` is shelled (BR-2); it maps hc JSON to `Terminal` / `TerminalRead` (INV-8) and hc's stderr
   error kinds to typed errors (`HcError`, exit 16; `TerminalGoneError` 22; `TargetBlockedError` 23;
   `TerminalNameTakenError` 24). `HerdrError` and `MorcliError` (exit 19) are gone.
@@ -461,7 +478,7 @@ as it works.
   it at login and is retried by launchd only on failure.
 - `pan reopen --thread --task`: reopens a finished or lost worker in its existing worktree in a new
   terminal under the same name, continuing that worktree's last Claude conversation.
-- `pan hook session-start` and `src/pan/transcript.py` (the Stop hook's transcript parser,
+- `pan hook session-start` and `src/pan/data/transcript.py` (the Stop hook's transcript parser,
   generalized to render a whole conversation).
 - An opt-in integration test (`PAN_HC_INTEGRATION=1`) that drives the adapter against a private hc
   core with its own `HC_SESSION` and scratch XDG folders, using only a plain program.
@@ -469,7 +486,7 @@ as it works.
 - `@pan help` — instant, auto-generated command help in Slack (Task 32, Milestone M13). A phone user
   talking to pan had no way to discover what to say, and typing `help` fell through `parse_directive`
   to DELEGATE and spawned a worker briefed "help". The gateway now detects a help request and answers
-  it ITSELF, before the inbox, watcher and orchestrator: a new leaf module `src/pan/help.py` provides
+  it ITSELF, before the inbox, watcher and orchestrator: a new leaf module `src/pan/frontend/help.py` provides
   pure `parse_help_request(raw_text) -> HelpRequest | None` and total
   `render_cli_help(command_path=None) -> str`, and `BoltSlackAdapter.handle_event` posts the fenced
   result through `slack_post` (the one egress, INV-4, so it runs through `to_slack_mrkdwn` — a fence
@@ -484,7 +501,7 @@ as it works.
   empty string — unusable in a Slack code block), `info_name="pan <name>"` for a named command (a bare
   name doubles the usage line to `pan pan relay`), the top-level listing filtered to the user-facing
   commands, and an unknown name degraded to a one-line notice plus the listing rather than an error.
-  The `pan.cli` import is function-local, which is what breaks the
+  The `pan.frontend.cli` import is function-local, which is what breaks the
   `gateway/app.py -> help.py -> cli.py -> gateway/app.py` cycle. Detection is deterministic (INV-3)
   and phone-proof: it reuses `directive.py`'s `_LEADING_MENTION` strip and `_normalize_punctuation`,
   so `help`, `--help`, `-h`, `?`, a phone-autocorrected `—help`, and `help <command>` all resolve with
@@ -541,7 +558,7 @@ as it works.
   GitHub-flavored markdown (`**bold**`, `## Header`, `| a | b |` tables) into Slack, which renders a
   different dialect (mrkdwn) — so bold showed literal asterisks, headers showed literal `#`, and
   tables showed walls of pipes (confirmed live across three threads). A new pure
-  `to_slack_mrkdwn(text: str) -> str` in `src/pan/slack_format.py` now converts GFM to Slack mrkdwn,
+  `to_slack_mrkdwn(text: str) -> str` in `src/pan/frontend/slack_format.py` now converts GFM to Slack mrkdwn,
   adapting the placeholder-protection pipeline from Hermes' `gateway/platforms/slack.py::format_message`
   (protect fenced code / inline code / `[t](u)`→`<u|t>` links / existing Slack entities `<@U…>`/`<#…>`/
   `<url|text>` / blockquote markers → unescape-then-escape `& < >` → headers `#..######`→`*bold*`
@@ -606,7 +623,7 @@ as it works.
   builds `ShellHerdrAdapter`, enumerates the live set once via `list_workspaces()` (the M10 seam,
   no new enumeration), resolves the target, and sends the message into its pane followed by a
   content-free nudge (reusing the existing `send_text` + `nudge` seams — no new herdr write path).
-  Targeting is a new pure `resolve_target(selector, sessions)` core in a new `src/pan/interface.py`
+  Targeting is a new pure `resolve_target(selector, sessions)` core in a new `src/pan/backend/interface.py`
   (the interactive drive layer, kept separate from `sessions.py`'s read-only projection): exact-match
   with precise-id precedence — a `workspace_id` match wins, then `pane_id`, then `workspace_name`
   (label), of which zero raises `TargetNotFoundError` (CLI exit 20), one resolves, and more than one
@@ -636,7 +653,7 @@ as it works.
   symlink-safe resolved-cwd fallback), and FLAGS status drift between pan's recorded `WorkerStatus`
   and herdr's live `AgentStatus` without healing it (report-only in v1; INV-7 stays read-only). The
   reconcile lives in a new pure `collect_sessions(herdr, thread_map, morcli)` core in
-  `src/pan/sessions.py` with a directly-tested `session_drift` predicate (idle/working→running,
+  `src/pan/backend/sessions.py` with a directly-tested `session_drift` predicate (idle/working→running,
   blocked→blocked, done→done; `SPAWNING` and `UNKNOWN` excluded; the live-test case pan-`blocked`
   vs herdr-`idle` is drift). morcli enrichment is best-effort and tolerates `MorcliError` so a
   morcli hiccup never drops a session. New models: `AgentStatus` (StrEnum, vocabulary flagged R-9 as
@@ -742,36 +759,36 @@ as it works.
 - Project scaffold: `uv` + `uv_build` packaging (`pyproject.toml`, `.python-version`, `.gitignore`
   excluding `/docs/*`) with the Typer console-script entry, runtime deps (`typer`, `pydantic`,
   `slack_bolt`, `watchdog`) and dev deps (`pytest`, `respx`, `ruff`, `ty`).
-- `initialise_logger` (`src/pan/logging.py`): CLI-adapted logging — file handler at DEBUG under
+- `initialise_logger` (`src/pan/utils/logging.py`): CLI-adapted logging — file handler at DEBUG under
   `~/.pan/logs`, console handler on stderr with level from `PAN_LOG_LEVEL` (default WARNING),
   idempotent, `propagate=False`.
-- `PanError` taxonomy (`src/pan/errors.py`): the base plus `UnauthorizedSenderError`,
+- `PanError` taxonomy (`src/pan/core/errors.py`): the base plus `UnauthorizedSenderError`,
   `ConfigMissingError`, `CredentialsError`, `InboxError`, `ThreadNotFoundError`, `SpawnError`,
   `HerdrError`, `SlackPostError`, `GatedOpDeniedError`.
-- Seam Protocols (`src/pan/seams.py`): `Clock` and `IdGen` as the single import point for injectable
+- Seam Protocols (`src/pan/core/seams.py`): `Clock` and `IdGen` as the single import point for injectable
   seams (the remaining seam Protocols land here as their tasks arrive).
-- Clock and id-generator adapters (`src/pan/adapters/clock.py`): `SystemClock` and `UuidGen`.
-- Domain and config models (`src/pan/models.py`): the `TaskMode`, `WorkerStatus`, `Autonomy`, and
+- Clock and id-generator adapters (`src/pan/utils/clock.py`): `SystemClock` and `UuidGen`.
+- Domain and config models (`src/pan/core/models.py`): the `TaskMode`, `WorkerStatus`, `Autonomy`, and
   `Agent` `StrEnum`s; the frozen domain models `Directive` and `InboxItem` and the mutable
   `ThreadRecord`; and the config models `SlackCredentials`, `SlackConfig`, `UserPolicy`,
   `OrchestratorConfig`, `Defaults`, `PanPaths`, and the composed `PanConfig`. Tokens are typed
   `SecretStr`, paths are `pathlib.Path`, and models are frozen wherever the value is immutable so the
   gateway, config loader, and stores can parse untrusted JSON into typed domain objects at the
   boundary.
-- `parse_directive` (`src/pan/directive.py`): pure, deterministic flag parser that maps a Slack
+- `parse_directive` (`src/pan/backend/directive.py`): pure, deterministic flag parser that maps a Slack
   message to a `Directive` — `--sync` / leading `!` → SYNC, `--status` → STATUS, no mode flag →
   DELEGATE (with STATUS winning over SYNC when both appear); `--new` → `force_new`; `--stream <name>`
   → `target_stream`; `--agent <x>` parsed but reserved for v2. `cleaned_text` strips every recognized
   flag (including a dangling value-flag and a value-flag whose value is another flag) while preserving
   the task prose. No I/O and no model judgment, so `TaskMode` is deterministic per INV-3.
-- `load_config` (`src/pan/config.py`): the single config composition root. Reads
+- `load_config` (`src/pan/utils/config.py`): the single config composition root. Reads
   `~/.config/pan/config.json` (or an explicit path), parses the JSON at the boundary into a
   `PanConfig`, expands `~` in the path-bearing fields (`paths.*` and `orchestrator.worktree_base`),
   and falls back to model defaults for omitted optional sections. A missing file, non-object or
   malformed JSON, or a missing required field is translated to `ConfigMissingError`; error messages
   carry only the path, never file contents. `PanConfig` holds no secrets (tokens live in
   `credentials.json`), so nothing here calls `.get_secret_value()`.
-- Credentials store (`src/pan/credentials.py`): `save_credentials` / `load_credentials` over
+- Credentials store (`src/pan/utils/credentials.py`): `save_credentials` / `load_credentials` over
   `~/.pan/credentials.json` (the gccli-style 0600 file, not the OS keychain — the deliberate,
   BR-3-enforced deviation for Linux-VPS portability). `save_credentials` is the sole sanctioned
   `.get_secret_value()` call site outside Slack-client construction; it writes the token payload to a
@@ -781,8 +798,8 @@ as it works.
   raises `CredentialsError` on a missing or malformed file, and warns (via the named logger, mode and
   path only — never a token) when the file is group/other-readable. Tokens stay `SecretStr` end to
   end and mask as `**********` in repr/str.
-- `FileInboxStore` (`src/pan/inbox.py`), implementing the new `InboxStore` seam Protocol (added to
-  `src/pan/seams.py`): a file-per-event on-disk inbox over `~/.pan/inbox/`. `append` writes each event
+- `FileInboxStore` (`src/pan/data/inbox.py`), implementing the new `InboxStore` seam Protocol (added to
+  `src/pan/core/seams.py`): a file-per-event on-disk inbox over `~/.pan/inbox/`. `append` writes each event
   to `{event_id}.json` via a temp-file + atomic replace, using the Slack event id as the filename so a
   redelivered event before a drain resolves to one file and is drained exactly once (INV-6); it rejects
   an event id that is not a safe single path segment (no `/`, `\`, `..`, NUL) so a hostile id cannot
@@ -791,15 +808,15 @@ as it works.
   `received_at`, and empties the store. A malformed entry is quarantined to `.corrupt` and surfaced as
   `InboxError`, while cleanly-parsed siblings are restored for a later drain rather than lost. Logs are
   value-free (id/channel/count only, never `raw_text`).
-- `FileThreadMap` (`src/pan/threadmap.py`), implementing the new `ThreadMap` seam Protocol (added to
-  `src/pan/seams.py`): the single source of truth for the thread-to-worker binding (INV-7), a JSON
+- `FileThreadMap` (`src/pan/data/threadmap.py`), implementing the new `ThreadMap` seam Protocol (added to
+  `src/pan/core/seams.py`): the single source of truth for the thread-to-worker binding (INV-7), a JSON
   object at `~/.pan/threads.json` keyed by `thread_ts`. `put` upserts a `ThreadRecord`, `get` returns
   the record or `None`, and `update_status` transitions the worker status and bumps `updated_at` from
   an injected `Clock` seam (so the timestamp is deterministic in tests), preserving every other field;
   it raises `ThreadNotFoundError` when the thread is unknown. Writes are atomic (temp-file + replace)
   and `Path`/enum/`datetime` fields survive the disk round-trip. Logs are value-free (thread/status).
 - `ShellHerdrAdapter` (`src/pan/adapters/herdr.py`), implementing the new `HerdrAdapter` seam Protocol
-  (added to `src/pan/seams.py`): shells the real `herdr` CLI over its JSON socket-API helpers, the only
+  (added to `src/pan/core/seams.py`): shells the real `herdr` CLI over its JSON socket-API helpers, the only
   module permitted to invoke `herdr`/`subprocess` (BR-2). `create_workspace` runs `herdr workspace
   create --cwd <path> --label <label> --no-focus` and, because that command returns only workspace
   metadata (no pane id), resolves the created pane with a follow-up `herdr pane list --workspace <id>`
@@ -810,7 +827,7 @@ as it works.
   subprocess failures, non-JSON output, and OS errors become `HerdrError`. Logs are value-free (pane/
   workspace ids and text length only — never the message body). The exact nudge keystroke and JSON key
   names are flagged for live reconfirmation (R-2).
-- `ShellGitWorktreeAdapter` (`src/pan/adapters/git_worktree.py`), implementing the new
+- `ShellGitWorktreeAdapter` (`src/pan/data/adapters/git_worktree.py`), implementing the new
   `GitWorktreeAdapter` seam Protocol: the only module permitted to shell `git` (BR-2).
   `create_worktree(repo, branch, base)` runs `git -C <repo> worktree add <base>/<branch> -b <branch>`
   and returns the worktree `Path`, rejecting (`SpawnError`) a branch whose target would escape `base`
@@ -826,17 +843,17 @@ as it works.
   (`working`/`idle` → RUNNING, `blocked` → BLOCKED, `done` → DONE, `unknown` → FAILED). An
   unrecognized status, an unknown handle, non-JSON/non-list output, a non-zero exit, or a missing
   `morcli` binary all raise `MorcliError`; only a `WorkerStatus` crosses the boundary (INV-8).
-- New `MorcliError` (`src/pan/errors.py`): a `PanError` subclass for morcli subprocess failures. This
+- New `MorcliError` (`src/pan/core/errors.py`): a `PanError` subclass for morcli subprocess failures. This
   extends the tech-spec's original nine-item taxonomy to ten — no existing error fit (reusing
   `HerdrError`, whose meaning is "herdr subprocess failed", would be a misnomer), and the morcli
   adapter genuinely introduces this failure mode.
-- `auth_check` (`src/pan/gateway/auth.py`): the gateway's safety gate 2 — pure allowlist + channel
+- `auth_check` (`src/pan/frontend/gateway/auth.py`): the gateway's safety gate 2 — pure allowlist + channel
   policy enforced before any work. Returns `None` when the sender is in the `users` mapping and the
   channel is permitted (the `"*"` wildcard means all channels, or the channel is explicitly listed);
   raises `UnauthorizedSenderError` otherwise. Fail-closed: an unknown sender, an empty `users` map,
   and an explicitly empty `channels` list all deny. Pure logic — no Slack SDK import — and the
   denial is logged value-free (channel only, no sender payload).
-- `BoltSlackAdapter` (`src/pan/gateway/app.py`), implementing the new `SlackAdapter` seam Protocol:
+- `BoltSlackAdapter` (`src/pan/frontend/gateway/app.py`), implementing the new `SlackAdapter` seam Protocol:
   the always-on Bolt Socket Mode gateway and the sole importer of `slack_sdk`/`slack_bolt` (BR-1) and
   the single Slack-client construction point (`.get_secret_value()` for the bot token in `__init__`
   and the app token in `start()` — BR-3). Its `handle_event` parses an untrusted Slack event dict into
@@ -849,11 +866,11 @@ as it works.
   the app-mention and message handlers, using the pure `_should_forward_message` filter to forward
   only human thread replies that don't mention the bot — avoiding the double-append when Slack
   delivers an in-thread mention as both an `app_mention` and a `message` event.
-- `slack_post` (`src/pan/gateway/slack_post.py`): the single Slack egress path (INV-4). Every
+- `slack_post` (`src/pan/frontend/gateway/slack_post.py`): the single Slack egress path (INV-4). Every
   worker→thread post routes through this one function, which logs value-free (thread ts + text
   length, never the body) and delegates to `SlackAdapter.post_message`; an adapter failure surfaces
   as `SlackPostError`. Depends on the `SlackAdapter` Protocol, not a concrete — no Slack SDK import.
-- `spawn_worker` + `ClaudeLauncher` (`src/pan/spawn.py`), adding the `AgentLauncher` seam Protocol:
+- `spawn_worker` + `ClaudeLauncher` (`src/pan/backend/spawn.py`), adding the `AgentLauncher` seam Protocol:
   the worker-spawn orchestration. `spawn_worker` derives the stream label (`pan-<stream>`, or
   `pan-<short-id>` when no stream is given) and runs create_worktree → create_workspace → launch →
   `ThreadMap.put` (the SPAWNING record — the sole thread→worker binding, INV-7) → ack via `slack_post`
@@ -866,13 +883,13 @@ as it works.
   `launch(…, workspace, …) -> ThreadRecord`, since the launcher needs the pane id (not the workspace
   id) to send the brief and the orchestrator owns record construction (the record's required
   thread_ts/channel are not available to the launcher). Spawn logs are value-free (label + thread ts).
-- `WatchdogInboxWatcher` (`src/pan/watcher.py`), implementing the final seam Protocol `InboxWatcher`:
+- `WatchdogInboxWatcher` (`src/pan/frontend/watcher.py`), implementing the final seam Protocol `InboxWatcher`:
   the filesystem watcher that wakes the orchestrator. `on_inbox_changed` issues exactly one fixed,
   content-free nudge to the orchestrator pane via `HerdrAdapter.nudge` — no payload ever crosses the
   pane (INV-2); the request travels through the durable inbox. `start()` (live observer thread, not
   unit-tested) wires a `watchdog` observer over the inbox dir whose callback invokes
   `on_inbox_changed`. Value-free logs.
-- Completion hooks (`src/pan/hooks/stop.py`, `src/pan/hooks/notification.py`): the reply layer that
+- Completion hooks (`src/pan/frontend/hooks/stop.py`, `src/pan/frontend/hooks/notification.py`): the reply layer that
   runs when a worker finishes or needs input. Each parses the Claude Code hook JSON from stdin into a
   frozen pydantic boundary model, resolves the `ThreadRecord` (raising `ThreadNotFoundError` — and
   posting/transitioning nothing — when the thread is unknown), posts to the thread through the single
@@ -894,7 +911,7 @@ as it works.
   log is value-free (the matched config pattern + the allow/deny bool, never the full command). The
   decision-JSON format and the required fail-closed behavior on approval-infra failure are still open
   for when the gate is activated.
-- Typer CLI toolbelt (`src/pan/cli.py`, `src/pan/__main__.py`): the `pan` console entry with sub-apps
+- Typer CLI toolbelt (`src/pan/frontend/cli.py`, `src/pan/__main__.py`): the `pan` console entry with sub-apps
   `config`/`inbox`/`threads` and commands `gateway`, `config set-token`, `config show`, `inbox drain
   --json`, `spawn`, `threads get`, `threads set`, `slack-post`, `status`, `stop`, `pause`. Each command
   is a thin boundary that loads `PanConfig`, constructs the adapters it needs, and calls the pure core.

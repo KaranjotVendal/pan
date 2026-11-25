@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.errors import (
+from pan.core.errors import (
     ConfigMissingError,
     CredentialsError,
     InboxError,

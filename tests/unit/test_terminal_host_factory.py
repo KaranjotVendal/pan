@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from pan.adapters.hc import ShellHcAdapter
-from pan.adapters.terminal_host import build_terminal_host
-from pan.models import TerminalHostKind
+from pan.core.models import TerminalHostKind
+from pan.data.adapters.hc import ShellHcAdapter
+from pan.data.adapters.terminal_host import build_terminal_host
 
 
 @pytest.mark.parametrize("kind, expected_adapter", [(TerminalHostKind.HC, ShellHcAdapter)])

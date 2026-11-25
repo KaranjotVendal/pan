@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.directive import (
+from pan.backend.directive import (
     asks_to_discard,
     clean_message,
     is_decline,

@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.errors import TargetBlockedError, TerminalNameTakenError
-from pan.lifecycle import UpReport, bring_up, reconcile_lost_workers
-from pan.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
-from pan.orchestrating_skill import (
+from pan.backend.lifecycle import UpReport, bring_up, reconcile_lost_workers
+from pan.backend.orchestrating_skill import (
     SkillVersion,
     orchestrating_skill,
     orchestrator_boot_brief,
     wake_instruction,
 )
+from pan.core.errors import TargetBlockedError, TerminalNameTakenError
+from pan.core.models import AgentStatus, TerminalState, ThreadRecord, WorkerStatus
 
 _NOW = datetime(2026, 11, 15, 9, 0, 0, tzinfo=UTC)
 _CWD = Path("/Users/me/dev/pan")
@@ -94,7 +94,7 @@ def test_bring_up_leaves_a_healthy_orchestrator_and_wakes_it() -> None:
 def _make_skill_unreadable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SkillVersion:
     missing_skill = tmp_path / "SKILL.md"
     monkeypatch.setattr(
-        "pan.lifecycle.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
+        "pan.backend.lifecycle.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
     )
     return SkillVersion(path=missing_skill, version=None)
 

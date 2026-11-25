@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from slack_fakes import RecordingSlack
 
-from pan.errors import SlackPostError
-from pan.models import ReplyMode, StatusState, ThreadRecord
-from pan.status_message import publish_status, send_private_details
+from pan.backend.status_message import publish_status, send_private_details
+from pan.core.errors import SlackPostError
+from pan.core.models import ReplyMode, StatusState, ThreadRecord
 
 _NOW = datetime(2026, 7, 16, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1700000000.000100"

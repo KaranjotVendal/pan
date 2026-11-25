@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from pan.adapters.hc import ShellHcAdapter
-from pan.errors import TerminalGoneError, TerminalNameTakenError
-from pan.models import TerminalState
+from pan.core.errors import TerminalGoneError, TerminalNameTakenError
+from pan.core.models import TerminalState
+from pan.data.adapters.hc import ShellHcAdapter
 
 # Opt-in only: runs the real `hc` against a PRIVATE core (its own HC_SESSION and scratch XDG
 # folders), never the person's core, and only ever starts a plain program (`cat`), never an

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from pan.config import load_config
-from pan.errors import ConfigMissingError
-from pan.models import TerminalHostKind
+from pan.core.errors import ConfigMissingError
+from pan.core.models import TerminalHostKind
+from pan.utils.config import load_config
 
 
 def _minimal_config() -> dict:
@@ -176,10 +176,10 @@ def test_removed_config_keys_are_named_in_one_warning(
     config_path = _write_config(tmp_path, data)
 
     # propagate=False on this logger, so attach caplog's handler directly.
-    config_logger = logging.getLogger("pan.config")
+    config_logger = logging.getLogger("pan.utils.config")
     config_logger.addHandler(caplog.handler)
     try:
-        with caplog.at_level(logging.WARNING, logger="pan.config"):
+        with caplog.at_level(logging.WARNING, logger="pan.utils.config"):
             load_config(config_path)
     finally:
         config_logger.removeHandler(caplog.handler)

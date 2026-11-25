@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pan = "pan.cli:main"
+pan = "pan.frontend.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -21,6 +21,9 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "pan"
 module-root = "src"
+# The per-layer lint configs and ruff's cache are for development only.
+wheel-exclude = ["**/ruff.toml", "**/.ruff_cache"]
+source-exclude = ["**/.ruff_cache"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -31,8 +34,17 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
 ignore = ["E501"]
+
+# Layer import rules live in src/pan/<layer>/ruff.toml (see decisions/0001-layers.md).
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"slack_bolt".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
+"slack_sdk".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
+
+[tool.ruff.lint.per-file-ignores]
+"src/pan/frontend/gateway/**" = ["TID251"]
+"tests/unit/test_gateway_app.py" = ["TID251"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["typer.Option", "typer.Argument"]

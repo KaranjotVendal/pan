@@ -11,7 +11,21 @@ from inbox_fakes import FakeInboxDirectory
 from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.errors import (
+from pan.backend.interface import INCOMPLETE_READ_NOTICE
+from pan.backend.session_control import (
+    NO_SESSION_REPLY,
+    UNTIED_THREAD_REPLY,
+    check_thread,
+    clean_screen_text,
+    done_thread,
+    follow_up_to_session,
+    forget_thread,
+    from_slack_text,
+    send_to_session,
+)
+from pan.backend.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
+from pan.backend.status_message import answer_digest
+from pan.core.errors import (
     GitWorktreeError,
     NoExactMatchError,
     PanError,
@@ -23,9 +37,7 @@ from pan.errors import (
     UnsafeWorktreeError,
     UnsavedWorkError,
 )
-from pan.hooks.stop import stop_hook
-from pan.interface import INCOMPLETE_READ_NOTICE
-from pan.models import (
+from pan.core.models import (
     AgentStatus,
     BranchStatus,
     InboxThread,
@@ -35,21 +47,9 @@ from pan.models import (
     WorkerStatus,
     WorktreeStatus,
 )
-from pan.session_control import (
-    NO_SESSION_REPLY,
-    UNTIED_THREAD_REPLY,
-    check_thread,
-    clean_screen_text,
-    done_thread,
-    follow_up_to_session,
-    forget_thread,
-    from_slack_text,
-    send_to_session,
-)
-from pan.slack_format import to_slack_mrkdwn
-from pan.spawn import RELAYED_FOLLOW_UP_SENTENCE, desk_session_ended_reply
-from pan.status_message import answer_digest
-from pan.threadmap import FileThreadMap
+from pan.data.threadmap import FileThreadMap
+from pan.frontend.hooks.stop import stop_hook
+from pan.frontend.slack_format import to_slack_mrkdwn
 
 _FIXED_NOW = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
 _OLD_THREAD = "1700000000.000100"

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from pan.errors import UnauthorizedSenderError
-from pan.gateway.auth import auth_check, is_authorized
-from pan.models import UserPolicy
+from pan.core.errors import UnauthorizedSenderError
+from pan.core.models import UserPolicy
+from pan.frontend.gateway.auth import auth_check, is_authorized
 
 _USERS = {
     "U_wild": UserPolicy(channels=["*"]),

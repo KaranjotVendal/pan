@@ -16,11 +16,11 @@ from watchdog.events import (
     FileSystemEvent,
 )
 
-from pan.adapters.hc import HcError
-from pan.config import WATCHER_DEBOUNCE_SECONDS
-from pan.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
-from pan.orchestrating_skill import SkillVersion, orchestrating_skill, wake_instruction
-from pan.watcher import WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
+from pan.backend.orchestrating_skill import SkillVersion, orchestrating_skill, wake_instruction
+from pan.core.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
+from pan.data.adapters.hc import HcError
+from pan.frontend.watcher import WakeDebouncer, WatchdogInboxWatcher, _InboxEventHandler
+from pan.utils.config import WATCHER_DEBOUNCE_SECONDS
 
 
 class FakeTimer:
@@ -92,7 +92,7 @@ def test_on_inbox_changed_sends_a_versionless_wake_when_the_skill_is_unreadable(
 ) -> None:
     missing_skill = tmp_path / "SKILL.md"
     monkeypatch.setattr(
-        "pan.watcher.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
+        "pan.frontend.watcher.orchestrating_skill", lambda: orchestrating_skill(missing_skill)
     )
     terminal_host = FakeTerminalHost()
 
@@ -155,7 +155,7 @@ def test_start_schedules_handler_on_inbox_dir_and_starts_observer(
     # A mocked Observer lets us assert the wiring without real filesystem-event timing
     # (the mock's join returns immediately instead of blocking the launchd-supervised loop).
     observer = Mock()
-    monkeypatch.setattr("pan.watcher.Observer", lambda: observer)
+    monkeypatch.setattr("pan.frontend.watcher.Observer", lambda: observer)
     inbox_dir = tmp_path / "inbox"
 
     timer_factory = FakeTimerFactory()

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pan.errors import ServiceError
-from pan.models import LaunchdJobState
+from pan.core.errors import ServiceError
+from pan.core.models import LaunchdJobState
 
 
 class FakeServiceManager:

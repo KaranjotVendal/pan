@@ -11,11 +11,11 @@ import pytest
 from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost
 
-from pan.adapters.git_worktree import ShellGitWorktreeAdapter
-from pan.errors import GitWorktreeError, PanError, SpawnError, UnsavedWorkError
-from pan.models import BranchStatus, ThreadRecord, WorkerStatus
-from pan.session_control import done_thread
-from pan.threadmap import FileThreadMap
+from pan.backend.session_control import done_thread
+from pan.core.errors import GitWorktreeError, PanError, SpawnError, UnsavedWorkError
+from pan.core.models import BranchStatus, ThreadRecord, WorkerStatus
+from pan.data.adapters.git_worktree import ShellGitWorktreeAdapter
+from pan.data.threadmap import FileThreadMap
 
 
 class FakeCompleted:

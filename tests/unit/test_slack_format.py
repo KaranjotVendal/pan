@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pan.slack_format import redact_paths, split_for_slack, to_slack_mrkdwn
+from pan.frontend.slack_format import redact_paths, split_for_slack, to_slack_mrkdwn
 
 
 @pytest.mark.parametrize(

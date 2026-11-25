@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from pan.adapters.hc import HcError, ShellHcAdapter
-from pan.errors import (
+from pan.core.errors import (
     TargetBlockedError,
     TerminalGoneError,
     TerminalHostError,
     TerminalNameTakenError,
 )
-from pan.models import AgentStatus, TerminalState
+from pan.core.models import AgentStatus, TerminalState
+from pan.data.adapters.hc import HcError, ShellHcAdapter
 
 # Shapes captured from live `hc` 0.1.21 output (paths anonymised). `ls` reports `status`
 # as a flat string and omits it for programs that report none; `get` reports it as an

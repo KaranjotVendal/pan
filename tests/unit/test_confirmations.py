@@ -8,7 +8,7 @@ from inbox_fakes import FakeInboxDirectory
 from slack_fakes import RecordingSlack
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
-from pan.confirmations import (
+from pan.backend.confirmations import (
     EXPIRED_REPLY,
     NOT_SENT_REPLY,
     FilePendingConfirmations,
@@ -21,13 +21,13 @@ from pan.confirmations import (
     propose_sessions,
     question_text,
 )
-from pan.errors import (
+from pan.core.errors import (
     SessionBusyError,
     TargetBlockedError,
     TargetNotFoundError,
     UnansweredQuestionError,
 )
-from pan.models import (
+from pan.core.models import (
     AgentStatus,
     ConfirmationCandidate,
     PendingConfirmation,
@@ -36,7 +36,7 @@ from pan.models import (
     ThreadRecord,
     ThreadSource,
 )
-from pan.threadmap import FileThreadMap
+from pan.data.threadmap import FileThreadMap
 
 _ASKED_AT = datetime(2026, 11, 23, 10, 0, 0, tzinfo=UTC)
 _THREAD = "1700000000.000300"

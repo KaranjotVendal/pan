@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from pan.credentials import load_credentials, save_credentials
-from pan.errors import CredentialsError
-from pan.models import SlackCredentials
+from pan.core.errors import CredentialsError
+from pan.core.models import SlackCredentials
+from pan.utils.credentials import load_credentials, save_credentials
 
 FAKE_BOT_TOKEN = "xoxb-fake-bot-000000-abcdef"
 FAKE_APP_TOKEN = "xapp-fake-app-111111-uvwxyz"
@@ -26,7 +26,7 @@ def _fake_credentials() -> SlackCredentials:
 
 @pytest.fixture
 def credentials_logger_capture(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
-    logger = logging.getLogger("pan.credentials")
+    logger = logging.getLogger("pan.utils.credentials")
     logger.addHandler(caplog.handler)
     try:
         yield
@@ -96,7 +96,7 @@ def test_loose_permissions_load_but_warn(tmp_path: Path, caplog: pytest.LogCaptu
     )
     credentials_path.chmod(0o644)
 
-    with caplog.at_level(logging.WARNING, logger="pan.credentials"):
+    with caplog.at_level(logging.WARNING, logger="pan.utils.credentials"):
         loaded = load_credentials(credentials_path)
 
     assert loaded.bot_token.get_secret_value() == FAKE_BOT_TOKEN
@@ -112,7 +112,7 @@ def test_mode_0600_does_not_warn(tmp_path: Path, caplog: pytest.LogCaptureFixtur
     credentials_path = tmp_path / "credentials.json"
     save_credentials(_fake_credentials(), credentials_path)
 
-    with caplog.at_level(logging.WARNING, logger="pan.credentials"):
+    with caplog.at_level(logging.WARNING, logger="pan.utils.credentials"):
         load_credentials(credentials_path)
 
     assert not any(record.levelno == logging.WARNING for record in caplog.records)
