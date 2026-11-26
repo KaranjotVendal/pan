@@ -8,6 +8,7 @@ import pytest
 from pan.core.events import PrivateDetails
 from pan.core.models import (
     AgentStatus,
+    SessionRole,
     SessionSummary,
     StatusState,
     WorkerStatus,
@@ -220,14 +221,19 @@ _THREAD_LINK = "https://example.slack.com/archives/C000TEST/p1700000000000100"
 
 
 def _session(**updates: object) -> SessionSummary:
-    session = SessionSummary(
-        address="t12",
-        name="pan-sizing",
-        cwd=Path("/tmp/wt/pan-sizing"),
-        agent="claude-code",
-        agent_status=AgentStatus.WORKING,
-    )
-    return session.model_copy(update=updates)
+    # A standalone session, its own project's root, unless the updates say otherwise.
+    fields: dict[str, object] = {
+        "address": "t12",
+        "name": "pan-sizing",
+        "cwd": Path("/tmp/wt/pan-sizing"),
+        "agent": "claude-code",
+        "agent_status": AgentStatus.WORKING,
+        "role": SessionRole.STANDALONE,
+        **updates,
+    }
+    fields.setdefault("project_root", fields["address"])
+    fields.setdefault("project", fields["name"] or "solo")
+    return SessionSummary.model_validate(fields)
 
 
 def _names(sessions: list[SessionSummary]) -> list[str | None]:
@@ -246,6 +252,8 @@ def _names(sessions: list[SessionSummary]) -> list[str | None]:
         (AgentStatus.NONE, "zsh", WorkerStatus.RUNNING, None),
         (AgentStatus.NONE, None, None, None),
         (AgentStatus.NONE, "zsh", None, None),
+        (AgentStatus.NONE, "node", None, None),
+        (AgentStatus.NONE, "pi", None, "Idle"),
         (AgentStatus.NONE, "claude-code", WorkerStatus.RUNNING, "Working"),
         (AgentStatus.NONE, "claude", WorkerStatus.BLOCKED, "Waiting for you"),
         (AgentStatus.NONE, "claude-code", None, "Idle"),
@@ -263,6 +271,8 @@ def _names(sessions: list[SessionSummary]) -> list[str | None]:
         "dropped-to-a-shell",
         "no-program",
         "plain-shell",
+        "dev-server",
+        "other-known-agent-first-turn",
         "claude-first-turn-uses-the-record",
         "claude-first-turn-blocked-record",
         "claude-first-turn-without-a-record",
@@ -436,3 +446,72 @@ def test_render_sessions_for_slack_drops_emphasis_from_a_name() -> None:
     text = render_sessions_for_slack([_session(label="**urgent** fix")], {})
 
     assert text.splitlines()[1] == "• *urgent fix* · Working"
+
+
+_INDENT = "\u2003\u2003"
+
+
+def _billing(
+    address: str, name: str | None, role: SessionRole, **updates: object
+) -> SessionSummary:
+    return _session(
+        address=address, name=name, role=role, project="billing", project_root="t7", **updates
+    )
+
+
+def test_render_sessions_for_slack_lists_a_project_together_in_the_order_asked() -> None:
+    # Each project where its first chosen session was, the chosen order kept inside it (the
+    # orchestrator is not moved first). Standalone sessions get no heading, even two that
+    # share a space label.
+    sessions = [
+        _billing("t48", "invoice-export", SessionRole.STREAM, branch="invoice-export"),
+        _session(address="t30", name="docs-site", project="docs"),
+        _billing("t7", None, SessionRole.ORCHESTRATOR, where="billing / 1", branch="main"),
+        _session(address="t31", name="docs-search", project="docs"),
+        _billing("t20", "refund-bug", SessionRole.STREAM),
+    ]
+
+    text = render_sessions_for_slack(sessions, {})
+
+    assert text == (
+        f"{SESSIONS_HEADER}\n"
+        "*billing*\n"
+        f"{_INDENT}• *invoice-export* · Working · `invoice-export`\n"
+        f"{_INDENT}• *billing* · Working · `main`\n"
+        f"{_INDENT}• *refund-bug* · Working\n"
+        "• *docs-site* · Working\n"
+        "• *docs-search* · Working"
+    )
+
+
+@pytest.mark.parametrize(
+    "project, expected_heading",
+    [("billing", "*billing*"), ("", "*t7*"), ("**", "*t7*")],
+    ids=["label", "empty-label", "empty-after-cleaning"],
+)
+def test_render_sessions_for_slack_heads_a_project_with_its_label_or_root_address(
+    project: str, expected_heading: str
+) -> None:
+    stream = _billing("t48", "invoice-export", SessionRole.STREAM).model_copy(
+        update={"project": project}
+    )
+
+    assert render_sessions_for_slack([stream], {}).splitlines()[1] == expected_heading
+
+
+@pytest.mark.parametrize(
+    "branch, expected_line",
+    [
+        ("feature/x", "• *pan-sizing* · Working · `feature/x`"),
+        ("fix_*bold*_`tick`", "• *pan-sizing* · Working · `fix_*bold*_tick`"),
+        ("a<b>&c", "• *pan-sizing* · Working · `a&lt;b&gt;&amp;c`"),
+        (None, "• *pan-sizing* · Working"),
+    ],
+    ids=["plain", "markup-kept-inside-code", "escaped", "unknown"],
+)
+def test_render_sessions_for_slack_shows_the_branch_when_known(
+    branch: str | None, expected_line: str
+) -> None:
+    text = render_sessions_for_slack([_session(branch=branch)], {})
+
+    assert text.splitlines()[1] == expected_line

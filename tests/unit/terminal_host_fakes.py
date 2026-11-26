@@ -25,6 +25,7 @@ def make_terminal(
     agent: str | None = "claude-code",
     agent_status: AgentStatus = AgentStatus.IDLE,
     turn: int | None = None,
+    parent: str | None = None,
 ) -> Terminal:
     return Terminal(
         address=address,
@@ -35,6 +36,7 @@ def make_terminal(
         agent=agent,
         agent_status=agent_status,
         turn=turn,
+        parent=parent,
     )
 
 

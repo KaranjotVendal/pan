@@ -121,6 +121,15 @@ class TerminalState(StrEnum):
     FINISHED = "finished"
 
 
+class SessionRole(StrEnum):
+    # A session's place in its project (backend.project_map): an orchestrator started live
+    # streams and has no live parent of its own; a stream was started by a live session; a
+    # standalone session is neither (plain shells are always standalone).
+    ORCHESTRATOR = "orchestrator"
+    STREAM = "stream"
+    STANDALONE = "standalone"
+
+
 class TerminalHostKind(StrEnum):
     # The terminal multiplexer pan drives through the TerminalHost seam (config key
     # `terminal_host`). Only one host is active at a time.
@@ -257,6 +266,8 @@ class Terminal(BaseModel, frozen=True):
     # `name` is unique among live terminals; `where` is the Herdr app's "space / tab" label
     # when it shows one (hc only; other hosts leave it empty). `turn` counts the agent's
     # finished turns when the host reports it (0 for a session that has not answered yet).
+    # `parent` is the address of the terminal that started this one, as the host reports it;
+    # it may name a terminal that is gone (backend.project_map decides what that means).
     address: str
     name: str | None = None
     where: str | None = None
@@ -265,6 +276,7 @@ class Terminal(BaseModel, frozen=True):
     agent: str | None = None
     agent_status: AgentStatus
     turn: int | None = None
+    parent: str | None = None
 
 
 class WorktreeStatus(BaseModel, frozen=True):
@@ -336,6 +348,18 @@ class SessionSummary(BaseModel, frozen=True):
     label: str | None = None
     # When pan last updated the session's record: how recently it was used.
     updated_at: datetime | None = None
+    # The session's project (backend.project_map): its live parent, its role, the root of its
+    # parent chain (`project_root`, an address) and that root's label (`project`).
+    parent: str | None = None
+    role: SessionRole
+    project: str
+    project_root: str
+    # The branch checked out in the session's folder; None outside a git repository, on a
+    # detached HEAD, or on another machine.
+    branch: str | None = None
+    # The goal line of the stream's workset file (docs/streams/<stream>/workset.md), when one
+    # exists.
+    workset_goal: str | None = None
 
 
 class LaunchdJobState(BaseModel, frozen=True):

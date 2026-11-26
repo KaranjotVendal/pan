@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pan.core.errors import GitWorktreeError, PanError, SpawnError
 from pan.core.models import BranchStatus, WorktreeStatus
+from pan.utils.config import GIT_BRANCH_READ_TIMEOUT_SECONDS
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
@@ -52,6 +53,14 @@ class ShellGitWorktreeAdapter:
             untracked_paths=untracked_paths,
             modified_paths=modified_paths,
             detached_commits=detached_commits,
+        )
+
+    def current_branch(self, path: Path) -> str | None:
+        # A folder outside any repository, a missing folder and a detached HEAD all make
+        # symbolic-ref exit non-zero, which reads as "no branch"; so does a read that hangs.
+        return self._run_optional(
+            ["-C", str(path), "symbolic-ref", "-q", "--short", "HEAD"],
+            timeout=GIT_BRANCH_READ_TIMEOUT_SECONDS,
         )
 
     def branch_status(self, repo: Path, branch: str) -> BranchStatus | None:
@@ -163,18 +172,29 @@ class ShellGitWorktreeAdapter:
         )
         return int(output.strip())
 
-    def _run_optional(self, args: list[str]) -> str | None:
+    def _run_optional(self, args: list[str], *, timeout: float | None = None) -> str | None:
         # A query whose non-zero exit means "there is none" (no upstream, detached HEAD).
         try:
-            output = self._run(args).strip()
+            output = self._run(args, timeout=timeout).strip()
         except GitWorktreeError:
             return None
         return output or None
 
-    def _run(self, args: list[str], error_class: type[PanError] = GitWorktreeError) -> str:
+    def _run(
+        self,
+        args: list[str],
+        error_class: type[PanError] = GitWorktreeError,
+        *,
+        timeout: float | None = None,
+    ) -> str:
         command = [_GIT, *args]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=False, timeout=timeout
+            )
+        except subprocess.TimeoutExpired as error:
+            logger.warning(f"git command timed out after {timeout}s: {' '.join(command)}")
+            raise error_class(f"git command timed out after {timeout}s") from error
         except OSError as error:
             raise error_class(f"failed to run {' '.join(command)}") from error
 

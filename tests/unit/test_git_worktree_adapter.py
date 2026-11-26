@@ -243,6 +243,43 @@ def test_status_of_a_fresh_worktree(worktree: Path, main_repo: Path) -> None:
     assert status.detached_commits == 0
 
 
+def test_current_branch_of_a_worktree(worktree: Path, main_repo: Path) -> None:
+    adapter = ShellGitWorktreeAdapter()
+
+    assert adapter.current_branch(worktree) == _BRANCH
+    assert adapter.current_branch(main_repo) == "main"
+
+
+def test_current_branch_of_a_detached_head_is_none(worktree: Path) -> None:
+    _git(worktree, "checkout", "-q", "--detach")
+
+    assert ShellGitWorktreeAdapter().current_branch(worktree) is None
+
+
+@pytest.mark.parametrize("folder_name", ["not-a-repo", "missing"])
+def test_current_branch_outside_a_repository_is_none(
+    tmp_path: Path, isolated_git: None, folder_name: str
+) -> None:
+    folder = tmp_path / folder_name
+    if folder_name == "not-a-repo":
+        folder.mkdir()
+
+    assert ShellGitWorktreeAdapter().current_branch(folder) is None
+
+
+def test_current_branch_that_times_out_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts: list[object] = []
+
+    def hanging_git(command: list[str], **kwargs: Any) -> FakeCompleted:
+        timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(subprocess, "run", hanging_git)
+
+    assert ShellGitWorktreeAdapter().current_branch(Path("/net/slow-share")) is None
+    assert timeouts == [3.0]
+
+
 def test_status_splits_untracked_from_modified_files(worktree: Path) -> None:
     (worktree / "README.md").write_text("edited\n")
     (worktree / "notes.txt").write_text("new\n")

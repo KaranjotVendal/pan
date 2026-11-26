@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, assert_never
 
+from pan.backend.project_map import is_agent_session
 from pan.backend.spawn import start_failed_text
 from pan.core.events import (
     ChoiceUnclear,
@@ -21,8 +22,8 @@ from pan.core.events import (
     ThreadNoticeReason,
     WorkKept,
 )
-from pan.core.models import AgentStatus, SessionSummary, StatusState, WorkerStatus
-from pan.utils.config import CLAUDE_AGENT_NAMES, SESSIONS_SLACK_MAX_COUNT
+from pan.core.models import AgentStatus, SessionRole, SessionSummary, StatusState, WorkerStatus
+from pan.utils.config import SESSIONS_SLACK_MAX_COUNT
 from pan.utils.text import status_label
 
 # What pan's messages in a thread look like, from the events the backend reports
@@ -167,6 +168,9 @@ _SESSIONS_GROUP_FOR_PAN_STATUS: dict[WorkerStatus, str] = {
     WorkerStatus.DONE: STATUS_TITLES[StatusState.FINISHED],
     WorkerStatus.FAILED: SESSIONS_IDLE_TITLE,
 }
+# Before each session listed under a project heading. Em spaces, which Slack does not
+# collapse, so the indent survives.
+_PROJECT_MEMBER_INDENT = "\u2003\u2003"
 # Emphasis characters that would garble text shown inside **bold** or _italic_.
 _EMPHASIS_CHARACTERS = re.compile(r"[*~`]")
 # An underscore not inside a word (`snake_case` is safe), which Slack can read as italics.
@@ -174,8 +178,9 @@ _LOOSE_UNDERSCORE = re.compile(r"(?<![^\W_])_|_(?![^\W_])")
 
 
 def session_group(summary: SessionSummary) -> str | None:
-    # The group a session is listed under; None for a plain shell (no status and not a Claude
-    # agent), unless it is a pan worker still booting. A Claude session reports no status
+    # The group a session is listed under; None for a terminal that is not an agent session
+    # (project_map.is_agent_session: a shell, a dev server), unless it is a pan worker still
+    # booting. A Claude session reports no status
     # until its first turn ends (see session_control._is_ready), so it and an unknown status
     # fall back to pan's record. With no record, a Claude session with no status is most
     # often one nobody has asked anything yet, so it counts as idle; an unknown status as
@@ -183,10 +188,7 @@ def session_group(summary: SessionSummary) -> str | None:
     group = _SESSIONS_GROUP_FOR_AGENT.get(summary.agent_status)
     if group is not None:
         return group
-    plain_shell = (
-        summary.agent_status is AgentStatus.NONE and summary.agent not in CLAUDE_AGENT_NAMES
-    )
-    if plain_shell:
+    if not is_agent_session(summary.agent, summary.agent_status):
         booting = summary.pan_status is WorkerStatus.SPAWNING
         return STATUS_TITLES[StatusState.WORKING] if booting else None
     if summary.pan_status is not None:
@@ -229,7 +231,8 @@ def sessions_to_show(
     max_count: int = SESSIONS_SLACK_MAX_COUNT,
 ) -> list[SessionSummary]:
     # The listed sessions at the given terminal addresses, in the order given, each once, at
-    # most max_count. An address that is not a listed session is dropped.
+    # most max_count. An address that is not a listed session is dropped. The list then
+    # groups them by project, each project where its first one was (sessions_by_project).
     by_address = {
         summary.address: summary for summary in listed_sessions(summaries, orchestrator_name)
     }
@@ -243,20 +246,51 @@ def sessions_to_show(
 
 def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
     line = f"• *{plain_mrkdwn(session_display_name(summary))}* · {session_group(summary)}"
+    if summary.branch:
+        # In code format so Slack reads nothing in the branch name as markup.
+        line = f"{line} · `{escape_mrkdwn(summary.branch).replace('`', '')}`"
     link = permalinks.get(summary.thread_ts) if summary.thread_ts else None
     return f"{line} · <{link}|thread>" if link else line
+
+
+def sessions_by_project(selected: list[SessionSummary]) -> list[list[SessionSummary]]:
+    # The sessions grouped by project, each project where its first chosen session was, and
+    # the chosen order kept inside each.
+    groups: dict[str, list[SessionSummary]] = {}
+    for summary in selected:
+        groups.setdefault(summary.project_root, []).append(summary)
+    return list(groups.values())
+
+
+def _project_heading(group: list[SessionSummary]) -> str | None:
+    # Only a project with an orchestrator gets a heading; a standalone session is listed on its
+    # own line, so standalone sessions sharing a space label never repeat a heading.
+    if all(summary.role is SessionRole.STANDALONE for summary in group):
+        return None
+    label = plain_mrkdwn(group[0].project) or group[0].project_root
+    return f"*{label}*"
 
 
 def render_sessions_for_slack(
     selected: list[SessionSummary], permalinks: dict[str, str], *, any_running: bool = True
 ) -> str:
     # `selected` comes from sessions_to_show. `permalinks` maps a session's thread_ts to its
-    # thread's link; a session without one is listed without a link.
+    # thread's link; a session without one is listed without a link. A project's sessions are
+    # listed together under its name, indented so a standalone session after them does not
+    # read as one of them.
     if not selected:
         return SESSIONS_NONE_SHOWN_TEXT if any_running else SESSIONS_EMPTY_TEXT
-    return "\n".join(
-        [SESSIONS_HEADER, *(_session_line(summary, permalinks) for summary in selected)]
-    )
+    lines = [SESSIONS_HEADER]
+    for group in sessions_by_project(selected):
+        heading = _project_heading(group)
+        if heading is None:
+            lines.extend(_session_line(summary, permalinks) for summary in group)
+            continue
+        lines.append(heading)
+        lines.extend(
+            f"{_PROJECT_MEMBER_INDENT}{_session_line(summary, permalinks)}" for summary in group
+        )
+    return "\n".join(lines)
 
 
 def screen_text(screen: str) -> str:

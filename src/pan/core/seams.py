@@ -216,6 +216,10 @@ class GitWorktreeAdapter(Protocol):
     # Read-only: changes nothing in the worktree or its repository.
     def worktree_status(self, path: Path) -> WorktreeStatus: ...
 
+    # Read-only and cheap (one git call). The branch checked out in `path`; None when `path` is
+    # not in a git repository (or does not exist) or its HEAD is detached. Never raises.
+    def current_branch(self, path: Path) -> str | None: ...
+
     # Read-only. None when the repository has no such local branch.
     def branch_status(self, repo: Path, branch: str) -> BranchStatus | None: ...
 

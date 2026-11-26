@@ -113,6 +113,7 @@ def _to_terminal(entry: object) -> Terminal | None:
         agent=_agent_name(entry),
         agent_status=_map_agent_status(entry.get("status")),
         turn=_turn(entry),
+        parent=_optional_string(entry.get("parent")),
     )
 
 

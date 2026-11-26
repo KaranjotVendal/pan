@@ -60,6 +60,7 @@ from pan.core.models import (
     PendingConfirmation,
     ReplyMode,
     RequestOrigin,
+    SessionRole,
     SessionSummary,
     SlackCredentials,
     ThreadRecord,
@@ -544,13 +545,16 @@ def _summary(*, is_pan_owned: bool = True, drift: bool = False) -> SessionSummar
         pan_status=WorkerStatus.RUNNING if is_pan_owned else None,
         is_pan_owned=is_pan_owned,
         drift=drift,
+        role=SessionRole.STANDALONE,
+        project="pan-a" if is_pan_owned else "my-app",
+        project_root="t12",
     )
 
 
 def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cli, "collect_sessions", lambda terminal_host, thread_map: [_summary(drift=True)]
+        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary(drift=True)]
     )
 
     result = runner.invoke(cli.app, ["sessions", "--json"])
@@ -570,7 +574,7 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda terminal_host, thread_map: [_summary(drift=True), _summary(is_pan_owned=False)],
+        lambda terminal_host, thread_map, git: [_summary(drift=True), _summary(is_pan_owned=False)],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
@@ -599,7 +603,7 @@ def test_sessions_table_shows_the_inbox_thread_under_its_session(
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda terminal_host, thread_map: [with_thread, _summary(is_pan_owned=False)],
+        lambda terminal_host, thread_map, git: [with_thread, _summary(is_pan_owned=False)],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
@@ -1248,6 +1252,8 @@ def _threaded(
             "thread_ts": thread_ts,
             "thread_channel": "C000TEST",
             "updated_at": datetime(2026, 7, 16, 10, 0, tzinfo=UTC) - timedelta(minutes=minutes_ago),
+            "project": name,
+            "project_root": f"t-{name}",
         }
     )
 
@@ -1273,7 +1279,10 @@ _SESSIONS_FOR_REQUESTER = [*_SESSIONS_IN_THREAD, "--requester", "U000TEST"]
             "• *pan-docs* · Idle\n"
             "• *pan-ocr* · Waiting for you · <https://example.slack.com/p2|thread>",
         ),
-        ("t-pan-docs,t-pan-orchestrator,t9", "*Your sessions*\n• *pan-docs* · Idle"),
+        (
+            "t-pan-docs,t-pan-orchestrator,t9",
+            "*Your sessions*\n• *pan-docs* · Idle",
+        ),
         ("t9", "None of those sessions is running."),
         ("", "None of those sessions is running."),
     ],
@@ -1288,7 +1297,7 @@ def test_sessions_show_sends_the_chosen_sessions_to_the_requester_only(
         _threaded("pan-ocr", AgentStatus.BLOCKED, "1700000000.000200"),
         _threaded("pan-orchestrator", AgentStatus.BLOCKED, "1700000000.000400"),
     ]
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: summaries)
     slack = _use_slack(monkeypatch)
     slack.permalinks["1700000000.000200"] = "https://example.slack.com/p2"
 
@@ -1304,7 +1313,7 @@ def test_sessions_show_with_nothing_running_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [])
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: [])
     slack = _use_slack(monkeypatch)
 
     result = runner.invoke(cli.app, [*_SESSIONS_FOR_REQUESTER, "--show", ""])
@@ -1319,7 +1328,9 @@ def test_sessions_posts_nothing_publicly_when_the_private_list_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary()]
+    )
     slack = _use_slack(monkeypatch)
     slack.ephemeral_error = SlackPostError("not delivered")
 
@@ -1353,7 +1364,9 @@ def test_sessions_rejects_incomplete_slack_options(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra_args: list[str]
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: [_summary()])
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary()]
+    )
     slack = _use_slack(monkeypatch)
 
     result = runner.invoke(cli.app, ["sessions", *extra_args])
@@ -1385,7 +1398,7 @@ def test_sessions_fetches_links_only_for_the_sessions_shown_and_each_thread_once
             for index in range(3, 9)
         ],
     ]
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map: summaries)
+    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: summaries)
     slack = _CountingSlack()
     monkeypatch.setattr(wiring, "build_slack_adapter", lambda config, clock: slack)
 

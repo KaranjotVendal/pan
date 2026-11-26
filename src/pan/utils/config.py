@@ -81,6 +81,18 @@ SLACK_READ_THREAD_TOOL_NAME = "mcp__plugin_slack_slack__slack_read_thread"
 SESSION_LAST_ASK_MAX_LENGTH = 80
 # `pan sessions --show` sends the requester at most this many sessions, in the order given.
 SESSIONS_SLACK_MAX_COUNT = 5
+# `pan sessions` shows a stream's goal, from its workset file, cut to this length.
+WORKSET_GOAL_MAX_LENGTH = 120
+# A stream's workset file, relative to the folder holding the project's docs; `{stream}` is
+# the stream's terminal name without STREAM_NAME_PREFIX.
+WORKSET_RELATIVE_PATH = "docs/streams/{stream}/workset.md"
+STREAM_NAME_PREFIX = "stream-"
+# Coding agents hc names as a terminal's program, recognised as agent sessions even before
+# they report a status (backend.project_map.is_agent_session).
+KNOWN_AGENT_NAMES: frozenset[str] = CLAUDE_AGENT_NAMES | {"pi"}
+# `pan sessions` reads each agent session's branch with one git call, given up after this
+# long (a hung network filesystem must not hang the listing).
+GIT_BRANCH_READ_TIMEOUT_SECONDS = 3.0
 
 # The Claude Code tool name of the Plannotator Inbox tool, matched by the worker's
 # PostToolUse inbox-link hook.

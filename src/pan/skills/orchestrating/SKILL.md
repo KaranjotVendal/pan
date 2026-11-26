@@ -93,8 +93,10 @@ label, or a name not in that message. Nothing was sent: propose. Exit 26 or 23: 
 nothing more. Exit 35: the thread is from X, which may only start new sessions; do nothing more.
 
 **Propose** (only after exit 28): run `pan sessions --json`, compare each live session's `name`,
-`where`, `cwd`, `label`, `last_ask` and `inbox_thread_name` with what they wrote, and pick the one
-most likely session, or up to 3 if several fit about equally, most likely first, or none:
+`where`, `cwd`, `label`, `last_ask`, `inbox_thread_name`, `project`, `role`, `workset_goal` and
+`branch` with what they wrote, and pick the one most likely session, or up to 3 if several fit
+about equally, most likely first, or none. A name that fits a project means that project's
+sessions (same `project_root`):
 
     pan propose --thread <thread> --channel <channel> --to '<name as typed>' --task '<task>' --requester <requester> --item <item.id> [--reply-in-slack] [--candidate <address> ...]
 
@@ -119,7 +121,10 @@ question stays open and needs a new reply. Exit 20: the session ended. A reply f
 
 **What's running**: run `pan sessions --json`, pick up to 5 sessions the person most likely means
 (all of them when they asked generally: waiting on them first, then working, then recently used),
-and send them privately:
+and send them privately. Use `project`, `role`, `name`, `workset_goal` and `branch` with the other
+fields: a session is an orchestrator, one of its streams, or standalone, and a question about a
+project means that project's sessions (same `project_root`). pan keeps your order and lists a
+project's sessions together, where its first one is:
 
     pan sessions --show <address>,<address> --thread <thread> --channel <channel> --requester <requester>
 
