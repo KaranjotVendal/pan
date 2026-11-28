@@ -63,15 +63,21 @@ def publish_status(
     # and the new id is stored. Best effort: the work it reports on is already done, so a
     # failure is logged and never raised. Returns the record with the message's id. No message
     # text is logged (INV-9).
+    handoff = record.handoff
     status = StatusChanged(
         state=state,
-        session_name=record.terminal_name,
+        # A thread waiting for a project's orchestrator is the project's, not that session's.
+        session_name=handoff.project
+        if handoff is not None and handoff.awaiting
+        else record.terminal_name,
         label=record.status_label,
         task_started_at=record.task_started_at,
         updated_at=clock.now(),
         replies_in_thread=record.reply_mode is ReplyMode.SLACK,
         detail=detail,
         status_message_id=record.status_message_ts,
+        project=handoff.project if handoff is not None else None,
+        awaiting_handoff=record.awaiting_handoff,
     )
     try:
         posted_message_id = reporter.report(record.conversation, status)

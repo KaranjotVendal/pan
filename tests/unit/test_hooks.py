@@ -10,7 +10,7 @@ import pytest
 from slack_fakes import RecordingSlack
 
 from pan.core.errors import ThreadNotFoundError
-from pan.core.models import Conversation, ReplyMode, ThreadRecord, WorkerStatus
+from pan.core.models import Conversation, ProjectHandoff, ReplyMode, ThreadRecord, WorkerStatus
 from pan.frontend.hooks.inbox_link import InboxLink, inbox_link_hook
 from pan.frontend.hooks.notification import notification_hook
 from pan.frontend.hooks.session_start import session_start_hook
@@ -820,3 +820,44 @@ def test_stop_hook_never_posts_the_same_answer_twice(tmp_path: Path) -> None:
 
     assert slack.posts == [("C1", _THREAD, "same")]
     assert len(thread_map.posted_answers) == 1
+
+
+_HOOK_PAYLOADS = {
+    "stop": json.dumps({"session_id": "s1", "hook_event_name": "Stop", "transcript_path": None}),
+    "notification": json.dumps(
+        {
+            "session_id": "s1",
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use Bash",
+        }
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "hook, payload_name",
+    [(stop_hook, "stop"), (notification_hook, "notification")],
+    ids=["stop", "notification"],
+)
+def test_a_hook_leaves_a_thread_waiting_for_a_handoff_alone(
+    hook: Callable[..., None], payload_name: str
+) -> None:
+    # pan's own worker became a project's orchestrator and the thread waits for it to pick a
+    # stream: its turns and prompts are its own, so nothing reaches the thread.
+    thread_map, slack = FakeThreadMap(reply_mode=ReplyMode.SLACK), FakeSlack()
+    record = thread_map.records[_THREAD]
+    thread_map.records[_THREAD] = record.model_copy(
+        update={"handoff": ProjectHandoff(project="atlas", project_root="t3")}
+    )
+
+    hook(
+        _CONVERSATION,
+        thread_map,
+        SlackReporter(slack),
+        stdin=io.StringIO(_HOOK_PAYLOADS[payload_name]),
+    )
+
+    assert slack.posts == []
+    assert slack.status_texts() == []
+    assert thread_map.status_updates == []

@@ -18,7 +18,7 @@ from pan.backend.orchestrating_skill import orchestrating_skill, wake_instructio
 from pan.core.errors import TerminalHostError
 from pan.core.seams import TerminalHost
 from pan.data.inbox import is_inbox_entry_name
-from pan.utils.config import WATCHER_DEBOUNCE_SECONDS
+from pan.utils.config import HANDOFF_SWEEP_SECONDS, WATCHER_DEBOUNCE_SECONDS
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
@@ -67,6 +67,52 @@ class WakeDebouncer:
                 self._pending = None
 
 
+class PeriodicSweep:
+    # Runs `action` every `interval_seconds` on a daemon timer until cancelled. The watcher is
+    # pan's one always-on process that drives terminals, so it hosts checks that must run
+    # without an inbox change (a project's orchestrator ending its turn). A failing action is
+    # logged and the next tick still runs: one bad check must not stop the others for good.
+    def __init__(
+        self,
+        action: Callable[[], None],
+        interval_seconds: float,
+        timer_factory: TimerFactory = threading.Timer,
+    ) -> None:
+        self._action = action
+        self._interval_seconds = interval_seconds
+        self._timer_factory = timer_factory
+        self._lock = threading.Lock()
+        self._pending: Timer | None = None
+        self._cancelled = False
+
+    def start(self) -> None:
+        with self._lock:
+            self._cancelled = False
+            self._schedule()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            if self._pending is not None:
+                self._pending.cancel()
+                self._pending = None
+
+    def _schedule(self) -> None:
+        timer = self._timer_factory(self._interval_seconds, self._tick)
+        timer.daemon = True
+        timer.start()
+        self._pending = timer
+
+    def _tick(self) -> None:
+        try:
+            self._action()
+        except Exception:  # the sweep must outlive any one failing check
+            logger.exception("periodic sweep failed")
+        with self._lock:
+            if not self._cancelled:
+                self._schedule()
+
+
 class WatchdogInboxWatcher:
     def __init__(
         self,
@@ -76,11 +122,19 @@ class WatchdogInboxWatcher:
         *,
         debounce_seconds: float = WATCHER_DEBOUNCE_SECONDS,
         timer_factory: TimerFactory = threading.Timer,
+        sweep: Callable[[], None] | None = None,
+        sweep_interval_seconds: float = HANDOFF_SWEEP_SECONDS,
     ) -> None:
         self._terminal_host = terminal_host
         self._orchestrator_terminal = orchestrator_terminal
         self._inbox_dir = inbox_dir
         self._debouncer = WakeDebouncer(self.on_inbox_changed, debounce_seconds, timer_factory)
+        # `sweep` runs every `sweep_interval_seconds` while the watcher runs.
+        self._sweep = (
+            PeriodicSweep(sweep, sweep_interval_seconds, timer_factory)
+            if sweep is not None
+            else None
+        )
 
     def on_inbox_changed(self) -> None:
         # INV-2: send the wake instruction; one terminal host send pastes it and presses Enter.
@@ -105,10 +159,14 @@ class WatchdogInboxWatcher:
             _InboxEventHandler(self._debouncer.trigger), str(self._inbox_dir), recursive=False
         )
         observer.start()
+        if self._sweep is not None:
+            self._sweep.start()
         logger.info("watcher observing inbox")
         try:
             observer.join()
         finally:
+            if self._sweep is not None:
+                self._sweep.cancel()
             self._debouncer.cancel()
             observer.stop()
             observer.join()

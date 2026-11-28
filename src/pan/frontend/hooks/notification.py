@@ -57,6 +57,12 @@ def notification_hook(
     record = thread_map.get(conversation, session_name=session_name)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={conversation.id}")
+    if record.awaiting_handoff:
+        # The thread waits for this orchestrator to pick a stream; its prompts are its own.
+        logger.info(
+            f"notification hook skipped, thread awaits a handoff conversation={conversation.key}"
+        )
+        return
     if not is_blocking_notification(payload):
         logger.info(
             f"notification hook conversation={conversation.key} ignored "

@@ -19,6 +19,9 @@ class StatusChanged(BaseModel, frozen=True):
     # status message already posted (ThreadRecord.status_message_ts), edited in place when
     # the reporter can; with none, or when the edit fails, the reporter posts a new one and
     # returns its id. `detail` is what a waiting session waits for (the prompt's text).
+    # `project` is set for a thread handed to a project: while `awaiting_handoff` the thread
+    # waits for that project's orchestrator to pick a stream (`session_name` is then the
+    # project), after it the session it was handed to belongs to that project.
     state: StatusState
     session_name: str
     label: str | None = None
@@ -27,6 +30,8 @@ class StatusChanged(BaseModel, frozen=True):
     replies_in_thread: bool = False
     detail: str | None = None
     status_message_id: str | None = None
+    project: str | None = None
+    awaiting_handoff: bool = False
 
 
 class AnswerReady(BaseModel, frozen=True):
@@ -77,6 +82,8 @@ class ThreadNoticeReason(StrEnum):
     QUESTION_EXPIRED = "question_expired"
     NOT_SENT = "not_sent"
     MESSAGE_UNUSABLE = "message_unusable"
+    # A project's orchestrator ended its turn without handing the thread to a stream.
+    NO_STREAM_PICKED = "no_stream_picked"
 
 
 class ThreadNotice(BaseModel, frozen=True):
@@ -94,6 +101,8 @@ class SessionNoticeReason(StrEnum):
     FOLDER_IS_MAIN_REPOSITORY = "folder_is_main_repository"
     WORKTREE_UNREADABLE = "worktree_unreadable"
     PROPOSED_SESSION_GONE = "proposed_session_gone"
+    # The orchestrator a thread was handed to has ended; `session_name` is the project.
+    PROJECT_ORCHESTRATOR_ENDED = "project_orchestrator_ended"
 
 
 class SessionNotice(BaseModel, frozen=True):

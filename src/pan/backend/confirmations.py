@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from pan.backend.directive import is_decline, picks_number, says_yes
+from pan.backend.project_routing import ThreadLinkLookup, hand_to_project
 from pan.backend.session_control import send_to_session
 from pan.core.errors import (
     NoExactMatchError,
@@ -28,6 +30,7 @@ from pan.core.models import (
     ConfirmationCandidate,
     Conversation,
     PendingConfirmation,
+    ProjectMap,
     Terminal,
     TerminalState,
     ThreadRecord,
@@ -36,6 +39,7 @@ from pan.core.seams import (
     Clock,
     InboxDirectory,
     PendingConfirmations,
+    ProjectMapSource,
     Reporter,
     TerminalHost,
     ThreadMap,
@@ -197,17 +201,36 @@ def _live_terminals(terminal_host: TerminalHost) -> list[Terminal]:
     ]
 
 
+def project_candidate_label(project: str) -> str:
+    return f"the {project} project"
+
+
 def _valid_candidates(
-    candidate_addresses: list[str], terminals: list[Terminal]
+    candidate_addresses: Sequence[str],
+    project_addresses: Sequence[str],
+    terminals: list[Terminal],
+    project_map: ProjectMap | None,
 ) -> list[ConfirmationCandidate]:
     # The proposed addresses that are live terminals, in order, each once, at most
-    # CONFIRMATION_MAX_CANDIDATES. An address that is not live is dropped with a log line.
+    # CONFIRMATION_MAX_CANDIDATES: sessions first, then projects, each named by its
+    # orchestrator's address, which must still root a project in `project_map`. Any other
+    # address is dropped with a log line.
     by_address = {terminal.address: terminal for terminal in terminals}
     candidates: list[ConfirmationCandidate] = []
-    for address in candidate_addresses:
+    proposed = [(address, False) for address in candidate_addresses]
+    proposed += [(address, True) for address in project_addresses]
+    for address, is_project in proposed:
         terminal = by_address.get(address)
         if terminal is None:
             logger.warning(f"proposed session is not a live terminal address={address}")
+            continue
+        project = (
+            project_map.project_rooted_at(address)
+            if is_project and project_map is not None
+            else None
+        )
+        if is_project and project is None:
+            logger.warning(f"proposed project has no orchestrator at address={address}")
             continue
         if any(candidate.address == address for candidate in candidates):
             continue
@@ -217,7 +240,10 @@ def _valid_candidates(
                 name=terminal.name,
                 cwd=terminal.cwd,
                 where=terminal.where,
-                label=candidate_label(terminal),
+                label=project_candidate_label(project.label)
+                if project is not None
+                else candidate_label(terminal),
+                project=project.label if project is not None else None,
             )
         )
     if len(candidates) > CONFIRMATION_MAX_CANDIDATES:
@@ -234,17 +260,23 @@ def propose_sessions(
     task: str,
     requester: str | None,
     reply_in_slack: bool,
-    candidate_addresses: list[str],
+    candidate_addresses: Sequence[str],
     terminal_host: TerminalHost,
     confirmations: PendingConfirmations,
     reporter: Reporter,
     clock: Clock,
+    project_map_source: ProjectMapSource,
+    project_addresses: Sequence[str] = (),
 ) -> PendingConfirmation | None:
-    # The orchestrator's guess for a named session with no exact match: store the task and
-    # the proposed sessions as the thread's open question and ask the person to confirm.
-    # Nothing is typed into any session here. Only live terminals count; with none, pan says
-    # no session matches, stores nothing and clears any earlier question in the thread.
-    candidates = _valid_candidates(candidate_addresses, _live_terminals(terminal_host))
+    # The orchestrator's guess for a named session or project with no exact match: store the
+    # task and the proposed sessions (or projects, by their orchestrators' addresses) as the
+    # thread's open question and ask the person to confirm. Nothing is typed into any session
+    # here. Only live terminals count; with none, pan says no session matches, stores nothing
+    # and clears any earlier question in the thread.
+    terminals = _live_terminals(terminal_host)
+    # The map is read only for proposed projects.
+    project_map = project_map_source.project_map(terminals) if project_addresses else None
+    candidates = _valid_candidates(candidate_addresses, project_addresses, terminals, project_map)
     if not candidates:
         confirmations.clear(conversation)
         reporter.report(conversation, NoSessionMatches(selector=selector))
@@ -301,10 +333,13 @@ def confirm_session(
     confirmations: PendingConfirmations,
     reporter: Reporter,
     clock: Clock,
+    project_map_source: ProjectMapSource,
+    thread_link: ThreadLinkLookup | None = None,
 ) -> ThreadRecord | None:
     # The person's `yes` or number for the thread's open question, as the orchestrator read
     # their reply: send the stored task to the chosen session through the normal send path
-    # (the thread is tied to it), then clear the question. Refused with nothing posted until
+    # (the thread is tied to it), or hand it to the chosen project (the thread then waits for
+    # its orchestrator, see project_routing), then clear the question. Refused with nothing posted until
     # the drain has seen the requester reply (answered_at). A choice that picks nothing (`yes`
     # to several, a number out of range) asks again. A busy session or one waiting on a prompt is refused as usual, but
     # the question stays open and the reply says to answer again later. A chosen session no
@@ -335,25 +370,41 @@ def confirm_session(
         raise TargetNotFoundError(f"proposed session {candidate.address} is gone")
     logger.info(f"confirmed session conversation={conversation.key} terminal={candidate.address}")
     try:
-        tied = send_to_session(
-            conversation=conversation,
-            selector=candidate.address,
-            text=pending.task,
-            requester=pending.requester,
-            reply_in_slack=pending.reply_in_slack,
-            terminal_host=terminal_host,
-            thread_map=thread_map,
-            inbox_directory=inbox_directory,
-            reporter=reporter,
-            clock=clock,
-            retry_choice=choice,
-        )
+        if candidate.project is not None:
+            tied = hand_to_project(
+                conversation=conversation,
+                selector=candidate.address,
+                text=pending.task,
+                requester=pending.requester,
+                reply_in_slack=pending.reply_in_slack,
+                thread_link=thread_link if thread_link is not None else lambda: None,
+                terminal_host=terminal_host,
+                thread_map=thread_map,
+                reporter=reporter,
+                clock=clock,
+                project_map_source=project_map_source,
+                retry_choice=choice,
+            )
+        else:
+            tied = send_to_session(
+                conversation=conversation,
+                selector=candidate.address,
+                text=pending.task,
+                requester=pending.requester,
+                reply_in_slack=pending.reply_in_slack,
+                terminal_host=terminal_host,
+                thread_map=thread_map,
+                inbox_directory=inbox_directory,
+                reporter=reporter,
+                clock=clock,
+                retry_choice=choice,
+            )
     except SessionBusyError, TargetBlockedError:
         # The question stays open and the refusal asked for an answer later: a new one.
         confirmations.clear_answer(conversation, clock.now())
         raise
     except NoExactMatchError as error:
-        # Gone between the check and the send.
+        # Gone between the check and the send (or, for a project, no longer its orchestrator).
         confirmations.clear(conversation)
         reporter.report(conversation, gone_notice)
         raise TargetNotFoundError(f"proposed session {candidate.address} is gone") from error

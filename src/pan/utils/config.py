@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from pan.core.errors import ConfigMissingError
-from pan.core.models import PanConfig, TerminalHostKind
+from pan.core.models import PanConfig, ProjectMapKind, TerminalHostKind
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
@@ -27,6 +28,10 @@ READ_FULL_HISTORY_LINES = 5000
 # The watcher wakes the orchestrator once the inbox has been quiet this long, so a burst of
 # filesystem events (or several items arriving together) becomes a single wake.
 WATCHER_DEBOUNCE_SECONDS = 1.0
+# How often the watcher checks threads handed to a project for an orchestrator whose turn
+# ended without picking a stream (backend.project_routing.nudge_unhanded_threads). One thread
+# map read per check; hc is asked only while a thread waits.
+HANDOFF_SWEEP_SECONDS = 15.0
 
 # The launchd agents `pan service` installs, in install order: the gateway and watcher are
 # KeepAlive services, and `up` runs `pan up` once at login (it needs the other two up first).
@@ -88,7 +93,7 @@ WORKSET_GOAL_MAX_LENGTH = 120
 WORKSET_RELATIVE_PATH = "docs/streams/{stream}/workset.md"
 STREAM_NAME_PREFIX = "stream-"
 # Coding agents hc names as a terminal's program, recognised as agent sessions even before
-# they report a status (backend.project_map.is_agent_session).
+# they report a status (backend.delivery.is_agent_session).
 KNOWN_AGENT_NAMES: frozenset[str] = CLAUDE_AGENT_NAMES | {"pi"}
 # `pan sessions` reads each agent session's branch with one git call, given up after this
 # long (a hung network filesystem must not hang the listing).
@@ -227,16 +232,27 @@ def _reject_herdr_era_orchestrator(raw_config: dict, config_path: Path) -> None:
         )
 
 
-def _reject_unknown_terminal_host(raw_config: dict, config_path: Path) -> None:
-    if "terminal_host" not in raw_config:
-        return
-    terminal_host = raw_config["terminal_host"]
-    accepted = sorted(kind.value for kind in TerminalHostKind)
-    if terminal_host not in accepted:
-        raise ConfigMissingError(
-            f"config terminal_host {terminal_host!r} is not supported: {config_path}. "
-            f"Accepted values: {', '.join(accepted)}"
-        )
+# Config keys that pick one implementation of a seam, with the names each accepts. A key left
+# out takes PanConfig's default (`terminal_host` "hc", `project_map` "builtin"). Adding a choice
+# is a new member of its enum plus its builder's registry entry (data.adapters.terminal_host,
+# backend.project_map_sources).
+SEAM_CHOICE_CONFIG_KEYS: dict[str, type[StrEnum]] = {
+    "terminal_host": TerminalHostKind,
+    "project_map": ProjectMapKind,
+}
+
+
+def _reject_unknown_seam_choices(raw_config: dict, config_path: Path) -> None:
+    for key, kinds in SEAM_CHOICE_CONFIG_KEYS.items():
+        if key not in raw_config:
+            continue
+        chosen = raw_config[key]
+        accepted = sorted(kind.value for kind in kinds)
+        if chosen not in accepted:
+            raise ConfigMissingError(
+                f"config {key} {chosen!r} is not supported: {config_path}. "
+                f"Accepted values: {', '.join(accepted)}"
+            )
 
 
 def _warn_about_removed_keys(raw_config: dict, config_path: Path) -> None:
@@ -277,7 +293,7 @@ def load_config(path: Path | None = None) -> PanConfig:
         raise ConfigMissingError(f"config file must be a JSON object: {config_path}")
 
     _reject_herdr_era_orchestrator(raw_config, config_path)
-    _reject_unknown_terminal_host(raw_config, config_path)
+    _reject_unknown_seam_choices(raw_config, config_path)
     _warn_about_removed_keys(raw_config, config_path)
     _expand_user_paths(raw_config)
 

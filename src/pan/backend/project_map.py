@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from pydantic import BaseModel
 
-from pan.core.models import AgentStatus, SessionRole, Terminal, TerminalState
-from pan.utils.config import KNOWN_AGENT_NAMES
+from pan.backend.delivery import is_live_agent_session
+from pan.core.models import (
+    MappedProject,
+    MappedSession,
+    ProjectMap,
+    SessionRole,
+    Terminal,
+)
+from pan.core.seams import GitWorktreeAdapter
+from pan.data.workset import read_workset_goal
+from pan.utils.config import STREAM_NAME_PREFIX, WORKSET_RELATIVE_PATH
 from pan.utils.logging import initialise_logger
 
 logger = initialise_logger(__name__)
+
+# pan's built-in project map: the ProjectMapSource behind config `project_map` "builtin"
+# (backend.project_map_sources). Only that registry imports this module; everything else
+# reads the map through the seam. It mirrors herdrmap's map (`herdrmap map --json --all`), so
+# it can be compared with herdrmap's output and deleted once herdrmap is plugged in.
 
 # The Herdr app's "space / tab" label; the space is the part before the separator.
 _WHERE_SEPARATOR = " / "
@@ -26,19 +41,6 @@ class ProjectPlace(BaseModel, frozen=True):
     role: SessionRole
     project: str
     project_root: str
-
-
-def is_agent_session(agent: str | None, agent_status: AgentStatus) -> bool:
-    # A coding agent: it reports a status, or hc names a known agent as its program (one that
-    # has not reported yet). Anything else (a shell, a dev server, `tail`) is not a session:
-    # it is never a stream and never makes its parent an orchestrator.
-    return agent_status is not AgentStatus.NONE or agent in KNOWN_AGENT_NAMES
-
-
-def is_live_agent_session(terminal: Terminal) -> bool:
-    return terminal.state is TerminalState.LIVE and is_agent_session(
-        terminal.agent, terminal.agent_status
-    )
 
 
 def is_remote(address: str) -> bool:
@@ -144,3 +146,121 @@ def map_projects(terminals: list[Terminal]) -> dict[str, ProjectPlace]:
             parent=parent, role=role, project=project_label(root), project_root=root.address
         )
     return places
+
+
+class _BranchReader:
+    # One git read per distinct local folder of a live agent session; other terminals (shells,
+    # dev servers, finished ones) and folders on another machine get no branch.
+    def __init__(self, git: GitWorktreeAdapter) -> None:
+        self._git = git
+        self._branches: dict[Path, str | None] = {}
+
+    def branch_of(self, terminal: Terminal) -> str | None:
+        if is_remote(terminal.address) or not is_live_agent_session(terminal):
+            return None
+        if terminal.cwd not in self._branches:
+            self._branches[terminal.cwd] = self._git.current_branch(terminal.cwd)
+        return self._branches[terminal.cwd]
+
+
+def _workset_goal(stream: Terminal, root: Terminal) -> str | None:
+    # The stream's workset file, looked for under its project root's folder and then its own
+    # (the same folder for a root). Folders on another machine are not read.
+    if stream.name is None:
+        return None
+    stream_folder_name = stream.name.removeprefix(STREAM_NAME_PREFIX)
+    if not stream_folder_name or "/" in stream_folder_name or stream_folder_name in {".", ".."}:
+        # hc names never hold these; refuse rather than read outside docs/streams.
+        return None
+    relative_path = WORKSET_RELATIVE_PATH.format(stream=stream_folder_name)
+    folders: list[Path] = []
+    for candidate in (root, stream):
+        if not is_remote(candidate.address) and candidate.cwd not in folders:
+            folders.append(candidate.cwd)
+    for folder in folders:
+        goal = read_workset_goal(folder / relative_path)
+        if goal is not None:
+            return goal
+    return None
+
+
+def _depth_of(address: str, places: dict[str, ProjectPlace]) -> int:
+    depth = 0
+    parent = places[address].parent
+    while parent is not None:
+        depth += 1
+        parent = places[parent].parent
+    return depth
+
+
+def _tree_order(root: str, children: dict[str, list[str]]) -> list[str]:
+    # The root, then each child followed by its own subtree, children in the host's order.
+    ordered: list[str] = []
+    pending = [root]
+    while pending:
+        address = pending.pop()
+        ordered.append(address)
+        pending.extend(reversed(children.get(address, [])))
+    return ordered
+
+
+class BuiltinProjectMapSource:
+    # The map built from the host's own listing (parent links, see map_projects): projects in
+    # the host's order of their orchestrators, then the standalone agent sessions, then every
+    # other terminal, as herdrmap lays out `map --json --all`. Each live local agent session's
+    # branch costs one git read per folder; a stream's goal is read from its workset file.
+    def __init__(self, git: GitWorktreeAdapter) -> None:
+        self._git = git
+
+    def project_map(self, terminals: list[Terminal]) -> ProjectMap:
+        places = map_projects(terminals)
+        by_address = {terminal.address: terminal for terminal in terminals}
+        branch_reader = _BranchReader(self._git)
+        sessions: dict[str, MappedSession] = {}
+        children: dict[str, list[str]] = {}
+        for terminal in terminals:
+            place = places[terminal.address]
+            if place.parent is not None:
+                children.setdefault(place.parent, []).append(terminal.address)
+            sessions[terminal.address] = MappedSession(
+                address=terminal.address,
+                name=terminal.name,
+                cwd=terminal.cwd,
+                agent=terminal.agent,
+                status=terminal.agent_status,
+                state=terminal.state,
+                role=place.role,
+                parent=place.parent,
+                depth=_depth_of(terminal.address, places),
+                branch=branch_reader.branch_of(terminal),
+                goal=(
+                    _workset_goal(terminal, by_address[place.project_root])
+                    if place.role is SessionRole.STREAM
+                    else None
+                ),
+            )
+        projects = [
+            MappedProject(
+                label=places[terminal.address].project,
+                root=terminal.address,
+                sessions=[sessions[address] for address in _tree_order(terminal.address, children)],
+            )
+            for terminal in terminals
+            if places[terminal.address].role is SessionRole.ORCHESTRATOR
+        ]
+        standalone = [
+            sessions[terminal.address]
+            for terminal in terminals
+            if places[terminal.address].role is SessionRole.STANDALONE
+            and is_live_agent_session(terminal)
+        ]
+        other = [
+            sessions[terminal.address]
+            for terminal in terminals
+            if not is_live_agent_session(terminal)
+        ]
+        logger.debug(
+            f"project map built projects={len(projects)} standalone={len(standalone)} "
+            f"other={len(other)}"
+        )
+        return ProjectMap(projects=projects, standalone=standalone, other=other)

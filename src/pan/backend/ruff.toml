@@ -4,3 +4,8 @@ extend = "../../../pyproject.toml"
 "pan.frontend".msg = "backend must not import frontend (see decisions/0001-layers.md)"
 "slack_bolt".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
 "slack_sdk".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
+"pan.backend.project_map".msg = "read the project map through the ProjectMapSource seam (see decisions/0004-project-routing.md)"
+
+# The registry is the one module that builds the built-in project map.
+[lint.per-file-ignores]
+"project_map_sources.py" = ["TID251"]

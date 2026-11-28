@@ -3,11 +3,13 @@ from __future__ import annotations
 from functools import cached_property
 
 from pan.backend.confirmations import FilePendingConfirmations, confirmations_path
+from pan.backend.project_map_sources import build_project_map_source
 from pan.core.models import PanConfig
 from pan.core.seams import (
     Clock,
     GitWorktreeAdapter,
     InboxDirectory,
+    ProjectMapSource,
     Reporter,
     SlackAdapter,
     TerminalHost,
@@ -75,6 +77,12 @@ class Wiring:
     @cached_property
     def git(self) -> GitWorktreeAdapter:
         return ShellGitWorktreeAdapter()
+
+    @cached_property
+    def project_map_source(self) -> ProjectMapSource:
+        # The configured project map (config `project_map`); the built-in one reads branches
+        # through `git`.
+        return build_project_map_source(self.config.project_map, git=self.git)
 
     @cached_property
     def inbox_directory(self) -> InboxDirectory:

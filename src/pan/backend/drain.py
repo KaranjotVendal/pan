@@ -25,6 +25,10 @@ class ThreadTie(BaseModel, frozen=True):
     terminal_address: str
     status: WorkerStatus
     note: str
+    # The project the thread was handed to, and whether it still waits for that project's
+    # orchestrator to pick a stream (`session` is then that orchestrator).
+    project: str | None = None
+    awaiting_handoff: bool = False
 
 
 class QuestionCandidate(BaseModel, frozen=True):
@@ -132,6 +136,8 @@ def _thread_tie(record: ThreadRecord | None) -> ThreadTie | None:
         terminal_address=record.terminal_address,
         status=record.status,
         note=note,
+        project=record.handoff.project if record.handoff is not None else None,
+        awaiting_handoff=record.awaiting_handoff,
     )
 
 

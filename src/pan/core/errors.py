@@ -111,6 +111,20 @@ class UnansweredQuestionError(PanError): ...
 class XSourceRefusedError(PanError): ...
 
 
+# `pan handoff` on a thread that is not waiting for a project's orchestrator to pick a stream
+# (never handed to a project, already handed on, or untied). Nothing was tied or posted.
+class NotAwaitingHandoffError(PanError): ...
+
+
+# `pan handoff --to <selector>` names no live agent session. Nothing was tied or posted.
+class HandoffTargetNotFoundError(PanError): ...
+
+
+# `pan handoff --to <selector>` names a live session outside the project the thread was handed
+# to: only that project's orchestrator and its streams may take it. Nothing was tied or posted.
+class TargetInOtherProjectError(PanError): ...
+
+
 # Installing, loading, unloading or reading pan's launchd agents failed (`pan service`).
 class ServiceError(PanError): ...
 

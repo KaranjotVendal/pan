@@ -122,7 +122,7 @@ class TerminalState(StrEnum):
 
 
 class SessionRole(StrEnum):
-    # A session's place in its project (backend.project_map): an orchestrator started live
+    # A session's place in its project (the project map, see ProjectMap): an orchestrator started live
     # streams and has no live parent of its own; a stream was started by a live session; a
     # standalone session is neither (plain shells are always standalone).
     ORCHESTRATOR = "orchestrator"
@@ -134,6 +134,13 @@ class TerminalHostKind(StrEnum):
     # The terminal multiplexer pan drives through the TerminalHost seam (config key
     # `terminal_host`). Only one host is active at a time.
     HC = "hc"
+
+
+class ProjectMapKind(StrEnum):
+    # Where pan gets its project map, through the ProjectMapSource seam (config key
+    # `project_map`; backend.project_map_sources.PROJECT_MAP_SOURCES builds each). "builtin" is
+    # pan's own map (backend.project_map); herdrmap is meant to plug in here later.
+    BUILTIN = "builtin"
 
 
 class InboxItem(BaseModel, frozen=True):
@@ -152,6 +159,26 @@ class InboxItem(BaseModel, frozen=True):
     @classmethod
     def _load_flat_item(cls, raw: Any) -> Any:
         return _lift_flat_conversation(raw, author_key="slack_user")
+
+
+class ProjectHandoff(BaseModel, frozen=True):
+    # A thread handed to a project (backend.project_routing): `project` is the project's label
+    # and `project_root` its root's address, the orchestrator the task was typed into. While
+    # `awaiting` the thread waits for that orchestrator to pick a stream (`pan handoff`), and
+    # nothing the orchestrator says reaches the thread. `thread_link` is the thread's Slack
+    # link given to it, `orchestrator_turn` its finished-turn count when the task was typed (a
+    # higher count with the orchestrator idle means its turn ended) and `nudged` whether pan
+    # has said no stream was picked. `task` is what the person asked for (with any follow-ups
+    # sent while it waited), which `pan handoff` types into the stream. Once handed on, the
+    # stream's record keeps `project` (not awaiting) so its status message says where the work
+    # went.
+    project: str
+    project_root: str
+    awaiting: bool = True
+    thread_link: str | None = None
+    task: str | None = None
+    orchestrator_turn: int | None = None
+    nudged: bool = False
 
 
 # Keys only a herdr-era thread record carries. Such a record points at a herdr pane that
@@ -199,6 +226,12 @@ class ThreadRecord(BaseModel):
     # A digest of the last answer pan posted to the thread (Stop hook or `check`), so the same
     # answer is never posted twice. None until one is posted.
     last_answer_digest: str | None = None
+    # Set when the thread was handed to a project (see ProjectHandoff); None otherwise.
+    handoff: ProjectHandoff | None = None
+
+    @property
+    def awaiting_handoff(self) -> bool:
+        return self.handoff is not None and self.handoff.awaiting
 
     @model_validator(mode="before")
     @classmethod
@@ -228,6 +261,9 @@ class ConfirmationCandidate(BaseModel, frozen=True):
     cwd: Path
     where: str | None = None
     label: str
+    # Set when the candidate is a project rather than a session: the project's label, and
+    # `address` is its orchestrator. Confirming it hands the task to that project.
+    project: str | None = None
 
 
 class PendingConfirmation(BaseModel, frozen=True):
@@ -267,7 +303,7 @@ class Terminal(BaseModel, frozen=True):
     # when it shows one (hc only; other hosts leave it empty). `turn` counts the agent's
     # finished turns when the host reports it (0 for a session that has not answered yet).
     # `parent` is the address of the terminal that started this one, as the host reports it;
-    # it may name a terminal that is gone (backend.project_map decides what that means).
+    # it may name a terminal that is gone (the project map decides what that means).
     address: str
     name: str | None = None
     where: str | None = None
@@ -277,6 +313,88 @@ class Terminal(BaseModel, frozen=True):
     agent_status: AgentStatus
     turn: int | None = None
     parent: str | None = None
+
+
+# The project map: which sessions form a project (an orchestrator and the streams it started)
+# and which stand alone. The models and their field names follow herdrmap's JSON
+# (`herdrmap map --json`, version 1), so a herdrmap-backed ProjectMapSource can fill them from
+# that output unchanged. herdrmap keys pan does not carry yet: `place` (pan keeps the Herdr
+# label as Terminal.where), `machine` (pan reads it from the address), `inbox_thread`,
+# `inbox_folder` and `extras`. Where pan's own names differ (Terminal.agent_status is a
+# session's `status`; SessionSummary.project and .project_root are its project's `label` and
+# `root`), decisions/0004-project-routing.md lists the mapping.
+class MappedSession(BaseModel, frozen=True):
+    # One terminal in the map. `parent` is its live parent's address (None without one);
+    # `depth` is 0 for an orchestrator, a standalone session and any other terminal, 1 for an
+    # orchestrator's streams, 2 for their own streams, and so on. `branch` is the git branch in
+    # its folder (live local agent sessions only) and `goal` a stream's workset goal.
+    address: str
+    name: str | None = None
+    cwd: Path
+    agent: str | None = None
+    status: AgentStatus
+    state: TerminalState
+    role: SessionRole
+    parent: str | None = None
+    depth: int = 0
+    branch: str | None = None
+    goal: str | None = None
+
+
+class MappedProject(BaseModel, frozen=True):
+    # An orchestrator and every stream under it: `root` is the orchestrator's address and
+    # `label` the project's name. `sessions` lists the orchestrator first, then each stream
+    # right after its parent.
+    label: str
+    root: str
+    sessions: list[MappedSession]
+
+
+class ProjectMap(BaseModel, frozen=True):
+    # Every project, then the live agent sessions in none (`standalone`), then every other
+    # terminal (`other`: shells, dev servers, finished terminals). A terminal the map does not
+    # list counts as in no project.
+    projects: list[MappedProject] = Field(default_factory=list)
+    standalone: list[MappedSession] = Field(default_factory=list)
+    other: list[MappedSession] = Field(default_factory=list)
+
+    def agent_sessions(self) -> list[MappedSession]:
+        # The live agent sessions: every project's, then the standalone ones.
+        project_sessions = [session for project in self.projects for session in project.sessions]
+        return [*project_sessions, *self.standalone]
+
+    def session_at(self, address: str) -> MappedSession | None:
+        # The terminal at this address, wherever the map lists it.
+        return next(
+            (
+                session
+                for session in (*self.agent_sessions(), *self.other)
+                if session.address == address
+            ),
+            None,
+        )
+
+    def agent_session_at(self, address: str) -> MappedSession | None:
+        # The live agent session at this address; None for any other terminal and for one
+        # the map does not list.
+        return next(
+            (session for session in self.agent_sessions() if session.address == address), None
+        )
+
+    def project_of(self, address: str) -> MappedProject | None:
+        # The project the session at this address belongs to; None when it is in none.
+        return next(
+            (
+                project
+                for project in self.projects
+                if any(session.address == address for session in project.sessions)
+            ),
+            None,
+        )
+
+    def project_rooted_at(self, root: str) -> MappedProject | None:
+        # The project whose orchestrator is at this address; None when no project is.
+        return next((project for project in self.projects if project.root == root), None)
 
 
 class WorktreeStatus(BaseModel, frozen=True):
@@ -348,18 +466,20 @@ class SessionSummary(BaseModel, frozen=True):
     label: str | None = None
     # When pan last updated the session's record: how recently it was used.
     updated_at: datetime | None = None
-    # The session's project (backend.project_map): its live parent, its role, the root of its
-    # parent chain (`project_root`, an address) and that root's label (`project`).
+    # The session's place in the project map (ProjectMap): its live parent, its role, and the
+    # project it belongs to, by label (`project`, herdrmap's project `label`) and by its
+    # orchestrator's address (`project_root`, herdrmap's project `root`); both None for a
+    # session in no project.
     parent: str | None = None
     role: SessionRole
-    project: str
-    project_root: str
+    project: str | None = None
+    project_root: str | None = None
     # The branch checked out in the session's folder; None outside a git repository, on a
     # detached HEAD, or on another machine.
     branch: str | None = None
     # The goal line of the stream's workset file (docs/streams/<stream>/workset.md), when one
-    # exists.
-    workset_goal: str | None = None
+    # exists (herdrmap's `goal`).
+    goal: str | None = None
 
 
 class LaunchdJobState(BaseModel, frozen=True):
@@ -417,6 +537,9 @@ class PanPaths(BaseModel, frozen=True):
 class PanConfig(BaseModel, frozen=True):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     terminal_host: TerminalHostKind = TerminalHostKind.HC
+    # Where the project map comes from; validated in utils.config, built in
+    # backend.project_map_sources.
+    project_map: ProjectMapKind = ProjectMapKind.BUILTIN
     orchestrator: OrchestratorConfig
     users: dict[str, UserPolicy] = Field(default_factory=dict)
     paths: PanPaths
