@@ -7,6 +7,23 @@ as it works.
 
 ## [Unreleased]
 
+### Added
+
+- A project map: `pan sessions --json` gives each session its live `parent`, a `role`
+  (orchestrator, stream or standalone, from hc's parent links, not Herdr spaces), its `project`
+  and `project_root` (the root of its parent chain), its folder's `branch` and, for a stream
+  with a `docs/streams/<stream>/workset.md`, its `workset_goal`. Only agent sessions (a status,
+  or a known agent program: `project_map.is_agent_session`, also used by the Slack list) take
+  part: a shell or dev server is never a stream and never makes its parent an orchestrator. A
+  parent that is gone, finished or not an agent session counts as none; a remote terminal's
+  bare parent address means its own machine's terminal when one exists, else the local one; a
+  parent cycle is cut at its lowest terminal number. The private "what's running" list keeps
+  the requester's order, lists a project's sessions together (indented, under a heading)
+  where its first one was, leaves standalone sessions without a heading, and shows each
+  branch. Built in `backend/project_map.py` (pure), `data/workset.py` and the new read-only
+  `GitWorktreeAdapter.current_branch` (live agent sessions only, 3s timeout);
+  `collect_sessions` now takes `git`.
+
 ### Changed
 
 - ruff now checks for the mistakes coding agents make most often (decisions/0003-lint-rules.md):

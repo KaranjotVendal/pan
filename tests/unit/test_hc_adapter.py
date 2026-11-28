@@ -158,6 +158,28 @@ def test_list_terminals_parses_every_entry(monkeypatch: pytest.MonkeyPatch) -> N
     assert shell.agent_status is AgentStatus.NONE
 
 
+@pytest.mark.parametrize(
+    "raw_parent, expected",
+    [("t7", "t7"), ("box/t7", "box/t7"), (None, None), ("", None), (17, None)],
+    ids=["local", "remote", "null", "empty", "not-a-string"],
+)
+def test_list_terminals_parses_the_parent(
+    monkeypatch: pytest.MonkeyPatch, raw_parent: object, expected: str | None
+) -> None:
+    entry = {"address": "t48", "cwd": "/repo/c", "state": "live", "parent": raw_parent}
+    _install_runner(monkeypatch, [_ok({"terminals": [entry]})])
+
+    (terminal,) = ShellHcAdapter().list_terminals()
+
+    assert terminal.parent == expected
+
+
+def test_an_entry_without_a_parent_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_runner(monkeypatch, [_ok(LS_OUTPUT)])
+
+    assert [terminal.parent for terminal in ShellHcAdapter().list_terminals()] == [None] * 3
+
+
 def test_list_terminals_filters_by_labels(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install_runner(monkeypatch, [_ok({"hidden_finished": 0, "terminals": []})])
 

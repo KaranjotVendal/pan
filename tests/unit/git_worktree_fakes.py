@@ -10,13 +10,15 @@ from pan.core.models import BranchStatus, WorktreeStatus
 @dataclass
 class FakeGitWorktree:
     # An in-memory GitWorktreeAdapter. `status` is what worktree_status returns; `branches`
-    # maps a repository to what branch_status returns there (None when it is absent). `errors`
+    # maps a repository to what branch_status returns there (None when it is absent);
+    # `current_branches` maps a folder to what current_branch returns (None when absent). `errors`
     # maps an operation name ("create", "status", "branch_status", "remove", "prune",
     # "delete_branch") to an error it raises. Every call but create is recorded in `calls` as a
     # tuple naming the operation and its arguments; create appends "worktree" to `timeline`, so
     # spawn tests can order it against the terminal host's steps.
     status: WorktreeStatus | None = None
     branches: dict[Path, BranchStatus] = field(default_factory=dict)
+    current_branches: dict[Path, str] = field(default_factory=dict)
     errors: dict[str, PanError] = field(default_factory=dict)
     calls: list[tuple[object, ...]] = field(default_factory=list)
     timeline: list[str] = field(default_factory=list)
@@ -33,6 +35,10 @@ class FakeGitWorktree:
             raise self.errors["status"]
         assert self.status is not None, "set FakeGitWorktree.status first"
         return self.status
+
+    def current_branch(self, path: Path) -> str | None:
+        self.calls.append(("current_branch", path))
+        return self.current_branches.get(path)
 
     def branch_status(self, repo: Path, branch: str) -> BranchStatus | None:
         self.calls.append(("branch_status", repo, branch))

@@ -540,7 +540,10 @@ def sessions(
     show: str | None = typer.Option(
         None,
         "--show",
-        help="terminal addresses to send the requester, comma-separated, in the order to list them",
+        help=(
+            "terminal addresses to send the requester, comma-separated, in the order to list "
+            "them; each project is listed together, where its first session was"
+        ),
     ),
     thread: str | None = typer.Option(None, "--thread", help="the thread the list was asked in"),
     channel: str | None = typer.Option(None, "--channel", help="the thread's channel"),
@@ -551,10 +554,11 @@ def sessions(
     """List all live hc terminals with the last thing each was asked, reconciled against the
     pan thread map, flagging status drift. --json emits the SessionSummary list. --show with
     --thread, --channel and --requester sends the requester alone the sessions at those
-    addresses (up to 5, in the order given), each with its state and a link to its thread.
+    addresses (up to 5, in the order given, a project's sessions together where its first one
+    was), each with its state, branch and a link to its thread.
     Exit 32: the private message failed."""
     wiring = load_wiring()
-    summaries = collect_sessions(wiring.terminal_host, wiring.thread_map)
+    summaries = collect_sessions(wiring.terminal_host, wiring.thread_map, git=wiring.git)
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return

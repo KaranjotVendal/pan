@@ -30,7 +30,7 @@ from pan.core.events import (
     ThreadNoticeReason,
     WorkKept,
 )
-from pan.core.models import AgentStatus, Conversation, SessionSummary, StatusState
+from pan.core.models import AgentStatus, Conversation, SessionRole, SessionSummary, StatusState
 from pan.frontend.slack_reporter import SlackReporter, thread_permalinks
 
 # Each event's exact Slack output: the user-visible contract the backend's events turn into.
@@ -392,6 +392,9 @@ def _summary(name: str, thread_ts: str | None) -> SessionSummary:
         agent_status=AgentStatus.WORKING,
         thread_ts=thread_ts,
         thread_channel="C0TEST" if thread_ts else None,
+        role=SessionRole.STANDALONE,
+        project=name,
+        project_root=f"t-{name}",
     )
 
 
@@ -413,6 +416,9 @@ def _summary_in(address: str, thread_ts: str | None) -> SessionSummary:
         is_pan_owned=True,
         thread_ts=thread_ts,
         thread_channel="C0TEST" if thread_ts is not None else None,
+        role=SessionRole.STANDALONE,
+        project="x",
+        project_root=address,
     )
 
 
