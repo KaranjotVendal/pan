@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
 
 from pan.core.errors import ConfigMissingError
-from pan.core.models import TerminalHostKind
+from pan.core.models import ProjectMapKind, TerminalHostKind
 from pan.utils.config import load_config
 
 
@@ -92,23 +93,33 @@ def test_herdr_era_pane_id_names_its_replacement(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "terminal_host_entry", [{}, {"terminal_host": "hc"}], ids=["omitted", "explicit-hc"]
+    "seam_entry, key, expected",
+    [
+        ({}, "terminal_host", TerminalHostKind.HC),
+        ({"terminal_host": "hc"}, "terminal_host", TerminalHostKind.HC),
+        ({}, "project_map", ProjectMapKind.BUILTIN),
+        ({"project_map": "builtin"}, "project_map", ProjectMapKind.BUILTIN),
+    ],
+    ids=["host-omitted", "host-explicit", "map-omitted", "map-explicit"],
 )
-def test_terminal_host_defaults_to_hc(tmp_path: Path, terminal_host_entry: dict) -> None:
-    data = {**_minimal_config(), **terminal_host_entry}
+def test_seam_choices_take_their_defaults(
+    tmp_path: Path, seam_entry: dict, key: str, expected: StrEnum
+) -> None:
+    data = {**_minimal_config(), **seam_entry}
 
     config = load_config(_write_config(tmp_path, data))
 
-    assert config.terminal_host is TerminalHostKind.HC
+    assert getattr(config, key) is expected
 
 
-@pytest.mark.parametrize("unknown_terminal_host", ["rex", "HC", "", 42, None])
-def test_unknown_terminal_host_is_a_clear_config_error(
-    tmp_path: Path, unknown_terminal_host: object
+@pytest.mark.parametrize("key", ["terminal_host", "project_map"])
+@pytest.mark.parametrize("unknown_choice", ["rex", "HC", "", 42, None])
+def test_an_unknown_seam_choice_is_a_clear_config_error(
+    tmp_path: Path, key: str, unknown_choice: object
 ) -> None:
-    data = {**_minimal_config(), "terminal_host": unknown_terminal_host}
+    data = {**_minimal_config(), key: unknown_choice}
 
-    with pytest.raises(ConfigMissingError, match=r"terminal_host .* is not supported"):
+    with pytest.raises(ConfigMissingError, match=rf"{key} .* is not supported"):
         load_config(_write_config(tmp_path, data))
 
 

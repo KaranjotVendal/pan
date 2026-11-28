@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from inbox_fakes import FakeInboxDirectory
+from project_map_fakes import FakeProjectMapSource
 from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
@@ -135,6 +136,7 @@ def _propose(
         confirmations=_store(tmp_path),
         reporter=reporter,
         clock=SettableClock(),
+        project_map_source=FakeProjectMapSource(),
     )
 
 
@@ -155,6 +157,7 @@ def _confirm(
         confirmations=_store(tmp_path),
         reporter=reporter,
         clock=clock if clock is not None else SettableClock(),
+        project_map_source=FakeProjectMapSource(),
     )
 
 

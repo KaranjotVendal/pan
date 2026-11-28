@@ -27,8 +27,10 @@ Drains the inbox exactly once and prints a list (empty: stop). Handle the entrie
 - `text`: what the person typed, with the `@pan` mention, a trailing client signature and phone
   punctuation cleaned (`—discard` reads `--discard`). Read this, not `raw_text`.
 - `tie`: `null`, or the session this thread's work belongs to: `session`, `terminal_address`,
-  `status` (`spawning`, `running`, `idle`, `blocked`, `done`, `failed`) and `note`. Follow the note:
-  one thread, one session; never start a second session for the same work.
+  `status` (`spawning`, `running`, `idle`, `blocked`, `done`, `failed`), `note`, `project` and
+  `awaiting_handoff`. Follow the note: one thread, one session; never start a second session for
+  the same work. `awaiting_handoff` true: the thread was handed to `project` and waits for its
+  orchestrator (`session`) to pick a stream.
 - `open_question`: `null`, or pan's open "Send this to ...?" question in this thread: `selector`,
   `task`, `requester`, `candidates` (`number`, `label`, `address`), `answered_by_requester` and
   `answer_text` (their latest reply since pan asked).
@@ -36,7 +38,8 @@ Drains the inbox exactly once and prints a list (empty: stop). Handle the entrie
 ## 2. Decide what the person means
 
 Typical requests, in any wording: a task to do; a follow-up to the tied session; a task for a
-session they name ("to ocr: rerun it", "ask pan-7 to ..."); start a new session even in a tied
+session they name ("to ocr: rerun it", "ask pan-7 to ..."); a task for a project ("atlas: add
+the export", "for the atlas project ..."); start a new session even in a tied
 thread ("new: ...", "start fresh"); what is running; the tied session's latest answer ("check",
 "any news?"); untie the thread ("forget"); close the session ("done"); summarize what a named session
 is doing ("read pan-7"), or post its whole transcript ("read pan-7 --full"); a one-off message into
@@ -92,13 +95,44 @@ checks the name against the message it drained as `--item`. Exit 28: no exact ma
 label, or a name not in that message. Nothing was sent: propose. Exit 26 or 23: pan replied; do
 nothing more. Exit 35: the thread is from X, which may only start new sessions; do nothing more.
 
+**Hand to a project** (the person names a project, or their task plainly belongs to one, and
+they did not name one session exactly). A project is a `project` in `pan sessions --json`: an
+orchestrator (`role` `orchestrator`) and its streams. A standalone session has `project` null and
+is never handed work as a project: send to it or start one. A name that is one session's exact
+address or name (`to t48`) is a send to that session, not a project.
+
+    pan send --thread <thread> --channel <channel> --project '<project as typed>' --task '<task>' --requester <requester> --item <item.id> [--reply-in-slack]
+
+pan types the task, the thread's link and the filled-in `pan handoff` command into the
+project's orchestrator, which only picks the stream (it does not do the task unless it hands it
+to itself); the thread waits for it, and nothing that orchestrator says reaches the thread.
+`pan handoff` then types the task into the stream picked. Exit 28: no project matches exactly or the name is not in their
+message; nothing was sent: propose with `--project-candidate`. Exit 26 or 23: pan replied.
+A follow-up while `tie.awaiting_handoff` is true is a plain `pan send` (no `--to`): pan types it
+into that orchestrator again with the same command. Exit 22 there: the orchestrator has ended,
+pan untied the thread and said so; do nothing more. If the person names a stream there ("to
+stream-login"), pass the waiting task to it (pan types the task, any follow-ups and the thread's
+link into that stream, as a send does; add `--note '<text>'` only for words of theirs that are
+not part of the task):
+
+    pan handoff --thread <thread> --channel <channel> --to '<name as typed>' --item <item.id>
+
+or, when they also gave it a new task, `pan send --to` as usual. `pan handoff` exits 37 (the
+thread is not waiting for a handoff), 38 (no live session has that exact address or name) or 39
+(that session is in another project): ask which stream they mean with `pan slack-post`; exit 28:
+the name is not in their message; exit 26 or 23: pan replied, and the thread keeps waiting.
+
 **Propose** (only after exit 28): run `pan sessions --json`, compare each live session's `name`,
-`where`, `cwd`, `label`, `last_ask`, `inbox_thread_name`, `project`, `role`, `workset_goal` and
+`where`, `cwd`, `label`, `last_ask`, `inbox_thread_name`, `project`, `role`, `goal` and
 `branch` with what they wrote, and pick the one most likely session, or up to 3 if several fit
 about equally, most likely first, or none. A name that fits a project means that project's
 sessions (same `project_root`):
 
     pan propose --thread <thread> --channel <channel> --to '<name as typed>' --task '<task>' --requester <requester> --item <item.id> [--reply-in-slack] [--candidate <address> ...]
+
+After `pan send --project` exited 28, propose projects instead: pass `--project-candidate
+<orchestrator address>` (up to 3) in place of `--candidate`, never both; it asks "Send this to the
+<project> project?", and confirming hands the task to that project as above.
 
 It asks the person in the thread and types nothing; their reply arrives as a new item. Exit 28:
 `--item` is not the requester's newest message in the thread; pan already said so.
@@ -121,7 +155,7 @@ question stays open and needs a new reply. Exit 20: the session ended. A reply f
 
 **What's running**: run `pan sessions --json`, pick up to 5 sessions the person most likely means
 (all of them when they asked generally: waiting on them first, then working, then recently used),
-and send them privately. Use `project`, `role`, `name`, `workset_goal` and `branch` with the other
+and send them privately. Use `project`, `role`, `name`, `goal` and `branch` with the other
 fields: a session is an orchestrator, one of its streams, or standalone, and a question about a
 project means that project's sessions (same `project_root`). pan keeps your order and lists a
 project's sessions together, where its first one is:
@@ -170,8 +204,8 @@ question back, a read summary, or a failure only you can explain.
 - Never post a terminal address, a local file path, an Inbox thread name or link, or anything with
   `localhost` in the thread, even inside a transcript (pan cuts only local paths). Those go only to
   the requester, and pan sends them itself.
-- Exit 28 means propose; never retry `pan send --to` with a guessed name, never fall back to the tie,
-  never spawn instead.
+- Exit 28 means propose; never retry `pan send --to` or `--project` with a guessed name, never
+  fall back to the tie, never spawn instead.
 - Pass `--discard` only when the person's whole message was `done --discard`; "just close it" is
   plain `done`.
 - Confirm only when `answered_by_requester` is true and their reply picks a session.

@@ -393,8 +393,6 @@ def _summary(name: str, thread_ts: str | None) -> SessionSummary:
         thread_ts=thread_ts,
         thread_channel="C0TEST" if thread_ts else None,
         role=SessionRole.STANDALONE,
-        project=name,
-        project_root=f"t-{name}",
     )
 
 
@@ -417,8 +415,6 @@ def _summary_in(address: str, thread_ts: str | None) -> SessionSummary:
         thread_ts=thread_ts,
         thread_channel="C0TEST" if thread_ts is not None else None,
         role=SessionRole.STANDALONE,
-        project="x",
-        project_root=address,
     )
 
 

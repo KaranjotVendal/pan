@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from pan.backend.project_map import (
-    ProjectPlace,
-    is_live_agent_session,
-    is_remote,
-    map_projects,
-)
 from pan.core.errors import PrivateMessageError, SlackPostError
 from pan.core.events import SessionsListed
 from pan.core.models import (
     AgentStatus,
     Conversation,
+    MappedProject,
+    MappedSession,
     SessionRole,
     SessionSummary,
     Terminal,
@@ -20,14 +14,11 @@ from pan.core.models import (
     ThreadRecord,
     WorkerStatus,
 )
-from pan.core.seams import GitWorktreeAdapter, Reporter, TerminalHost, ThreadMap
+from pan.core.seams import ProjectMapSource, Reporter, TerminalHost, ThreadMap
 from pan.data.transcript import last_user_text
-from pan.data.workset import read_workset_goal
 from pan.utils.config import (
     SESSION_LAST_ASK_MAX_LENGTH,
-    STREAM_NAME_PREFIX,
     WORKER_BRIEF_TASK_MARKER,
-    WORKSET_RELATIVE_PATH,
 )
 from pan.utils.logging import initialise_logger
 
@@ -121,12 +112,27 @@ def joins_terminal(record: ThreadRecord, terminal: Terminal) -> bool:
     return joins_by_address(record, terminal) or joins_by_name(record, terminal)
 
 
+def session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
+    # The record pan keeps for the session in this terminal (pan's own or a desk session),
+    # joined by address or by name under the rules of joins_terminal; a tied record wins,
+    # then the newest. A thread waiting for a project's orchestrator to pick a stream is the
+    # project's, not that session's, so its record never counts as the orchestrator's.
+    matches = [
+        record
+        for record in records
+        if not record.awaiting_handoff and joins_terminal(record, terminal)
+    ]
+    return _preferred(matches)
+
+
 def _match_record(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
     # The join to pan's records, most precise first: by address, then by name (see
     # joins_by_address / joins_by_name), then, for pan's own workers with no recorded address
     # only, the worktree path against the terminal's launch folder. A record whose address
     # names another terminal never joins by worktree alone, so a new, differently named
-    # terminal in a killed worker's worktree does not inherit its record.
+    # terminal in a killed worker's worktree does not inherit its record. A thread waiting
+    # for a project's orchestrator is the project's, so it never joins the orchestrator.
+    records = [record for record in records if not record.awaiting_handoff]
     by_address = [record for record in records if joins_by_address(record, terminal)]
     if by_address:
         return _preferred(by_address)
@@ -171,49 +177,11 @@ def _known_inbox_thread_name(record: ThreadRecord | None) -> str | None:
     return record.inbox_thread_name
 
 
-def _workset_goal(terminal: Terminal, root: Terminal) -> str | None:
-    # The stream's workset file, looked for under its project root's folder and then its own
-    # (the same folder for a root). Folders on another machine are not read.
-    if terminal.name is None:
-        return None
-    stream = terminal.name.removeprefix(STREAM_NAME_PREFIX)
-    if not stream or "/" in stream or stream in {".", ".."}:
-        # hc names never hold these; refuse rather than read outside docs/streams.
-        return None
-    relative_path = WORKSET_RELATIVE_PATH.format(stream=stream)
-    folders: list[Path] = []
-    for candidate in (root, terminal):
-        if not is_remote(candidate.address) and candidate.cwd not in folders:
-            folders.append(candidate.cwd)
-    for folder in folders:
-        goal = read_workset_goal(folder / relative_path)
-        if goal is not None:
-            return goal
-    return None
-
-
-class _BranchReader:
-    # One git read per distinct local folder of a live agent session; other terminals (shells,
-    # dev servers, finished ones) and folders on another machine get no branch.
-    def __init__(self, git: GitWorktreeAdapter) -> None:
-        self._git = git
-        self._branches: dict[Path, str | None] = {}
-
-    def branch_of(self, terminal: Terminal) -> str | None:
-        if is_remote(terminal.address) or not is_live_agent_session(terminal):
-            return None
-        if terminal.cwd not in self._branches:
-            self._branches[terminal.cwd] = self._git.current_branch(terminal.cwd)
-        return self._branches[terminal.cwd]
-
-
 def _summary(
     terminal: Terminal,
     record: ThreadRecord | None,
-    place: ProjectPlace,
-    *,
-    branch: str | None,
-    workset_goal: str | None,
+    mapped: MappedSession | None,
+    project: MappedProject | None,
 ) -> SessionSummary:
     # A desk session (a record with started_by_pan False) is not pan's: it has a thread but no
     # pan status, since no pan hooks report its turns.
@@ -234,44 +202,39 @@ def _summary(
         inbox_thread_name=_known_inbox_thread_name(record),
         label=record.status_label if record is not None else None,
         updated_at=record.updated_at if record is not None else None,
-        parent=place.parent,
-        role=place.role,
-        project=place.project,
-        project_root=place.project_root,
-        branch=branch,
-        workset_goal=workset_goal,
+        parent=mapped.parent if mapped is not None else None,
+        role=mapped.role if mapped is not None else SessionRole.STANDALONE,
+        project=project.label if project is not None else None,
+        project_root=project.root if project is not None else None,
+        branch=mapped.branch if mapped is not None else None,
+        goal=mapped.goal if mapped is not None else None,
     )
 
 
 def collect_sessions(
-    terminal_host: TerminalHost, thread_map: ThreadMap, *, git: GitWorktreeAdapter
+    terminal_host: TerminalHost,
+    thread_map: ThreadMap,
+    *,
+    project_map_source: ProjectMapSource,
 ) -> list[SessionSummary]:
     # Pure reconcile over the injected seams: enumerate every live terminal, join the
     # pan thread map to identify pan-owned ones, and flag status drift. Ownership comes
     # only from the thread map, never from host labels, so a host without labels works. The
     # thread map is read, never rewritten (INV-7); drift is reported, not healed. Each session
-    # also gets its place in the project map, its folder's branch and its workset goal.
+    # also gets its place in the project map (its parent, role, project, branch and goal); a
+    # terminal the map does not list is standalone, in no project.
     records = thread_map.records()
     terminals = terminal_host.list_terminals()
-    by_address = {terminal.address: terminal for terminal in terminals}
-    places = map_projects(terminals)
-    branch_reader = _BranchReader(git)
-    summaries: list[SessionSummary] = []
-    for terminal in terminals:
-        place = places[terminal.address]
-        summaries.append(
-            _summary(
-                terminal,
-                _match_record(terminal, records),
-                place,
-                branch=branch_reader.branch_of(terminal),
-                workset_goal=(
-                    _workset_goal(terminal, by_address[place.project_root])
-                    if place.role is SessionRole.STREAM
-                    else None
-                ),
-            )
+    project_map = project_map_source.project_map(terminals)
+    summaries = [
+        _summary(
+            terminal,
+            _match_record(terminal, records),
+            project_map.session_at(terminal.address),
+            project_map.project_of(terminal.address),
         )
+        for terminal in terminals
+    ]
     logger.info(f"sessions collected count={len(summaries)}")
     return summaries
 

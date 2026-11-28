@@ -4,7 +4,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, assert_never
 
-from pan.backend.project_map import is_agent_session
+from pan.backend.delivery import is_agent_session
 from pan.backend.spawn import start_failed_text
 from pan.core.events import (
     ChoiceUnclear,
@@ -22,7 +22,7 @@ from pan.core.events import (
     ThreadNoticeReason,
     WorkKept,
 )
-from pan.core.models import AgentStatus, SessionRole, SessionSummary, StatusState, WorkerStatus
+from pan.core.models import AgentStatus, SessionSummary, StatusState, WorkerStatus
 from pan.utils.config import SESSIONS_SLACK_MAX_COUNT
 from pan.utils.text import status_label
 
@@ -89,6 +89,16 @@ def status_context_text(
     return " · ".join(parts)
 
 
+def handoff_line(session_name: str, project: str | None, *, awaiting_handoff: bool) -> str | None:
+    # "Handed to <project>" while the project's orchestrator picks a stream, then "Handed to
+    # <stream> in <project>"; None for a thread never handed to a project.
+    if project is None:
+        return None
+    if awaiting_handoff:
+        return f"Handed to {escape_mrkdwn(project)}"
+    return f"Handed to {escape_mrkdwn(session_name)} in {escape_mrkdwn(project)}"
+
+
 def status_blocks(
     state: StatusState,
     *,
@@ -98,14 +108,20 @@ def status_blocks(
     now: datetime,
     replies_in_thread: bool = False,
     detail: str | None = None,
+    project: str | None = None,
+    awaiting_handoff: bool = False,
 ) -> list[dict[str, Any]]:
     # A section with the state in bold and the task label under it (and, when waiting, what
-    # the session waits for), then a context line: session name, elapsed and updated time.
+    # the session waits for; for a thread handed to a project, where the work went), then a
+    # context line: session name, elapsed and updated time.
     lines = [f"*{STATUS_TITLES[state]}*"]
     if label:
         lines.append(escape_mrkdwn(label))
     if detail:
         lines.append(f"_{escape_mrkdwn(status_label(detail))}_")
+    handed_line = handoff_line(session_name, project, awaiting_handoff=awaiting_handoff)
+    if handed_line is not None:
+        lines.append(handed_line)
     context = status_context_text(
         session_name=session_name,
         started_at=started_at,
@@ -179,9 +195,9 @@ _LOOSE_UNDERSCORE = re.compile(r"(?<![^\W_])_|_(?![^\W_])")
 
 def session_group(summary: SessionSummary) -> str | None:
     # The group a session is listed under; None for a terminal that is not an agent session
-    # (project_map.is_agent_session: a shell, a dev server), unless it is a pan worker still
+    # (delivery.is_agent_session: a shell, a dev server), unless it is a pan worker still
     # booting. A Claude session reports no status
-    # until its first turn ends (see session_control._is_ready), so it and an unknown status
+    # until its first turn ends (see delivery.is_ready), so it and an unknown status
     # fall back to pan's record. With no record, a Claude session with no status is most
     # often one nobody has asked anything yet, so it counts as idle; an unknown status as
     # working.
@@ -255,19 +271,20 @@ def _session_line(summary: SessionSummary, permalinks: dict[str, str]) -> str:
 
 def sessions_by_project(selected: list[SessionSummary]) -> list[list[SessionSummary]]:
     # The sessions grouped by project, each project where its first chosen session was, and
-    # the chosen order kept inside each.
+    # the chosen order kept inside each. A session in no project is a group of its own.
     groups: dict[str, list[SessionSummary]] = {}
     for summary in selected:
-        groups.setdefault(summary.project_root, []).append(summary)
+        groups.setdefault(summary.project_root or summary.address, []).append(summary)
     return list(groups.values())
 
 
 def _project_heading(group: list[SessionSummary]) -> str | None:
-    # Only a project with an orchestrator gets a heading; a standalone session is listed on its
-    # own line, so standalone sessions sharing a space label never repeat a heading.
-    if all(summary.role is SessionRole.STANDALONE for summary in group):
+    # Only a project gets a heading; a session in no project is listed on its own line, so
+    # standalone sessions sharing a space label never repeat a heading.
+    first = group[0]
+    if first.project is None or first.project_root is None:
         return None
-    label = plain_mrkdwn(group[0].project) or group[0].project_root
+    label = plain_mrkdwn(first.project) or first.project_root
     return f"*{label}*"
 
 
@@ -307,6 +324,8 @@ EXPIRED_REPLY = "Not sent: that question expired. Send the message again."
 # An action refused because the message it rests on (--item) cannot be used: unknown, not the
 # sender's newest in the thread, or not from the requester. No session names or paths.
 UNUSABLE_ITEM_REPLY = "I couldn't act on that message; please send the request again."
+# Posted once when a project's orchestrator ended its turn without picking a stream.
+NO_STREAM_PICKED_REPLY = "No stream picked yet. Name one with `@pan to <stream>`."
 # How to start new work instead, offered when a `to` selector matches no session at all.
 NEW_WORK_HINT = "@pan new: <your text>"
 
@@ -316,6 +335,7 @@ _THREAD_NOTICE_TEXTS: dict[ThreadNoticeReason, str] = {
     ThreadNoticeReason.QUESTION_EXPIRED: EXPIRED_REPLY,
     ThreadNoticeReason.NOT_SENT: NOT_SENT_REPLY,
     ThreadNoticeReason.MESSAGE_UNUSABLE: UNUSABLE_ITEM_REPLY,
+    ThreadNoticeReason.NO_STREAM_PICKED: NO_STREAM_PICKED_REPLY,
 }
 
 # Each takes the session's name as {name}.
@@ -346,6 +366,10 @@ _SESSION_NOTICE_TEMPLATES: dict[SessionNoticeReason, str] = {
     ),
     SessionNoticeReason.WORKTREE_UNREADABLE: "Could not read {name}'s worktree; kept it.",
     SessionNoticeReason.PROPOSED_SESSION_GONE: "{name} is no longer running; not sent",
+    SessionNoticeReason.PROJECT_ORCHESTRATOR_ENDED: (
+        "The {name} orchestrator has ended. Name a session with `@pan to <name>` or start "
+        "fresh with `@pan new: <your text>`."
+    ),
 }
 
 # The events slack_reporter posts as one plain line in the thread.

@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from pan.core.errors import ThreadNotFoundError
-from pan.core.models import Conversation, ReplyMode, ThreadRecord, ThreadSource, WorkerStatus
-from pan.data.threadmap import FileThreadMap, tie_note
+from pan.core.models import (
+    Conversation,
+    ProjectHandoff,
+    ReplyMode,
+    ThreadRecord,
+    ThreadSource,
+    WorkerStatus,
+)
+from pan.data.threadmap import FileThreadMap, thread_map_lock_path, tie_note
 
 
 class FakeClock:
@@ -604,3 +614,80 @@ def test_a_flat_record_from_before_conversation_loads_and_is_rewritten_in_the_ne
     reloaded = thread_map.get(expected_conversation)
     assert reloaded is not None
     assert reloaded.status is WorkerStatus.IDLE
+
+
+_WAITING = _record(terminal_name="atlas-orch").model_copy(
+    update={"handoff": ProjectHandoff(project="atlas", project_root="t12")}
+)
+_WAITING_CONVERSATION = _WAITING.conversation
+
+
+_THREAD_MAP_WRITES: dict[str, Callable[[FileThreadMap], object]] = {
+    "put": lambda thread_map: thread_map.put(_record(thread_ts="1718000000.000900")),
+    "tie": lambda thread_map: thread_map.tie(_record(thread_ts="1718000000.000900")),
+    "untie": lambda thread_map: thread_map.untie(_WAITING_CONVERSATION),
+    "update_status": lambda thread_map: thread_map.update_status(
+        _WAITING_CONVERSATION, WorkerStatus.IDLE
+    ),
+    "set_reply_mode": lambda thread_map: thread_map.set_reply_mode(
+        _WAITING_CONVERSATION, ReplyMode.SLACK
+    ),
+    "record_status_message": lambda thread_map: thread_map.record_status_message(
+        _WAITING_CONVERSATION, "1718000000.000500"
+    ),
+    "record_posted_answer": lambda thread_map: thread_map.record_posted_answer(
+        _WAITING_CONVERSATION, "digest"
+    ),
+    "record_task": lambda thread_map: thread_map.record_task(
+        _WAITING_CONVERSATION, "label", datetime(2026, 7, 16, 11, 0, 0, tzinfo=UTC)
+    ),
+    "record_inbox_thread": lambda thread_map: thread_map.record_inbox_thread(
+        _WAITING_CONVERSATION, "thread-1", None
+    ),
+    "record_session": lambda thread_map: thread_map.record_session(
+        _WAITING_CONVERSATION, "session-9", None
+    ),
+    "mark_handoff_nudged": lambda thread_map: thread_map.mark_handoff_nudged(
+        _WAITING_CONVERSATION, session_name="atlas-orch"
+    ),
+    "end_handoff_wait": lambda thread_map: thread_map.end_handoff_wait(
+        _WAITING_CONVERSATION, session_name="atlas-orch"
+    ),
+}
+
+
+@pytest.mark.parametrize("write", list(_THREAD_MAP_WRITES.values()), ids=list(_THREAD_MAP_WRITES))
+def test_every_write_waits_for_the_lock_another_process_holds(
+    tmp_path: Path, write: Callable[[FileThreadMap], object]
+) -> None:
+    threads_path = tmp_path / "threads.json"
+    thread_map = FileThreadMap(threads_path, FakeClock(datetime(2026, 7, 16, 10, 0, tzinfo=UTC)))
+    thread_map.tie(_WAITING)
+    before = threads_path.read_text()
+    writer = threading.Thread(target=write, args=(thread_map,))
+
+    with thread_map_lock_path(threads_path).open("a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        writer.start()
+        writer.join(timeout=0.3)
+        # Blocked: nothing written while the lock is held elsewhere.
+        assert writer.is_alive()
+        assert threads_path.read_text() == before
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+    writer.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert threads_path.read_text() != before
+
+
+def test_untying_a_waiting_thread_ends_its_wait(tmp_path: Path) -> None:
+    thread_map = FileThreadMap(
+        tmp_path / "threads.json", FakeClock(datetime(2026, 7, 16, 10, 0, tzinfo=UTC))
+    )
+    thread_map.tie(_WAITING)
+
+    thread_map.tie(_record(thread_ts=_WAITING_CONVERSATION.id, terminal_name="stream-login"))
+
+    waiting = thread_map.get(_WAITING_CONVERSATION, session_name="atlas-orch")
+    assert waiting is not None
+    assert (waiting.tied, waiting.handoff) == (False, None)

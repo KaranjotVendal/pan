@@ -3,11 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from pan.backend.delivery import deliver_when_ready, session_name
 from pan.backend.interface import INCOMPLETE_READ_NOTICE, read_session, resolve_target
+from pan.backend.project_routing import check_waiting_thread, forward_to_project
 from pan.backend.sessions import (
     inbox_thread_known,
     joins_by_address,
     joins_terminal,
+    session_record_for,
 )
 from pan.backend.spawn import (
     RELAYED_FOLLOW_UP_SENTENCE,
@@ -38,8 +41,6 @@ from pan.core.errors import (
 )
 from pan.core.events import (
     CleanupFailed,
-    NotDelivered,
-    NotDeliveredReason,
     ScreenCaptured,
     SessionClosed,
     SessionNotice,
@@ -53,6 +54,7 @@ from pan.core.models import (
     BranchStatus,
     Conversation,
     InboxThread,
+    ProjectHandoff,
     ReplyMode,
     StatusState,
     Terminal,
@@ -73,7 +75,6 @@ from pan.core.seams import (
 from pan.data.transcript import last_assistant_text
 from pan.utils.config import (
     CHECK_SCREEN_MAX_LINES,
-    CLAUDE_AGENT_NAMES,
     WORKER_BRIEF_TASK_MARKER,
     WORKER_SETTINGS_RELATIVE_PATH,
 )
@@ -95,28 +96,9 @@ FROM_SLACK_EXISTING_OR_NEW_THREAD_HEADER = (
     'for this work if you already have one; otherwise start one named "{inbox_thread_name}". '
     "{slack_reply_sentence} {relayed_follow_up_sentence}"
 )
-# The agent states in which a session is waiting for input, so text can be typed into it. Any
-# other state (working, an error, no status, an unknown one) counts as busy, except a fresh
-# Claude session (see _is_ready).
-_READY_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.DONE})
 # A screen line made only of box-drawing characters (Claude Code's dividers and banner frame),
 # ASCII rule characters and whitespace carries nothing worth posting.
 _DIVIDER_LINE = re.compile(r"[\s\u2500-\u259f\-=_]*")
-
-
-def _session_name(terminal: Terminal) -> str:
-    return terminal.name or terminal.address
-
-
-def _session_record_for(terminal: Terminal, records: list[ThreadRecord]) -> ThreadRecord | None:
-    # The record pan keeps for the session in this terminal (pan's own or a desk session),
-    # joined by address or by name under the rules of joins_terminal; a tied record wins,
-    # then the newest.
-    matches = [record for record in records if joins_terminal(record, terminal)]
-    for record in matches:
-        if record.tied:
-            return record
-    return max(matches, key=lambda record: record.updated_at) if matches else None
 
 
 def from_slack_text(
@@ -134,52 +116,6 @@ def from_slack_text(
         relayed_follow_up_sentence=RELAYED_FOLLOW_UP_SENTENCE,
     )
     return f"{header}{WORKER_BRIEF_TASK_MARKER}{text}"
-
-
-def _is_ready(terminal: Terminal) -> bool:
-    # A Claude session reports no status until its first turn ends, so a brand-new one reads
-    # NONE while it waits at its prompt. NONE counts as ready only for a known Claude agent
-    # that has not finished a turn (or whose host does not count turns); a shell or other
-    # program with no status, UNKNOWN and WORKING stay refused.
-    if terminal.agent_status in _READY_STATUSES:
-        return True
-    return (
-        terminal.agent_status is AgentStatus.NONE
-        and terminal.agent in CLAUDE_AGENT_NAMES
-        and (terminal.turn is None or terminal.turn == 0)
-    )
-
-
-def _deliver(
-    terminal_host: TerminalHost,
-    terminal: Terminal,
-    text: str,
-    *,
-    reporter: Reporter,
-    conversation: Conversation,
-    retry_choice: str | None = None,
-) -> None:
-    # Type the text only into a session that is ready for it. Busy, or a state pan cannot
-    # read, is refused (typing could land in the middle of someone's work there); waiting on
-    # a person is refused too, by pan here or by the host at the send. A refusal is reported
-    # and raises, with nothing typed; `retry_choice`, when given, is the person's answer to
-    # pan's question, which the refusal tells them to send again later.
-    def refusal(reason: NotDeliveredReason) -> NotDelivered:
-        return NotDelivered(
-            reason=reason, session_name=_session_name(terminal), retry_choice=retry_choice
-        )
-
-    if terminal.agent_status is AgentStatus.BLOCKED:
-        reporter.report(conversation, refusal(NotDeliveredReason.WAITING_ON_PROMPT))
-        raise TargetBlockedError(f"{terminal.address} is waiting on a person")
-    if not _is_ready(terminal):
-        reporter.report(conversation, refusal(NotDeliveredReason.BUSY))
-        raise SessionBusyError(f"{terminal.address} is {terminal.agent_status.value}")
-    try:
-        terminal_host.send(terminal.address, text)
-    except TargetBlockedError:
-        reporter.report(conversation, refusal(NotDeliveredReason.WAITING_ON_PROMPT))
-        raise
 
 
 def _with_inbox_link(
@@ -233,6 +169,8 @@ def send_to_session(
     reporter: Reporter,
     clock: Clock,
     retry_choice: str | None = None,
+    label: str | None = None,
+    handoff: ProjectHandoff | None = None,
 ) -> ThreadRecord:
     # `pan send --to <selector>`: send the task to the live session the selector names exactly
     # (address, name, or Herdr label or space; see resolve_target), pan's own or a desk
@@ -243,7 +181,9 @@ def send_to_session(
     # session or one waiting on a prompt is reported as not delivered and raises, with nothing
     # sent.
     # On success the thread's status message says Working, and the session's Inbox thread and
-    # terminal go to the requester only.
+    # terminal go to the requester only. `label` is the status message's task when it is not
+    # `text` itself, and `handoff` the project that handed the session this work (`pan
+    # handoff`); a plain send by name ties the session with no project.
     terminals = terminal_host.list_terminals()
     try:
         target = resolve_target(selector, terminals)
@@ -251,8 +191,20 @@ def send_to_session(
         logger.info(f"no exact match for selector={selector} conversation={conversation.key}")
         raise NoExactMatchError(f"no session matches '{selector}' exactly") from error
 
-    name = _session_name(target)
-    session_record = _session_record_for(target, thread_map.records())
+    name = session_name(target)
+    # The thread's current record: its status message is the one to edit, wherever the work
+    # goes. When it waits for a project's orchestrator and the person names that orchestrator,
+    # the waiting record becomes this session's record (its wait cleared below), so it is not
+    # replaced by a second record under the same key.
+    current = thread_map.get(conversation)
+    session_record = session_record_for(target, thread_map.records())
+    if (
+        session_record is None
+        and current is not None
+        and current.awaiting_handoff
+        and joins_terminal(current, target)
+    ):
+        session_record = current
     found_thread: InboxThread | None = None
     looked_up_name: str | None = None
     if (
@@ -272,7 +224,7 @@ def send_to_session(
         inbox_thread = inbox_thread_name(name, text)
         thread_known = session_record is not None and inbox_thread_known(session_record)
     reply_mode = ReplyMode.SLACK if reply_in_slack else ReplyMode.ON_DEMAND
-    _deliver(
+    deliver_when_ready(
         terminal_host,
         target,
         from_slack_text(inbox_thread, text, reply_mode, thread_known=thread_known),
@@ -297,8 +249,10 @@ def send_to_session(
             requester=requester,
             reply_mode=reply_mode,
             inbox_thread_name=inbox_thread,
-            status_label=status_label(text),
+            status_label=label if label is not None else status_label(text),
             task_started_at=now,
+            status_message_ts=current.status_message_ts if current is not None else None,
+            handoff=handoff,
         )
     else:
         same_thread = session_record.conversation.key == conversation.key
@@ -310,10 +264,19 @@ def send_to_session(
             "inbox_thread_name": inbox_thread,
             "created_at": session_record.created_at if same_thread else now,
             "updated_at": now,
-            "status_label": status_label(text),
+            "status_label": label if label is not None else status_label(text),
             "task_started_at": now,
-            # A status message lives in its own thread; moving to another starts a new one.
-            "status_message_ts": session_record.status_message_ts if same_thread else None,
+            # The thread's one status message, edited in place; a session moving here from
+            # another thread leaves that thread's message behind.
+            "status_message_ts": (
+                current.status_message_ts
+                if current is not None
+                else session_record.status_message_ts
+                if same_thread
+                else None
+            ),
+            # Sent by name: whatever project handed it work before, this tie is not that.
+            "handoff": handoff,
         }
         if not session_record.started_by_pan:
             # No hooks report a desk session's turns; it was just given work.
@@ -359,11 +322,24 @@ def follow_up_to_session(
     # `reply_in_slack` switches the thread to the reply-in-Slack mode, saved right after the
     # text is typed, so the Stop hook posts this answer; a busy or blocked refusal leaves the
     # record unchanged. Without it the mode is left as it is (never back to on demand). Once
-    # typed, the follow-up is the thread's task and its status message says Working.
+    # typed, the follow-up is the thread's task and its status message says Working. A thread
+    # still waiting for a project's orchestrator to pick a stream forwards it to that
+    # orchestrator again (project_routing.forward_to_project).
     record = thread_map.get(conversation)
     if record is None or not record.tied:
         reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED))
         raise ThreadNotFoundError(f"no tied session for thread_ts={conversation.id}")
+    if record.awaiting_handoff:
+        # No stream is picked yet: the follow-up goes to the project's orchestrator again.
+        return forward_to_project(
+            record=record,
+            text=text,
+            terminal_host=terminal_host,
+            thread_map=thread_map,
+            reporter=reporter,
+            clock=clock,
+            reply_in_slack=reply_in_slack,
+        )
     terminal = _live_terminal(terminal_host, record)
     if terminal is None:
         if not record.started_by_pan:
@@ -383,7 +359,7 @@ def follow_up_to_session(
         typed = from_slack_text(
             inbox_thread, text, reply_mode, thread_known=inbox_thread_known(record)
         )
-    _deliver(terminal_host, terminal, typed, reporter=reporter, conversation=conversation)
+    deliver_when_ready(terminal_host, terminal, typed, reporter=reporter, conversation=conversation)
     if reply_mode is not record.reply_mode:
         thread_map.set_reply_mode(conversation, reply_mode, session_name=record.terminal_name)
         logger.info(f"reply mode set to {reply_mode} conversation={conversation.key}")
@@ -563,6 +539,16 @@ def check_thread(
     record = thread_map.get(conversation)
     if record is None or not record.tied:
         reporter.report(conversation, ThreadNotice(reason=ThreadNoticeReason.THREAD_NOT_TIED))
+        return
+    if record.awaiting_handoff:
+        # Nothing the project's orchestrator says belongs in the thread.
+        check_waiting_thread(
+            record=record,
+            terminal_host=terminal_host,
+            thread_map=thread_map,
+            reporter=reporter,
+            clock=clock,
+        )
         return
     record = _with_inbox_link(record, inbox_directory, thread_map)
     terminal = _live_terminal(terminal_host, record)

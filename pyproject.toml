@@ -53,10 +53,13 @@ explicit-preview-rules = true
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "slack_bolt".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
 "slack_sdk".msg = "Slack libraries belong in frontend/gateway only (see decisions/0001-layers.md)"
+"pan.backend.project_map".msg = "read the project map through the ProjectMapSource seam (see decisions/0004-project-routing.md)"
 
 [tool.ruff.lint.per-file-ignores]
 "src/pan/frontend/gateway/**" = ["TID251"]
 "tests/unit/test_gateway_app.py" = ["TID251"]
+# The built-in project map's own tests.
+"tests/unit/test_project_map.py" = ["TID251"]
 # pytest passes parametrized values to a test by name, so a boolean test parameter has no
 # positional call site.
 "tests/**" = ["FBT001"]

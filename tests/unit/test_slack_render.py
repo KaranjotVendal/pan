@@ -221,7 +221,7 @@ _THREAD_LINK = "https://example.slack.com/archives/C000TEST/p1700000000000100"
 
 
 def _session(**updates: object) -> SessionSummary:
-    # A standalone session, its own project's root, unless the updates say otherwise.
+    # A standalone session (in no project), unless the updates say otherwise.
     fields: dict[str, object] = {
         "address": "t12",
         "name": "pan-sizing",
@@ -231,8 +231,6 @@ def _session(**updates: object) -> SessionSummary:
         "role": SessionRole.STANDALONE,
         **updates,
     }
-    fields.setdefault("project_root", fields["address"])
-    fields.setdefault("project", fields["name"] or "solo")
     return SessionSummary.model_validate(fields)
 
 
@@ -465,9 +463,9 @@ def test_render_sessions_for_slack_lists_a_project_together_in_the_order_asked()
     # share a space label.
     sessions = [
         _billing("t48", "invoice-export", SessionRole.STREAM, branch="invoice-export"),
-        _session(address="t30", name="docs-site", project="docs"),
+        _session(address="t30", name="docs-site", where="docs / 1"),
         _billing("t7", None, SessionRole.ORCHESTRATOR, where="billing / 1", branch="main"),
-        _session(address="t31", name="docs-search", project="docs"),
+        _session(address="t31", name="docs-search", where="docs / 2"),
         _billing("t20", "refund-bug", SessionRole.STREAM),
     ]
 

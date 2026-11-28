@@ -13,6 +13,7 @@ from pan.core.models import (
     InboxThread,
     LaunchdJobState,
     PendingConfirmation,
+    ProjectMap,
     ReplyMode,
     Terminal,
     TerminalRead,
@@ -134,6 +135,17 @@ class ThreadMap(Protocol):
         session_name: str | None = None,
     ) -> None: ...
 
+    # Mark the thread's no-stream-picked notice as posted (or, with `nudged` False, clear the
+    # mark after a failed post), only while its record is tied and still waiting for its
+    # project's orchestrator (see ProjectHandoff); True when it changed.
+    def mark_handoff_nudged(
+        self, conversation: Conversation, *, session_name: str, nudged: bool = True
+    ) -> bool: ...
+
+    # Untie a thread waiting for a project's orchestrator that has ended and drop its handoff,
+    # only while it is still tied and waiting; True when it was.
+    def end_handoff_wait(self, conversation: Conversation, *, session_name: str) -> bool: ...
+
     def record_session(
         self,
         conversation: Conversation,
@@ -167,6 +179,17 @@ class TerminalHost(Protocol):
 
     # Kill then remove; a terminal that is already gone counts as removed.
     def remove(self, terminal: str) -> None: ...
+
+
+class ProjectMapSource(Protocol):
+    # Where pan gets its project map (config key `project_map`, see ProjectMapKind):
+    # backend.project_map.BuiltinProjectMapSource today. Routing, `pan sessions` and the Slack
+    # sessions list read the map only through this seam. `terminals` is the listing the
+    # caller works from (it still needs it for turns, statuses and delivery); a source that
+    # reads the host itself, such as one running herdrmap, may ignore it. The caller looks each
+    # terminal up by address, and one the map does not list counts as in no project. Read-only:
+    # a source never starts, sends to or changes a terminal.
+    def project_map(self, terminals: list[Terminal]) -> ProjectMap: ...
 
 
 class InboxDirectory(Protocol):

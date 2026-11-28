@@ -19,7 +19,7 @@ from watchdog.events import (
 from pan.backend.orchestrating_skill import SkillVersion, orchestrating_skill, wake_instruction
 from pan.core.errors import TargetBlockedError, TerminalGoneError, TerminalHostError
 from pan.data.adapters.hc import HcError
-from pan.frontend.watcher import WakeDebouncer, WatchdogInboxWatcher
+from pan.frontend.watcher import PeriodicSweep, WakeDebouncer, WatchdogInboxWatcher
 from pan.utils.config import WATCHER_DEBOUNCE_SECONDS
 
 
@@ -224,3 +224,62 @@ def test_inbox_event_handler_forwards_only_new_entries(
     handler.on_any_event(event)
 
     assert len(timer_factory.timers) == (1 if wakes else 0)
+
+
+def test_periodic_sweep_runs_its_action_every_interval_until_cancelled() -> None:
+    actions: list[bool] = []
+    timer_factory = FakeTimerFactory()
+    sweep = PeriodicSweep(lambda: actions.append(True), 15.0, timer_factory)
+
+    sweep.start()
+    timer_factory.timers[0].fire()
+    timer_factory.timers[1].fire()
+    sweep.cancel()
+
+    assert actions == [True, True]
+    assert all(timer.interval == 15.0 and timer.daemon for timer in timer_factory.timers)
+    assert timer_factory.timers[-1].cancelled
+    assert len(timer_factory.timers) == 3
+
+
+def test_periodic_sweep_keeps_running_after_a_failing_action() -> None:
+    calls: list[bool] = []
+
+    def failing() -> None:
+        calls.append(True)
+        raise RuntimeError("boom")
+
+    timer_factory = FakeTimerFactory()
+    sweep = PeriodicSweep(failing, 15.0, timer_factory)
+
+    sweep.start()
+    timer_factory.timers[0].fire()
+    timer_factory.timers[1].fire()
+
+    assert calls == [True, True]
+
+
+def test_start_runs_the_sweep_while_the_watcher_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The mocked Observer's join returns at once, as if the watcher stopped: the sweep was
+    # started on its own daemon timer and is cancelled with it.
+    monkeypatch.setattr("pan.frontend.watcher.Observer", Mock)
+    timer_factory = FakeTimerFactory()
+
+    WatchdogInboxWatcher(
+        FakeTerminalHost(),
+        "pan-orchestrator",
+        tmp_path / "inbox",
+        timer_factory=timer_factory,
+        sweep=lambda: None,
+        sweep_interval_seconds=15.0,
+    ).start()
+
+    (timer,) = timer_factory.timers
+    assert (timer.interval, timer.started, timer.daemon, timer.cancelled) == (
+        15.0,
+        True,
+        True,
+        True,
+    )

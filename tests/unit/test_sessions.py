@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from git_worktree_fakes import FakeGitWorktree
+from project_map_fakes import FakeProjectMapSource
 from reporter_fakes import RecordingReporter
 from terminal_host_fakes import FakeTerminalHost, make_terminal
 
@@ -21,10 +21,12 @@ from pan.core.events import SessionsListed
 from pan.core.models import (
     AgentStatus,
     Conversation,
+    ProjectMap,
     ReplyMode,
     RequestOrigin,
     SessionRole,
     SessionSummary,
+    Terminal,
     TerminalState,
     ThreadRecord,
     WorkerStatus,
@@ -67,9 +69,15 @@ def _terminal_host_with(*terminals: object) -> FakeTerminalHost:
 
 
 def _collect(
-    terminal_host: FakeTerminalHost, thread_map: FakeThreadMap, git: FakeGitWorktree | None = None
+    terminal_host: FakeTerminalHost,
+    thread_map: FakeThreadMap,
+    project_map_source: FakeProjectMapSource | None = None,
 ) -> list[SessionSummary]:
-    return collect_sessions(terminal_host, thread_map, git=git or FakeGitWorktree())
+    return collect_sessions(
+        terminal_host,
+        thread_map,
+        project_map_source=project_map_source or FakeProjectMapSource(),
+    )
 
 
 def _desk(record: ThreadRecord) -> ThreadRecord:
@@ -391,8 +399,6 @@ _LISTED_SESSIONS = [
         cwd=Path("/tmp/x"),
         agent_status=AgentStatus.IDLE,
         role=SessionRole.STANDALONE,
-        project="x",
-        project_root="t1",
     ),
 ]
 
@@ -425,102 +431,62 @@ def test_send_sessions_privately_raises_when_it_fails() -> None:
         _send_privately(reporter)
 
 
-def test_collect_sessions_places_each_session_in_its_project() -> None:
+def test_collect_sessions_places_each_session_by_the_project_map() -> None:
     terminal_host = _terminal_host_with(
         make_terminal("t7", where="billing / 1", cwd=Path("/work/billing")),
         make_terminal("t48", name="invoice-export", where="refunds / 2", parent="t7"),
         make_terminal("t30", name="docs-site"),
     )
+    project_map_source = FakeProjectMapSource(
+        projects=[("billing", ["t7", "t48"])],
+        branches={"t7": "main", "t48": "invoice-export"},
+        goals={"t48": "Export invoices as CSV."},
+    )
 
-    summaries = _collect(terminal_host, FakeThreadMap([]))
+    summaries = _collect(terminal_host, FakeThreadMap([]), project_map_source)
 
     assert [
-        (summary.address, summary.parent, summary.role, summary.project, summary.project_root)
+        (
+            summary.address,
+            summary.parent,
+            summary.role,
+            summary.project,
+            summary.project_root,
+            summary.branch,
+            summary.goal,
+        )
         for summary in summaries
     ] == [
-        ("t7", None, SessionRole.ORCHESTRATOR, "billing", "t7"),
-        ("t48", "t7", SessionRole.STREAM, "billing", "t7"),
-        ("t30", None, SessionRole.STANDALONE, "docs-site", "t30"),
+        ("t7", None, SessionRole.ORCHESTRATOR, "billing", "t7", "main", None),
+        (
+            "t48",
+            "t7",
+            SessionRole.STREAM,
+            "billing",
+            "t7",
+            "invoice-export",
+            "Export invoices as CSV.",
+        ),
+        ("t30", None, SessionRole.STANDALONE, None, None, None, None),
     ]
+    # One map per listing, built from the terminals the host listed.
+    assert project_map_source.listings == [terminal_host.list_terminals()]
 
 
-def test_collect_sessions_reads_the_branch_once_per_folder_of_live_local_agent_sessions() -> None:
-    shared = Path("/work/billing")
-    git = FakeGitWorktree(current_branches={shared: "main", Path("/work/docs"): "docs-v2"})
-    terminal_host = _terminal_host_with(
-        make_terminal("t7", cwd=shared),
-        make_terminal("t8", cwd=shared),
-        make_terminal("t9", cwd=Path("/work/docs")),
-        make_terminal("t10", cwd=Path("/work/scratch")),
-        make_terminal("box/t13", cwd=shared),
-        make_terminal("t11", cwd=Path("/work/app"), agent="node", agent_status=AgentStatus.NONE),
+def test_collect_sessions_counts_a_terminal_the_map_leaves_out_as_in_no_project() -> None:
+    class EmptyMapSource:
+        def project_map(self, terminals: list[Terminal]) -> ProjectMap:
+            return ProjectMap()
+
+    terminal_host = _terminal_host_with(make_terminal("t7", parent="t3"))
+
+    (summary,) = collect_sessions(
+        terminal_host, FakeThreadMap([]), project_map_source=EmptyMapSource()
     )
 
-    summaries = _collect(terminal_host, FakeThreadMap([]), git)
-
-    assert [summary.branch for summary in summaries] == [
-        "main",
-        "main",
-        "docs-v2",
+    assert (summary.parent, summary.role, summary.project, summary.project_root) == (
+        None,
+        SessionRole.STANDALONE,
         None,
         None,
-        None,
-    ]
-    assert git.calls == [
-        ("current_branch", shared),
-        ("current_branch", Path("/work/docs")),
-        ("current_branch", Path("/work/scratch")),
-    ]
-
-
-def _write_workset(folder: Path, stream: str, goal: str) -> None:
-    workset = folder / "docs" / "streams" / stream / "workset.md"
-    workset.parent.mkdir(parents=True)
-    workset.write_text(f"# Stream\n\n## Goal\n{goal}\n")
-
-
-@pytest.mark.parametrize(
-    "workset_under, stream_address, expected",
-    [
-        ("root", "t48", "Export invoices as CSV."),
-        ("own", "t48", "Export invoices as CSV."),
-        ("own", "box/t48", None),
-        (None, "t48", None),
-    ],
-    ids=["under-the-orchestrator", "under-its-own-folder", "own-folder-on-another-machine", "none"],
-)
-def test_collect_sessions_finds_the_stream_workset_goal(
-    tmp_path: Path, workset_under: str | None, stream_address: str, expected: str | None
-) -> None:
-    root_folder = tmp_path / "billing"
-    own_folder = tmp_path / "billing-wt"
-    if workset_under is not None:
-        folder = root_folder if workset_under == "root" else own_folder
-        _write_workset(folder, "invoice-export", "Export invoices as CSV.")
-    terminal_host = _terminal_host_with(
-        make_terminal("t7", cwd=root_folder),
-        make_terminal(stream_address, name="stream-invoice-export", cwd=own_folder, parent="t7"),
     )
-
-    _orchestrator, stream = _collect(terminal_host, FakeThreadMap([]))
-
-    assert stream.workset_goal == expected
-
-
-def test_collect_sessions_looks_up_a_workset_goal_only_for_streams(tmp_path: Path) -> None:
-    folder = tmp_path / "billing"
-    _write_workset(folder, "billing-lead", "Not a stream's goal.")
-    _write_workset(folder, "docs-site", "Not a stream's goal.")
-    terminal_host = _terminal_host_with(
-        make_terminal("t7", name="billing-lead", cwd=folder),
-        make_terminal("t8", name="helper", cwd=folder, parent="t7"),
-        make_terminal("t30", name="docs-site", cwd=folder),
-    )
-
-    summaries = _collect(terminal_host, FakeThreadMap([]))
-
-    assert [(summary.role, summary.workset_goal) for summary in summaries] == [
-        (SessionRole.ORCHESTRATOR, None),
-        (SessionRole.STREAM, None),
-        (SessionRole.STANDALONE, None),
-    ]

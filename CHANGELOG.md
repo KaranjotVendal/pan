@@ -9,20 +9,60 @@ as it works.
 
 ### Added
 
+- Project routing (decisions/0004-project-routing.md). `pan send --project <project>` hands a
+  task to the orchestrator of the project the person named exactly (its label, or its
+  orchestrator's exact address or name, in their message, else exit 28): pan types the task, the
+  thread's link and a filled-in `pan handoff --thread <ts> --channel <id> --to <stream>` into it
+  (`backend/project_routing.py`), and ties the thread to the project in an awaiting-handoff state
+  (`ThreadRecord.handoff`, `ProjectHandoff`). While it waits, the status message says "Handed to
+  <project>", `check` only refreshes it, the orchestrator's own words never reach the thread, a
+  follow-up goes to the orchestrator again, and the drain's `tie` carries `project` and
+  `awaiting_handoff`. The orchestrator is told to pick, not do: the new `pan handoff --to <stream>
+  [--note <text>]` (`backend/handoff.py`) types the task (kept on the waiting record as
+  `ProjectHandoff.task`, with any follow-ups), the note and the thread's link into the stream
+  through `send_to_session`, with the same "from Slack" line and busy and prompt refusals as `pan
+  send --to`, and ties the thread to it ("Handed to <stream> in <project>"); handed to the
+  orchestrator itself it types nothing. It exits 37 (not waiting), 38 (no
+  live agent session of that name) or 39 (a session outside the project). The watcher checks
+  waiting threads every 15 seconds (`HANDOFF_SWEEP_SECONDS`, `PeriodicSweep`) and, when the
+  orchestrator's turn ended with no handoff, posts once: "No stream picked yet. Name one with
+  `@pan to <stream>`." An inexact project name is proposed first: `pan propose
+  --project-candidate <orchestrator address>` asks "Send this to the <project> project?", and
+  `pan confirm` hands the task over. Exact session selectors (`to t48`, a terminal name) and
+  sessions in no project are routed directly, as before. The readiness check and typing step
+  moved from `session_control` to `backend/delivery.py`, shared by both paths. `pan handoff`
+  matches only an exact address or terminal name, accepts the orchestrator itself even after
+  its last stream ended, and with `--item` counts only the requester's message. When the
+  orchestrator has ended, the next follow-up, `check` or watcher check unties the waiting thread,
+  marks its status Stopped and posts once "The <project> orchestrator has ended. ..."
+  (`SessionNoticeReason.PROJECT_ORCHESTRATOR_ENDED`). The Stop and Notification hooks skip a
+  thread waiting for a handoff; handing a thread to an orchestrator it already has a record of
+  keeps that record's fields; a failed "No stream picked yet" post is retried by the next
+  check; the Slack link is looked up only once a project is found.
+
+- A project map plug point: routing, `pan sessions` (`collect_sessions`) and the Slack sessions
+  list read the map only through the new `ProjectMapSource` seam (`core/seams.py`), whose models
+  (`ProjectMap`, `MappedProject`, `MappedSession`) use herdrmap's JSON field names. The config key
+  `project_map` (default `"builtin"`, `ProjectMapKind`) picks the source in one registry
+  (`backend/project_map_sources.py`); `frontend/wiring.py` builds it and the CLI injects it. The
+  built-in map (`BuiltinProjectMapSource` in `backend/project_map.py`) now also reads branches and
+  workset goals, and ruff bans importing that module anywhere but the registry and its own tests.
+  `utils.config` validates `terminal_host` and `project_map` the same way.
 - A project map: `pan sessions --json` gives each session its live `parent`, a `role`
   (orchestrator, stream or standalone, from hc's parent links, not Herdr spaces), its `project`
-  and `project_root` (the root of its parent chain), its folder's `branch` and, for a stream
-  with a `docs/streams/<stream>/workset.md`, its `workset_goal`. Only agent sessions (a status,
-  or a known agent program: `project_map.is_agent_session`, also used by the Slack list) take
+  and `project_root` (its project's label and orchestrator address, both null for a session in
+  no project), its folder's `branch` and, for a stream with a `docs/streams/<stream>/workset.md`,
+  its `goal`. Only agent sessions (a status,
+  or a known agent program: `delivery.is_agent_session`, also used by the Slack list) take
   part: a shell or dev server is never a stream and never makes its parent an orchestrator. A
   parent that is gone, finished or not an agent session counts as none; a remote terminal's
   bare parent address means its own machine's terminal when one exists, else the local one; a
   parent cycle is cut at its lowest terminal number. The private "what's running" list keeps
   the requester's order, lists a project's sessions together (indented, under a heading)
   where its first one was, leaves standalone sessions without a heading, and shows each
-  branch. Built in `backend/project_map.py` (pure), `data/workset.py` and the new read-only
+  branch. Built in `backend/project_map.py`, `data/workset.py` and the new read-only
   `GitWorktreeAdapter.current_branch` (live agent sessions only, 3s timeout);
-  `collect_sessions` now takes `git`.
+  `collect_sessions` now takes `project_map_source`.
 
 ### Changed
 
@@ -204,6 +244,12 @@ as it works.
 
 ### Fixed
 
+- The thread map (`FileThreadMap`) holds an advisory `flock` on `threads.json.lock` around every
+  read-modify-write, so the watcher and a `pan` command can no longer overwrite each other's
+  change; writes still replace the file atomically.
+- `pan send --to` edits the thread's existing status message (taken from the thread's current
+  record) instead of posting a second one when the session has no record in the thread, and
+  untying a thread waiting for a handoff ends the wait.
 - The gateway forwarded every human thread reply without an `@pan` mention, in any channel the
   bot is in, so a reply in an unrelated thread started a new session there. A reply without a
   mention is now forwarded only from an allowed sender in a thread pan is already working in: one

@@ -28,8 +28,10 @@ from pan.backend.gates import (
     require_named_target,
     require_requesters_message,
 )
+from pan.backend.handoff import handoff_thread
 from pan.backend.interface import read_session, relay_to_session
 from pan.backend.lifecycle import bring_up
+from pan.backend.project_routing import hand_to_project, nudge_unhanded_threads
 from pan.backend.service import (
     install_services,
     resolve_pan_binary,
@@ -56,8 +58,10 @@ from pan.core.errors import (
     CredentialsError,
     DiscardNotRequestedError,
     GitWorktreeError,
+    HandoffTargetNotFoundError,
     InboxError,
     NoExactMatchError,
+    NotAwaitingHandoffError,
     NotPanSessionError,
     PanError,
     PrivateMessageError,
@@ -67,6 +71,7 @@ from pan.core.errors import (
     SpawnError,
     TargetAmbiguousError,
     TargetBlockedError,
+    TargetInOtherProjectError,
     TargetNotFoundError,
     TerminalGoneError,
     TerminalHostError,
@@ -147,6 +152,9 @@ _EXIT_CODES: dict[type[PanError], int] = {
     UnansweredQuestionError: 34,
     XSourceRefusedError: 35,
     BriefUnavailableError: 36,
+    NotAwaitingHandoffError: 37,
+    HandoffTargetNotFoundError: 38,
+    TargetInOtherProjectError: 39,
 }
 
 
@@ -168,10 +176,24 @@ def gateway() -> None:
 
 @app.command()
 def watcher() -> None:
-    """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised)."""
+    """Run the inbox watcher that nudges the orchestrator (blocking; launchd-supervised). It
+    also checks, every few seconds, threads handed to a project whose orchestrator ended its
+    turn without picking a stream, and says so once in each."""
     wiring = load_wiring()
+
+    def nudge_unhanded() -> None:
+        nudge_unhanded_threads(
+            thread_map=wiring.thread_map,
+            terminal_host=wiring.terminal_host,
+            open_reporter=lambda: wiring.reporter,
+            clock=wiring.clock,
+        )
+
     WatchdogInboxWatcher(
-        wiring.terminal_host, wiring.config.orchestrator.terminal, wiring.config.paths.inbox
+        wiring.terminal_host,
+        wiring.config.orchestrator.terminal,
+        wiring.config.paths.inbox,
+        sweep=nudge_unhanded,
     ).start()
 
 
@@ -558,7 +580,9 @@ def sessions(
     was), each with its state, branch and a link to its thread.
     Exit 32: the private message failed."""
     wiring = load_wiring()
-    summaries = collect_sessions(wiring.terminal_host, wiring.thread_map, git=wiring.git)
+    summaries = collect_sessions(
+        wiring.terminal_host, wiring.thread_map, project_map_source=wiring.project_map_source
+    )
     if as_json:
         typer.echo(json.dumps([summary.model_dump(mode="json") for summary in summaries]))
         return
@@ -684,10 +708,20 @@ def send(
             "send to the tied session"
         ),
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help=(
+            "a project's label (or its orchestrator's exact address or name): hand the task to "
+            "that project's orchestrator, which picks the stream"
+        ),
+    ),
     task: str = typer.Option(..., "--task"),
     requester: str | None = typer.Option(None, "--requester", help="the sender's Slack user id"),
     item: str | None = typer.Option(
-        None, "--item", help="the inbox item id (item.id) of the person's message; needed with --to"
+        None,
+        "--item",
+        help="the inbox item id (item.id) of the person's message; needed with --to or --project",
     ),
     reply_in_slack: bool = typer.Option(  # noqa: FBT001 - Typer, not a caller, passes CLI flags
         False, "--reply-in-slack", help="post the answer in Slack at every turn end"
@@ -702,10 +736,20 @@ def send(
     answers in Slack (never back). A busy or blocked session gets a short reply and
     nothing is typed; a session pan did not start gets one line on top saying the text came
     from Slack and which Inbox thread to use. A thread from X exits 35: X may only start new
-    sessions."""
+    sessions. --project instead hands the task to a project's orchestrator, with the same
+    checks (the project's label, or its orchestrator's exact address or name, in the person's
+    message; else exit 28): the thread waits for it to run pan handoff, and nothing it says
+    reaches the thread until then. A follow-up while it waits goes to it again."""
+    if to is not None and project is not None:
+        raise typer.BadParameter("pass at most one of --to or --project")
     wiring = load_wiring()
     conversation = Conversation.slack(thread, channel)
     refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
+    if project is not None:
+        _hand_to_named_project(
+            wiring, conversation, project, task, requester, item, reply_in_slack=reply_in_slack
+        )
+        return
     if to is None:
         follow_up_to_session(
             conversation=conversation,
@@ -740,6 +784,97 @@ def send(
     )
 
 
+def _thread_link(wiring: Wiring, conversation: Conversation) -> str | None:
+    return wiring.slack.permalink(conversation.slack_channel(), conversation.id)
+
+
+def _hand_to_named_project(
+    wiring: Wiring,
+    conversation: Conversation,
+    project: str,
+    task: str,
+    requester: str | None,
+    item: str | None,
+    *,
+    reply_in_slack: bool,
+) -> None:
+    named_in = require_named_target(
+        newest_drained_item(wiring.drained_log, item, conversation),
+        action="send",
+        item_id=item,
+        target=project,
+        requester=requester,
+        conversation=conversation,
+        open_reporter=lambda: wiring.reporter,
+    )
+    hand_to_project(
+        conversation=conversation,
+        selector=project,
+        text=task,
+        requester=named_in.author,
+        reply_in_slack=reply_in_slack,
+        thread_link=lambda: _thread_link(wiring, conversation),
+        terminal_host=wiring.terminal_host,
+        thread_map=wiring.thread_map,
+        reporter=wiring.reporter,
+        clock=wiring.clock,
+        project_map_source=wiring.project_map_source,
+    )
+
+
+@app.command()
+def handoff(
+    thread: str = typer.Option(..., "--thread"),
+    channel: str = typer.Option(..., "--channel"),
+    to: str = typer.Option(
+        ..., "--to", help="the stream (or the orchestrator itself): its exact address or name"
+    ),
+    item: str | None = typer.Option(
+        None,
+        "--item",
+        help="when the person named the stream: the inbox item id of their message",
+    ),
+    note: str | None = typer.Option(
+        None, "--note", help="the orchestrator's own instructions, typed after the task"
+    ),
+) -> None:
+    """Pass a thread handed to a project to the session its orchestrator picked: type the
+    task (then --note, then the thread's link) into it under the usual "from Slack" line, as
+    pan send --to does, and tie the thread to it; its status message says where the work went.
+    Handed to the orchestrator itself, nothing is typed. Exit 37: the thread is not waiting for
+    a handoff. Exit 38: no live agent session has that exact address or terminal name. Exit 39:
+    that session is in another project or in none. Exit 26 or 23: the session is busy or waiting
+    on a prompt; pan replied and the thread keeps waiting. With --item, the name must be in the
+    message of the person who asked for the work, their newest in the thread (else exit 28)."""
+    wiring = load_wiring()
+    conversation = Conversation.slack(thread, channel)
+    if item is not None:
+        refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
+        waiting = wiring.thread_map.get(conversation)
+        require_named_target(
+            newest_drained_item(wiring.drained_log, item, conversation),
+            action="handoff",
+            item_id=item,
+            target=to,
+            # Only the person who asked for the work may pick its stream.
+            requester=waiting.requester if waiting is not None else None,
+            conversation=conversation,
+            open_reporter=lambda: wiring.reporter,
+        )
+    record = handoff_thread(
+        conversation=conversation,
+        selector=to,
+        terminal_host=wiring.terminal_host,
+        thread_map=wiring.thread_map,
+        inbox_directory=wiring.inbox_directory,
+        reporter=wiring.reporter,
+        clock=wiring.clock,
+        project_map_source=wiring.project_map_source,
+        note=note,
+    )
+    typer.echo(f"handed thread {thread} to {record.terminal_name}")
+
+
 @app.command()
 def propose(
     thread: str = typer.Option(..., "--thread"),
@@ -750,6 +885,14 @@ def propose(
         [],
         "--candidate",
         help="a proposed session's terminal address; repeat for up to 3, most likely first",
+    ),
+    project_candidate: list[str] = typer.Option(
+        [],
+        "--project-candidate",
+        help=(
+            "a proposed project, by its orchestrator's terminal address; repeat for up to 3, "
+            "most likely first; confirming one hands the task to that project"
+        ),
     ),
     requester: str = typer.Option(
         ..., "--requester", help="the sender's Slack user id; only their reply answers"
@@ -766,7 +909,11 @@ def propose(
     1-3 from. Nothing is typed into any session until the requester replies. Candidates that
     are not live terminal addresses are dropped; with none left it says no session matches.
     --item must be --requester's newest message pan drained in this thread; otherwise nothing
-    is asked, a one-line reply asks to send the request again, and it exits 28. A thread from X exits 35: X may only start new sessions."""
+    is asked, a one-line reply asks to send the request again, and it exits 28. A thread from X exits 35: X may only start new sessions.
+    --project-candidate proposes projects instead of sessions (after pan send --project exited
+    28): "Send this to the <project> project? Reply yes."."""
+    if candidate and project_candidate:
+        raise typer.BadParameter("pass --candidate or --project-candidate, not both")
     wiring = load_wiring()
     conversation = Conversation.slack(thread, channel)
     refuse_x_source(wiring.thread_map, wiring.drained_log, item, thread)
@@ -783,10 +930,12 @@ def propose(
         requester=requester,
         reply_in_slack=reply_in_slack,
         candidate_addresses=candidate,
+        project_addresses=project_candidate,
         terminal_host=wiring.terminal_host,
         confirmations=wiring.confirmations,
         reporter=wiring.reporter,
         clock=wiring.clock,
+        project_map_source=wiring.project_map_source,
     )
 
 
@@ -818,15 +967,18 @@ def confirm(
             reporter=wiring.reporter,
         )
         return
+    conversation = Conversation.slack(thread, channel)
     confirm_session(
-        conversation=Conversation.slack(thread, channel),
+        conversation=conversation,
         choice=normalized_choice,
+        thread_link=lambda: _thread_link(wiring, conversation),
         terminal_host=wiring.terminal_host,
         thread_map=wiring.thread_map,
         inbox_directory=wiring.inbox_directory,
         confirmations=wiring.confirmations,
         reporter=wiring.reporter,
         clock=wiring.clock,
+        project_map_source=wiring.project_map_source,
     )
 
 

@@ -42,6 +42,11 @@ def stop_hook(
     record = thread_map.get(conversation, session_name=session_name)
     if record is None:
         raise ThreadNotFoundError(f"no thread record for thread_ts={conversation.id}")
+    if record.awaiting_handoff:
+        # The thread waits for this orchestrator to pick a stream: its turns are its own, and
+        # nothing it says reaches the thread (decisions/0004-project-routing.md).
+        logger.info(f"stop hook skipped, thread awaits a handoff conversation={conversation.key}")
+        return
 
     thread_map.update_status(conversation, WorkerStatus.IDLE, session_name=record.terminal_name)
     if record.tied:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,10 @@ from pan.core.errors import (
     CredentialsError,
     DiscardNotRequestedError,
     GitWorktreeError,
+    HandoffTargetNotFoundError,
     InboxError,
     NoExactMatchError,
+    NotAwaitingHandoffError,
     NotPanSessionError,
     PanError,
     PrivateMessageError,
@@ -37,6 +40,7 @@ from pan.core.errors import (
     SpawnError,
     TargetAmbiguousError,
     TargetBlockedError,
+    TargetInOtherProjectError,
     TargetNotFoundError,
     TerminalGoneError,
     TerminalHostError,
@@ -58,6 +62,8 @@ from pan.core.models import (
     LaunchdJobState,
     PanConfig,
     PendingConfirmation,
+    ProjectHandoff,
+    ProjectMapKind,
     ReplyMode,
     RequestOrigin,
     SessionRole,
@@ -72,7 +78,11 @@ from pan.data.adapters.hc import HcError, ShellHcAdapter
 from pan.data.drained import FileDrainedLog, drained_log_path
 from pan.data.inbox import FileInboxStore
 from pan.data.threadmap import FileThreadMap
-from pan.frontend.slack_render import NOT_SENT_REPLY, UNUSABLE_ITEM_REPLY
+from pan.frontend.slack_render import (
+    NO_STREAM_PICKED_REPLY,
+    NOT_SENT_REPLY,
+    UNUSABLE_ITEM_REPLY,
+)
 from pan.utils.clock import SystemClock
 
 runner = CliRunner()
@@ -224,6 +234,8 @@ def test_inbox_drain_names_the_tied_session(
             "this thread's work belongs to pan-task (idle); send follow-ups there; "
             "never start a second session for the same work"
         ),
+        "project": None,
+        "awaiting_handoff": False,
     }
 
 
@@ -448,13 +460,34 @@ def test_watcher_builds_from_config_and_starts(
 ) -> None:
     config = _make_config(tmp_path)
     monkeypatch.setattr(wiring, "load_config", lambda: config)
-    terminal_host_sentinel = object()
-    monkeypatch.setattr(wiring, "build_terminal_host", lambda kind: terminal_host_sentinel)
+    terminal_host = _use_terminal_host(
+        monkeypatch, _terminal_host_with(make_terminal("t40", name="pan-task", turn=1))
+    )
+    slack = _use_slack(monkeypatch)
+    # A thread handed to a project whose orchestrator has since ended its turn without a
+    # handoff: the sweep's business.
+    FileThreadMap(config.paths.threads, SystemClock()).tie(
+        _record(_GATE_THREAD, terminal_address="t40").model_copy(
+            update={
+                "conversation": Conversation.slack(_GATE_THREAD, "C000TEST"),
+                "started_by_pan": False,
+                "handoff": ProjectHandoff(project="atlas", project_root="t40", orchestrator_turn=0),
+            }
+        )
+    )
     captured: dict[str, Any] = {}
 
     class FakeWatcher:
-        def __init__(self, terminal_host: Any, orchestrator_terminal: str, inbox_dir: Path) -> None:
+        def __init__(
+            self,
+            terminal_host: Any,
+            orchestrator_terminal: str,
+            inbox_dir: Path,
+            *,
+            sweep: Callable[[], None],
+        ) -> None:
             captured["args"] = (terminal_host, orchestrator_terminal, inbox_dir)
+            captured["sweep"] = sweep
 
         def start(self) -> None:
             captured["started"] = True
@@ -465,8 +498,12 @@ def test_watcher_builds_from_config_and_starts(
 
     assert result.exit_code == 0
     # Built from config: the hc adapter, the orchestrator terminal name, the inbox dir.
-    assert captured["args"] == (terminal_host_sentinel, "pan-orchestrator", config.paths.inbox)
+    assert captured["args"] == (terminal_host, "pan-orchestrator", config.paths.inbox)
     assert captured["started"] is True
+    # Its sweep says, once, that no stream was picked.
+    captured["sweep"]()
+    captured["sweep"]()
+    assert slack.posts == [("C000TEST", _GATE_THREAD, NO_STREAM_PICKED_REPLY)]
 
 
 def test_config_show_masks_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -546,15 +583,15 @@ def _summary(*, is_pan_owned: bool = True, drift: bool = False) -> SessionSummar
         is_pan_owned=is_pan_owned,
         drift=drift,
         role=SessionRole.STANDALONE,
-        project="pan-a" if is_pan_owned else "my-app",
-        project_root="t12",
     )
 
 
 def test_sessions_json_emits_summary_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary(drift=True)]
+        cli,
+        "collect_sessions",
+        lambda terminal_host, thread_map, project_map_source: [_summary(drift=True)],
     )
 
     result = runner.invoke(cli.app, ["sessions", "--json"])
@@ -574,7 +611,10 @@ def test_sessions_human_table_renders(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda terminal_host, thread_map, git: [_summary(drift=True), _summary(is_pan_owned=False)],
+        lambda terminal_host, thread_map, project_map_source: [
+            _summary(drift=True),
+            _summary(is_pan_owned=False),
+        ],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
@@ -603,7 +643,10 @@ def test_sessions_table_shows_the_inbox_thread_under_its_session(
     monkeypatch.setattr(
         cli,
         "collect_sessions",
-        lambda terminal_host, thread_map, git: [with_thread, _summary(is_pan_owned=False)],
+        lambda terminal_host, thread_map, project_map_source: [
+            with_thread,
+            _summary(is_pan_owned=False),
+        ],
     )
 
     result = runner.invoke(cli.app, ["sessions"])
@@ -926,6 +969,9 @@ def _terminal_host_with(*terminals: Any) -> FakeTerminalHost:
         (UnansweredQuestionError("x"), 34),
         (XSourceRefusedError("x"), 35),
         (BriefUnavailableError("x"), 36),
+        (NotAwaitingHandoffError("x"), 37),
+        (HandoffTargetNotFoundError("x"), 38),
+        (TargetInOtherProjectError("x"), 39),
         (PanError("x"), 1),
     ],
 )
@@ -1252,8 +1298,6 @@ def _threaded(
             "thread_ts": thread_ts,
             "thread_channel": "C000TEST",
             "updated_at": datetime(2026, 7, 16, 10, 0, tzinfo=UTC) - timedelta(minutes=minutes_ago),
-            "project": name,
-            "project_root": f"t-{name}",
         }
     )
 
@@ -1297,7 +1341,9 @@ def test_sessions_show_sends_the_chosen_sessions_to_the_requester_only(
         _threaded("pan-ocr", AgentStatus.BLOCKED, "1700000000.000200"),
         _threaded("pan-orchestrator", AgentStatus.BLOCKED, "1700000000.000400"),
     ]
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: summaries)
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map, project_map_source: summaries
+    )
     slack = _use_slack(monkeypatch)
     slack.permalinks["1700000000.000200"] = "https://example.slack.com/p2"
 
@@ -1313,7 +1359,9 @@ def test_sessions_show_with_nothing_running_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _use_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: [])
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map, project_map_source: []
+    )
     slack = _use_slack(monkeypatch)
 
     result = runner.invoke(cli.app, [*_SESSIONS_FOR_REQUESTER, "--show", ""])
@@ -1329,7 +1377,7 @@ def test_sessions_posts_nothing_publicly_when_the_private_list_fails(
 ) -> None:
     _use_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary()]
+        cli, "collect_sessions", lambda terminal_host, thread_map, project_map_source: [_summary()]
     )
     slack = _use_slack(monkeypatch)
     slack.ephemeral_error = SlackPostError("not delivered")
@@ -1365,7 +1413,7 @@ def test_sessions_rejects_incomplete_slack_options(
 ) -> None:
     _use_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cli, "collect_sessions", lambda terminal_host, thread_map, git: [_summary()]
+        cli, "collect_sessions", lambda terminal_host, thread_map, project_map_source: [_summary()]
     )
     slack = _use_slack(monkeypatch)
 
@@ -1398,7 +1446,9 @@ def test_sessions_fetches_links_only_for_the_sessions_shown_and_each_thread_once
             for index in range(3, 9)
         ],
     ]
-    monkeypatch.setattr(cli, "collect_sessions", lambda terminal_host, thread_map, git: summaries)
+    monkeypatch.setattr(
+        cli, "collect_sessions", lambda terminal_host, thread_map, project_map_source: summaries
+    )
     slack = _CountingSlack()
     monkeypatch.setattr(wiring, "build_slack_adapter", lambda config, clock: slack)
 
@@ -2167,3 +2217,200 @@ def test_service_install_failure_maps_to_service_exit_code(
 ) -> None:
     service_manager.fail_bootstrap_for = "com.pan.gateway"
     assert _main_exit_code(monkeypatch, ["service", "install"]) == 27
+
+
+def _use_project_host(monkeypatch: pytest.MonkeyPatch) -> FakeTerminalHost:
+    # The configured (built-in) project map over _project_host, reading branches from a fake.
+    monkeypatch.setattr(wiring, "ShellGitWorktreeAdapter", FakeGitWorktree)
+    return _use_terminal_host(monkeypatch, _project_host())
+
+
+def _project_host() -> FakeTerminalHost:
+    # The atlas project: orchestrator t40 with a stream t41; and borealis: t50 with t51.
+    return _terminal_host_with(
+        make_terminal("t40", name="atlas-orch", where="atlas / 1", cwd=Path("/tmp/a"), turn=2),
+        make_terminal("t41", name="stream-login", parent="t40", cwd=Path("/tmp/a-login")),
+        make_terminal("t50", name="borealis-orch", where="borealis / 1", cwd=Path("/tmp/b")),
+        make_terminal("t51", name="stream-api", parent="t50", cwd=Path("/tmp/b-api")),
+    )
+
+
+_SEND_TO_PROJECT = [
+    "send",
+    "--thread",
+    _GATE_THREAD,
+    "--channel",
+    "C000TEST",
+    "--project",
+    "atlas",
+    "--task",
+    "fix the login page",
+    "--requester",
+    "U000TEST",
+    "--item",
+    "Ev1",
+]
+
+
+@pytest.mark.parametrize(
+    "drained_text, expected_exit, expected_sent",
+    [
+        ("<@U000BOT> atlas: fix the login page", 0, ["t40"]),
+        ("<@U000BOT> atlass: fix the login page", 28, []),
+    ],
+    ids=["named-verbatim", "inexact"],
+)
+def test_send_to_project_hands_only_a_project_the_person_named(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    drained_text: str,
+    expected_exit: int,
+    expected_sent: list[str],
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _drained(config, drained_text)
+    terminal_host = _use_project_host(monkeypatch)
+    slack = _use_slack(monkeypatch)
+    slack.permalinks[_GATE_THREAD] = "https://example.slack.com/archives/C000TEST/p1"
+
+    assert _main_exit_code(monkeypatch, _SEND_TO_PROJECT) == expected_exit
+
+    assert [address for address, _text in terminal_host.sent] == expected_sent
+    if expected_sent:
+        (_address, typed) = terminal_host.sent[0]
+        assert "Slack thread: https://example.slack.com/archives/C000TEST/p1" in typed
+        assert f"pan handoff --thread {_GATE_THREAD} --channel C000TEST --to <stream>" in typed
+    else:
+        assert slack.status_posts == []
+
+
+def _hand_gate_thread_to_atlas(config: PanConfig) -> None:
+    _tie_gate_thread(
+        config,
+        terminal_name="atlas-orch",
+        terminal_address="t40",
+        started_by_pan=False,
+        handoff=ProjectHandoff(project="atlas", project_root="t40"),
+    )
+
+
+_HANDOFF = ["handoff", "--thread", _GATE_THREAD, "--channel", "C000TEST", "--to"]
+
+
+@pytest.mark.parametrize(
+    "target, handed, expected_exit",
+    [
+        ("stream-login", True, 0),
+        ("stream-login", False, 37),
+        ("t99", True, 38),
+        ("stream-api", True, 39),
+    ],
+    ids=["handed", "not-awaiting", "not-found", "other-project"],
+)
+def test_handoff_command_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str, handed: bool, expected_exit: int
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    if handed:
+        _hand_gate_thread_to_atlas(config)
+    else:
+        _tie_gate_thread(config)
+    _use_project_host(monkeypatch)
+    _use_slack(monkeypatch)
+
+    assert _main_exit_code(monkeypatch, [*_HANDOFF, target]) == expected_exit
+
+    record = FileThreadMap(config.paths.threads, SystemClock()).get(
+        Conversation.slack(_GATE_THREAD)
+    )
+    assert record is not None
+    assert (record.terminal_name == "stream-login") is (expected_exit == 0)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [*_SEND_TO_PROJECT, "--to", "pan-7"],
+        [*_PROPOSE, "--item", "Ev1", "--candidate", "t41", "--project-candidate", "t40"],
+    ],
+    ids=["send-to-and-project", "propose-both-kinds"],
+)
+def test_project_options_do_not_mix_with_session_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str]
+) -> None:
+    _use_config(monkeypatch, tmp_path)
+    terminal_host = _use_project_host(monkeypatch)
+
+    result = runner.invoke(cli.app, arguments)
+
+    assert result.exit_code != 0
+    assert terminal_host.sent == []
+
+
+def test_the_default_config_reads_the_built_in_project_map(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    git = FakeGitWorktree(current_branches={Path("/tmp/a"): "main"})
+    monkeypatch.setattr(wiring, "ShellGitWorktreeAdapter", lambda: git)
+    terminals = _project_host().list_terminals()
+
+    project_map = wiring.load_wiring().project_map_source.project_map(terminals)
+
+    assert config.project_map is ProjectMapKind.BUILTIN
+    assert [(project.label, project.root) for project in project_map.projects] == [
+        ("atlas", "t40"),
+        ("borealis", "t50"),
+    ]
+    assert project_map.projects[0].sessions[0].branch == "main"
+
+
+@pytest.mark.parametrize(
+    "author, expected_exit",
+    [("U000TEST", 0), ("U000OTHER", 28)],
+    ids=["the-requester", "someone-else"],
+)
+def test_handoff_item_counts_only_from_the_person_who_asked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, author: str, expected_exit: int
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _hand_gate_thread_to_atlas(config)
+    _drained(config, "<@U000BOT> to stream-login", author=author)
+    _use_project_host(monkeypatch)
+    _use_slack(monkeypatch)
+
+    assert _main_exit_code(monkeypatch, [*_HANDOFF, "stream-login", "--item", "Ev1"]) == (
+        expected_exit
+    )
+
+    record = FileThreadMap(config.paths.threads, SystemClock()).get(
+        Conversation.slack(_GATE_THREAD)
+    )
+    assert record is not None
+    assert record.awaiting_handoff is (expected_exit != 0)
+
+
+def test_handoff_types_the_task_and_the_note_into_the_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _use_config(monkeypatch, tmp_path)
+    _tie_gate_thread(
+        config,
+        terminal_name="atlas-orch",
+        terminal_address="t40",
+        started_by_pan=False,
+        handoff=ProjectHandoff(project="atlas", project_root="t40", task="fix the login page"),
+    )
+    terminal_host = _use_project_host(monkeypatch)
+    _use_slack(monkeypatch)
+
+    exit_code = _main_exit_code(
+        monkeypatch, [*_HANDOFF, "stream-login", "--note", "use the staging database"]
+    )
+
+    assert exit_code == 0
+    ((address, typed),) = terminal_host.sent
+    assert address == "t41"
+    assert typed.endswith(
+        "fix the login page\n\nFrom the atlas orchestrator: use the staging database"
+    )

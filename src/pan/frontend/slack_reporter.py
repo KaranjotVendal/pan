@@ -88,6 +88,8 @@ class SlackReporter:
             now=status.updated_at,
             replies_in_thread=status.replies_in_thread,
             detail=status.detail,
+            project=status.project,
+            awaiting_handoff=status.awaiting_handoff,
         )
         fallback_text = status_text(status.state, status.label)
         if status.status_message_id:
